@@ -9,6 +9,10 @@ if %ERRORLEVEL% NEQ 0 (
 
 REM Create userConfig.json from example if it doesn't exist
 if not exist userConfig.json (
+    REM Restore example from git if deleted
+    if not exist userConfig.example.json (
+        git checkout userConfig.example.json >nul 2>&1
+    )
     if exist userConfig.example.json (
         echo Creating userConfig.json from example...
         copy userConfig.example.json userConfig.json >nul
