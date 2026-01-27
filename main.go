@@ -7,6 +7,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"pc-agent/internal/commands"
 	"pc-agent/internal/config"
@@ -19,6 +20,29 @@ import (
 
 const serviceName = "PCAgentService"
 
+var (
+	kernel32        = syscall.NewLazyDLL("kernel32.dll")
+	createMutexW    = kernel32.NewProc("CreateMutexW")
+	getLastError    = kernel32.NewProc("GetLastError")
+)
+
+const ERROR_ALREADY_EXISTS = 183
+
+// ensureSingleInstance creates a named mutex to prevent multiple instances
+func ensureSingleInstance() (syscall.Handle, error) {
+	name, _ := syscall.UTF16PtrFromString("Global\\PCAgentSingleInstance")
+	handle, _, _ := createMutexW.Call(0, 0, uintptr(unsafe.Pointer(name)))
+	if handle == 0 {
+		return 0, syscall.GetLastError()
+	}
+	lastErr, _, _ := getLastError.Call()
+	if lastErr == ERROR_ALREADY_EXISTS {
+		syscall.CloseHandle(syscall.Handle(handle))
+		return 0, syscall.Errno(ERROR_ALREADY_EXISTS)
+	}
+	return syscall.Handle(handle), nil
+}
+
 type pcAgentService struct {
 	mqttClient         *mqtt.Client
 	powerListener      *power.PowerEventListener
@@ -29,6 +53,21 @@ type pcAgentService struct {
 }
 
 func main() {
+	// Ensure only one instance is running
+	mutex, err := ensureSingleInstance()
+	if err != nil {
+		if err == syscall.Errno(ERROR_ALREADY_EXISTS) {
+			log.Println("PC Agent is already running. Exiting.")
+			os.Exit(0)
+		}
+		log.Printf("Warning: Could not create mutex: %v", err)
+	}
+	defer func() {
+		if mutex != 0 {
+			syscall.CloseHandle(mutex)
+		}
+	}()
+
 	isService, err := svc.IsWindowsService()
 	if err != nil {
 		log.Fatalf("Failed to detect service mode: %v", err)
