@@ -46,6 +46,8 @@ if %ERRORLEVEL% EQU 0 (
 
 REM Clean up build artifacts
 del *.syso >nul 2>&1
+echo Cleaned up build artifacts...
 
 echo.
-pause
+echo Press any key to exit...
+pause >nul
