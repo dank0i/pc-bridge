@@ -44,5 +44,8 @@ if %ERRORLEVEL% EQU 0 (
     echo Build failed!
 )
 
+REM Clean up build artifacts
+del *.syso >nul 2>&1
+
 echo.
 pause
