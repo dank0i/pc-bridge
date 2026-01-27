@@ -14,56 +14,27 @@ var (
 	gameMapMutex   sync.RWMutex
 	gameMap        map[string]string
 	gameMapVersion uint64 // Incremented on each reload
-	gamesPath      string
 	watcherDone    chan struct{} // Signal to stop file watcher
 )
 
-// Default games (fallback if no JSON file exists)
-var defaultGames = map[string]string{
-	"FortniteClient":     "fortnite",
-	"r5apex":             "apex_legends",
-	"bg3":                "baldur_s_gate_3",
-	"Overwatch":          "overwatch_2",
-	"MarvelRivals":       "marvel_rivals",
-	"bf6":                "battlefield_6",
-	"3DMark":             "3dmark",
-	"Balatro":            "balatro",
-	"Brawlhalla":         "brawlhalla",
-	"cs2":                "counter_strike_2",
-	"helldivers2":        "helldivers_2",
-	"KovaaK":             "kovaak_s",
-	"Lethal Company":     "lethal_company",
-	"javaw":              "minecraft",
-	"MonsterHunterWilds": "monster_hunter_wilds",
-	"okami":              "okami_hd",
-	"Phasmophobia":       "phasmophobia",
-	"REPO":               "r_e_p_o",
-	"RVThereYet":         "rv_there_yet",
-	"Skate":              "skate",
+// setInitialGameMap sets the game map from config (called by LoadUserConfig)
+func setInitialGameMap(games map[string]string) {
+	gameMapMutex.Lock()
+	gameMap = games
+	gameMapVersion++
+	gameMapMutex.Unlock()
+	log.Printf("Loaded %d games from config", len(games))
 }
 
-// InitGameMap loads the game map from games.json and starts the file watcher
-func InitGameMap() {
-	// Find games.json next to executable
-	exe, err := os.Executable()
-	if err != nil {
-		log.Printf("Warning: couldn't get executable path: %v", err)
-		gameMap = defaultGames
+// InitGameMapWatcher starts watching userConfig.json for game changes
+func InitGameMapWatcher() {
+	if configPath == "" {
+		log.Println("Warning: config path not set, can't watch for game changes")
 		return
 	}
-	gamesPath = filepath.Join(filepath.Dir(exe), "games.json")
 
-	// Initial load
-	if !loadGamesFromFile() {
-		log.Printf("Using default game map (%d games)", len(defaultGames))
-		gameMap = defaultGames
-		// Create the file with defaults so user can edit it
-		saveDefaultGames()
-	}
-
-	// Start file watcher with shutdown channel
 	watcherDone = make(chan struct{})
-	go watchGamesFile()
+	go watchConfigFile()
 }
 
 // StopGameMapWatcher stops the file watcher goroutine
@@ -73,75 +44,57 @@ func StopGameMapWatcher() {
 	}
 }
 
-// loadGamesFromFile reads and parses games.json, returns false if failed
-func loadGamesFromFile() bool {
-	data, err := os.ReadFile(gamesPath)
+// reloadGamesFromConfig reloads just the games section from userConfig.json
+func reloadGamesFromConfig() {
+	data, err := os.ReadFile(configPath)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			log.Printf("Error reading games.json: %v", err)
-		}
-		return false
+		log.Printf("Error reading userConfig.json: %v", err)
+		return
 	}
 
-	var newMap map[string]string
-	if err := json.Unmarshal(data, &newMap); err != nil {
-		log.Printf("Invalid games.json: %v", err)
-		return false
+	var cfg UserConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		log.Printf("Invalid userConfig.json: %v", err)
+		return
+	}
+
+	if len(cfg.Games) == 0 {
+		log.Println("Warning: no games found in config")
+		return
 	}
 
 	gameMapMutex.Lock()
 	oldCount := len(gameMap)
-	gameMap = newMap
+	gameMap = cfg.Games
 	gameMapVersion++
 	gameMapMutex.Unlock()
 
-	if oldCount > 0 {
-		log.Printf("Reloaded games.json: %d games (was %d)", len(newMap), oldCount)
-	} else {
-		log.Printf("Loaded games.json: %d games", len(newMap))
-	}
-	return true
+	log.Printf("Reloaded games from config: %d games (was %d)", len(cfg.Games), oldCount)
 }
 
-// saveDefaultGames creates games.json with the default games for easy editing
-func saveDefaultGames() {
-	data, err := json.MarshalIndent(defaultGames, "", "  ")
-	if err != nil {
-		log.Printf("Error marshaling default games: %v", err)
-		return
-	}
-
-	if err := os.WriteFile(gamesPath, data, 0644); err != nil {
-		log.Printf("Error writing default games.json: %v", err)
-		return
-	}
-
-	log.Printf("Created games.json with %d default games", len(defaultGames))
-}
-
-// watchGamesFile monitors games.json for changes and reloads when modified
-func watchGamesFile() {
+// watchConfigFile monitors userConfig.json for changes and reloads games when modified
+func watchConfigFile() {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		log.Printf("Can't create file watcher for games.json: %v", err)
+		log.Printf("Can't create file watcher: %v", err)
 		return
 	}
 	defer watcher.Close()
 
 	// Watch the directory (more reliable than watching the file directly)
-	dir := filepath.Dir(gamesPath)
+	dir := filepath.Dir(configPath)
 	if err := watcher.Add(dir); err != nil {
-		log.Printf("Can't watch directory for games.json: %v", err)
+		log.Printf("Can't watch directory: %v", err)
 		return
 	}
 
-	filename := filepath.Base(gamesPath)
-	log.Printf("Watching for changes to %s", gamesPath)
+	filename := filepath.Base(configPath)
+	log.Printf("Watching for changes to %s", configPath)
 
 	for {
 		select {
 		case <-watcherDone:
-			log.Println("Game map watcher stopped")
+			log.Println("Config watcher stopped")
 			return
 		case event, ok := <-watcher.Events:
 			if !ok {
@@ -150,8 +103,8 @@ func watchGamesFile() {
 			// Check if it's our file
 			if filepath.Base(event.Name) == filename {
 				if event.Op&(fsnotify.Write|fsnotify.Create) != 0 {
-					log.Println("games.json changed, reloading...")
-					loadGamesFromFile()
+					log.Println("userConfig.json changed, reloading games...")
+					reloadGamesFromConfig()
 				}
 			}
 		case err, ok := <-watcher.Errors:

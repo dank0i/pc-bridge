@@ -79,8 +79,13 @@ func (s *pcAgentService) Execute(args []string, r <-chan svc.ChangeRequest, chan
 func (s *pcAgentService) run() {
 	log.Println("PC Agent starting...")
 
-	// Initialize game map from games.json (with hot-reload support)
-	config.InitGameMap()
+	// Load user config (creates from example and exits if not found)
+	if err := config.LoadUserConfig(); err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Start watching config file for game changes (hot-reload)
+	config.InitGameMapWatcher()
 
 	// Create MQTT client with command handler
 	s.mqttClient = mqtt.NewClient(func(command, payload string) {

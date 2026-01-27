@@ -1,0 +1,20 @@
+{
+  "device_name": "my-pc",
+  "mqtt": {
+    "broker": "tcp://homeassistant.local:1883",
+    "user": "",
+    "pass": "",
+    "client_id": "pc-agent-my-pc"
+  },
+  "intervals": {
+    "game_sensor": 5,
+    "last_active": 10,
+    "availability": 30
+  },
+  "games": {
+    "FortniteClient": "fortnite",
+    "r5apex": "apex_legends",
+    "bg3": "baldur_s_gate_3",
+    "Overwatch": "overwatch_2"
+  }
+}

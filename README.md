@@ -1,6 +1,6 @@
 # PC Agent
 
-A lightweight Windows service that bridges a gaming PC with Home Assistant via MQTT.
+A lightweight Windows agent that bridges a gaming PC with Home Assistant via MQTT.
 
 ## Features
 
@@ -8,74 +8,94 @@ A lightweight Windows service that bridges a gaming PC with Home Assistant via M
 - **Power Events**: Detects sleep/wake events and publishes state to MQTT
 - **Display Wake**: Automatically wakes displays after Wake-on-LAN (fixes BIOS/motherboard issues where WoL doesn't turn on monitors)
 - **Remote Commands**: Receives commands via MQTT (launch Steam, screensaver, shutdown, sleep, Discord controls)
-- **Hot-Reload Game Config**: Updates game mappings from `games.json` without restart
+- **Hot-Reload Config**: Updates game mappings from `userConfig.json` without restart
 
 ## Requirements
 
 - Windows 10/11
-- Go 1.21+
+- Go 1.21+ (for building)
 - MQTT broker (e.g., Mosquitto on Home Assistant)
 
-## Installation
+## Quick Start
 
-```cmd
-go install github.com/tc-hib/go-winres@latest
-build.bat
-install.bat
-```
+1. Clone the repo
+2. Install go-winres: `go install github.com/tc-hib/go-winres@latest`
+3. Run `build.bat`
+4. Run `pc-agent.exe` - it will create `userConfig.json` from the example
+5. Edit `userConfig.json` with your settings
+6. Run `pc-agent.exe` again
 
 ## Configuration
 
-Edit `config/config.go` for:
-- MQTT broker address
-- Device name
-- Sensor polling intervals
+All settings are in `userConfig.json` (created on first run):
 
-Edit `games.json` for game process-to-name mappings (hot-reloaded on change).
+```json
+{
+  "device_name": "my-pc",
+  "mqtt": {
+    "broker": "tcp://homeassistant.local:1883",
+    "user": "",
+    "pass": "",
+    "client_id": "pc-agent-my-pc"
+  },
+  "intervals": {
+    "game_sensor": 5,
+    "last_active": 10,
+    "availability": 30
+  },
+  "games": {
+    "FortniteClient": "fortnite",
+    "r5apex": "apex_legends"
+  }
+}
+```
+
+- **device_name**: Your PC's name in Home Assistant (used in MQTT topics)
+- **mqtt**: Broker connection settings
+- **intervals**: Sensor update rates in seconds
+- **games**: Map of process names to game IDs (hot-reloaded on save)
 
 ## MQTT Topics
 
 ### Sensors (Published)
 ```
-homeassistant/sensor/dank0i-pc/runninggames/state   # Current game name
-homeassistant/sensor/dank0i-pc/lastactive/state     # Last input timestamp
-homeassistant/sensor/dank0i-pc/sleep_state/state    # "sleeping" or "awake"
-homeassistant/sensor/dank0i-pc/availability         # "online" or "offline" (LWT)
+homeassistant/sensor/{device_name}/runninggames/state   # Current game name
+homeassistant/sensor/{device_name}/lastactive/state     # Last input timestamp
+homeassistant/sensor/{device_name}/sleep_state/state    # "sleeping" or "awake"
+homeassistant/sensor/{device_name}/availability         # "online" or "offline" (LWT)
 ```
 
 ### Commands (Subscribed)
 ```
-homeassistant/button/dank0i-pc/SteamLaunch/action
-homeassistant/button/dank0i-pc/Screensaver/action
-homeassistant/button/dank0i-pc/Wake/action
-homeassistant/button/dank0i-pc/Shutdown/action
-homeassistant/button/dank0i-pc/sleep/action
-homeassistant/button/dank0i-pc/discord_join/action
-homeassistant/button/dank0i-pc/discord_leave_channel/action
+homeassistant/button/{device_name}/SteamLaunch/action
+homeassistant/button/{device_name}/Screensaver/action
+homeassistant/button/{device_name}/Wake/action
+homeassistant/button/{device_name}/Shutdown/action
+homeassistant/button/{device_name}/sleep/action
+homeassistant/button/{device_name}/discord_join/action
+homeassistant/button/{device_name}/discord_leave_channel/action
 ```
 
-## Service Management
+## Running
 
-```cmd
-# Install service
-sc create PCAgentService binPath= "C:\Scripts\pc-agent\pc-agent.exe"
-sc config PCAgentService start= auto
-sc start PCAgentService
-
-# Uninstall
-sc stop PCAgentService
-sc delete PCAgentService
-```
-
-## Development
-
-Run in console mode for testing:
+### Console Mode (for testing)
 ```cmd
 pc-agent.exe
 ```
+Press Ctrl+C to stop.
 
-Logs go to Windows Event Log when running as a service.
+### Auto-Start
+Add a shortcut to `pc-agent.exe` in your Startup folder:
+`shell:startup`
+
+## Building
+
+```cmd
+build.bat
+```
+
+This pulls latest changes from git, generates Windows resources, and builds the exe.
 
 ## License
 
-Private - personal use only.
+MIT
