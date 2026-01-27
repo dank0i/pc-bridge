@@ -2,7 +2,7 @@ package sensors
 
 import (
 	"log"
-	"pc-agent/config"
+	"pc-agent/internal/config"
 	"strings"
 	"sync"
 

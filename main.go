@@ -8,11 +8,11 @@ import (
 	"syscall"
 	"time"
 
-	"pc-agent/commands"
-	"pc-agent/config"
-	"pc-agent/mqtt"
-	"pc-agent/power"
-	"pc-agent/sensors"
+	"pc-agent/internal/commands"
+	"pc-agent/internal/config"
+	"pc-agent/internal/mqtt"
+	"pc-agent/internal/power"
+	"pc-agent/internal/sensors"
 
 	"golang.org/x/sys/windows/svc"
 )

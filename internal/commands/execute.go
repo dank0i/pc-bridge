@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"pc-agent/config"
+	"pc-agent/internal/config"
 	"strings"
 	"syscall"
 	"time"

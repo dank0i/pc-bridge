@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"pc-agent/config"
+	"pc-agent/internal/config"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
