@@ -3,11 +3,14 @@ package main
 import (
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"pc-agent/internal/commands"
 	"pc-agent/internal/config"
@@ -20,27 +23,46 @@ import (
 
 const serviceName = "PCAgentService"
 
-var (
-	kernel32        = syscall.NewLazyDLL("kernel32.dll")
-	createMutexW    = kernel32.NewProc("CreateMutexW")
-	getLastError    = kernel32.NewProc("GetLastError")
-)
-
-const ERROR_ALREADY_EXISTS = 183
-
-// ensureSingleInstance creates a named mutex to prevent multiple instances
-func ensureSingleInstance() (syscall.Handle, error) {
-	name, _ := syscall.UTF16PtrFromString("Global\\PCAgentSingleInstance")
-	handle, _, _ := createMutexW.Call(0, 0, uintptr(unsafe.Pointer(name)))
-	if handle == 0 {
-		return 0, syscall.GetLastError()
+// killExistingInstances kills any other running pc-agent.exe processes
+func killExistingInstances() {
+	// Get our own PID
+	myPID := os.Getpid()
+	
+	// Get our executable name
+	exe, err := os.Executable()
+	if err != nil {
+		return
 	}
-	lastErr, _, _ := getLastError.Call()
-	if lastErr == ERROR_ALREADY_EXISTS {
-		syscall.CloseHandle(syscall.Handle(handle))
-		return 0, syscall.Errno(ERROR_ALREADY_EXISTS)
+	exeName := filepath.Base(exe)
+	
+	// Use tasklist to find matching processes
+	cmd := exec.Command("tasklist", "/FI", "IMAGENAME eq "+exeName, "/FO", "CSV", "/NH")
+	output, err := cmd.Output()
+	if err != nil {
+		return
 	}
-	return syscall.Handle(handle), nil
+	
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.Contains(line, "No tasks") {
+			continue
+		}
+		// Parse CSV: "name","pid","session","session#","mem"
+		parts := strings.Split(line, ",")
+		if len(parts) >= 2 {
+			pidStr := strings.Trim(parts[1], "\"")
+			pid, err := strconv.Atoi(pidStr)
+			if err == nil && pid != myPID {
+				log.Printf("Killing existing instance (PID %d)", pid)
+				killCmd := exec.Command("taskkill", "/F", "/PID", pidStr)
+				killCmd.Run()
+			}
+		}
+	}
+	
+	// Brief delay to let processes terminate
+	time.Sleep(500 * time.Millisecond)
 }
 
 type pcAgentService struct {
@@ -53,20 +75,8 @@ type pcAgentService struct {
 }
 
 func main() {
-	// Ensure only one instance is running
-	mutex, err := ensureSingleInstance()
-	if err != nil {
-		if err == syscall.Errno(ERROR_ALREADY_EXISTS) {
-			log.Println("PC Agent is already running. Exiting.")
-			os.Exit(0)
-		}
-		log.Printf("Warning: Could not create mutex: %v", err)
-	}
-	defer func() {
-		if mutex != 0 {
-			syscall.CloseHandle(mutex)
-		}
-	}()
+	// Kill any existing instances before starting
+	killExistingInstances()
 
 	isService, err := svc.IsWindowsService()
 	if err != nil {
