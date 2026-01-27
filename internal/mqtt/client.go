@@ -210,45 +210,15 @@ func (c *Client) PublishSensorRetained(name, value string) {
 	}
 }
 
-// Pre-computed topic strings for efficiency
-var (
-	cachedAvailabilityTopic string
-	cachedSensorTopics      = make(map[string]string)
-	cachedCommandTopics     = make(map[string]string)
-)
-
-func init() {
-	// Pre-compute topics at startup
-	cachedAvailabilityTopic = fmt.Sprintf("%s/sensor/%s/availability", config.DiscoveryPrefix, config.DeviceName)
-
-	// Pre-compute sensor topics
-	for _, name := range []string{"runninggames", "lastactive", "sleep_state"} {
-		cachedSensorTopics[name] = fmt.Sprintf("%s/sensor/%s/%s/state", config.DiscoveryPrefix, config.DeviceName, name)
-	}
-
-	// Pre-compute command topics
-	for _, name := range []string{"SteamLaunch", "Screensaver", "Wake", "Shutdown", "sleep", "discord_join", "discord_leave_channel"} {
-		cachedCommandTopics[name] = fmt.Sprintf("%s/button/%s/%s/action", config.DiscoveryPrefix, config.DeviceName, name)
-	}
-}
-
-// Topic helpers - use cached values
+// Topic helpers - compute dynamically since config is loaded at runtime
 func availabilityTopic() string {
-	return cachedAvailabilityTopic
+	return fmt.Sprintf("%s/sensor/%s/availability", config.DiscoveryPrefix, config.DeviceName)
 }
 
 func sensorTopic(name string) string {
-	if topic, ok := cachedSensorTopics[name]; ok {
-		return topic
-	}
-	// Fallback for unknown sensors
 	return fmt.Sprintf("%s/sensor/%s/%s/state", config.DiscoveryPrefix, config.DeviceName, name)
 }
 
 func commandTopic(name string) string {
-	if topic, ok := cachedCommandTopics[name]; ok {
-		return topic
-	}
-	// Fallback for unknown commands
 	return fmt.Sprintf("%s/button/%s/%s/action", config.DiscoveryPrefix, config.DeviceName, name)
 }
