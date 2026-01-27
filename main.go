@@ -3,14 +3,13 @@ package main
 import (
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"pc-agent/internal/commands"
 	"pc-agent/internal/config"
@@ -23,46 +22,79 @@ import (
 
 const serviceName = "PCAgentService"
 
-// killExistingInstances kills any other running pc-agent.exe processes
+var (
+	kernel32                  = syscall.NewLazyDLL("kernel32.dll")
+	procCreateToolhelp32Snapshot = kernel32.NewProc("CreateToolhelp32Snapshot")
+	procProcess32FirstW       = kernel32.NewProc("Process32FirstW")
+	procProcess32NextW        = kernel32.NewProc("Process32NextW")
+	procOpenProcess           = kernel32.NewProc("OpenProcess")
+	procTerminateProcess      = kernel32.NewProc("TerminateProcess")
+)
+
+const (
+	TH32CS_SNAPPROCESS = 0x00000002
+	PROCESS_TERMINATE  = 0x0001
+)
+
+type processEntry32 struct {
+	Size            uint32
+	Usage           uint32
+	ProcessID       uint32
+	DefaultHeapID   uintptr
+	ModuleID        uint32
+	Threads         uint32
+	ParentProcessID uint32
+	PriClassBase    int32
+	Flags           uint32
+	ExeFile         [260]uint16
+}
+
+// killExistingInstances kills any other running pc-agent.exe processes using Windows API
 func killExistingInstances() {
-	// Get our own PID
-	myPID := os.Getpid()
+	myPID := uint32(os.Getpid())
 	
-	// Get our executable name
 	exe, err := os.Executable()
 	if err != nil {
 		return
 	}
-	exeName := filepath.Base(exe)
+	exeName := strings.ToLower(filepath.Base(exe))
 	
-	// Use tasklist to find matching processes
-	cmd := exec.Command("tasklist", "/FI", "IMAGENAME eq "+exeName, "/FO", "CSV", "/NH")
-	output, err := cmd.Output()
-	if err != nil {
+	// Create snapshot of all processes
+	handle, _, _ := procCreateToolhelp32Snapshot.Call(TH32CS_SNAPPROCESS, 0)
+	if handle == uintptr(syscall.InvalidHandle) {
+		return
+	}
+	defer syscall.CloseHandle(syscall.Handle(handle))
+	
+	var entry processEntry32
+	entry.Size = uint32(unsafe.Sizeof(entry))
+	
+	// Get first process
+	ret, _, _ := procProcess32FirstW.Call(handle, uintptr(unsafe.Pointer(&entry)))
+	if ret == 0 {
 		return
 	}
 	
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.Contains(line, "No tasks") {
-			continue
-		}
-		// Parse CSV: "name","pid","session","session#","mem"
-		parts := strings.Split(line, ",")
-		if len(parts) >= 2 {
-			pidStr := strings.Trim(parts[1], "\"")
-			pid, err := strconv.Atoi(pidStr)
-			if err == nil && pid != myPID {
-				log.Printf("Killing existing instance (PID %d)", pid)
-				killCmd := exec.Command("taskkill", "/F", "/PID", pidStr)
-				killCmd.Run()
+	for {
+		procName := strings.ToLower(syscall.UTF16ToString(entry.ExeFile[:]))
+		if procName == exeName && entry.ProcessID != myPID {
+			// Open and terminate the process
+			procHandle, _, _ := procOpenProcess.Call(PROCESS_TERMINATE, 0, uintptr(entry.ProcessID))
+			if procHandle != 0 {
+				log.Printf("Killing existing instance (PID %d)", entry.ProcessID)
+				procTerminateProcess.Call(procHandle, 0)
+				syscall.CloseHandle(syscall.Handle(procHandle))
 			}
+		}
+		
+		// Get next process
+		ret, _, _ = procProcess32NextW.Call(handle, uintptr(unsafe.Pointer(&entry)))
+		if ret == 0 {
+			break
 		}
 	}
 	
-	// Brief delay to let processes terminate
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 }
 
 type pcAgentService struct {
