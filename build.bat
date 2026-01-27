@@ -15,7 +15,7 @@ if not exist userConfig.json (
         echo.
         echo ==========================================
         echo  userConfig.json created!
-        echo  Edit it with your settings, then rebuild.
+        echo  Edit it with your settings before running.
         echo ==========================================
         echo.
     ) else (
