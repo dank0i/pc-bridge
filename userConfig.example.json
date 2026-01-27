@@ -3,8 +3,7 @@
   "mqtt": {
     "broker": "tcp://homeassistant.local:1883",
     "user": "",
-    "pass": "",
-    "client_id": "pc-agent-my-pc"
+    "pass": ""
   },
   "intervals": {
     "game_sensor": 5,

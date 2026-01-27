@@ -3,7 +3,6 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -58,7 +57,6 @@ var Commands = map[string]string{
 }
 
 // LoadUserConfig loads configuration from userConfig.json
-// If the file doesn't exist, it copies from userConfig.example.json and exits
 func LoadUserConfig() error {
 	exe, err := os.Executable()
 	if err != nil {
@@ -67,20 +65,10 @@ func LoadUserConfig() error {
 	exeDir := filepath.Dir(exe)
 
 	configPath = filepath.Join(exeDir, "userConfig.json")
-	examplePath := filepath.Join(exeDir, "userConfig.example.json")
 
 	// Check if userConfig.json exists
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// Try to copy from example
-		if err := copyFile(examplePath, configPath); err != nil {
-			return fmt.Errorf("userConfig.json not found and couldn't create from example: %w", err)
-		}
-		log.Println("===========================================")
-		log.Println("Created userConfig.json from example.")
-		log.Println("Please edit userConfig.json with your settings and restart.")
-		log.Printf("Config location: %s", configPath)
-		log.Println("===========================================")
-		os.Exit(0)
+		return fmt.Errorf("userConfig.json not found - run build.bat first to create it")
 	}
 
 	return loadConfigFromFile()
@@ -148,21 +136,4 @@ func loadConfigFromFile() error {
 // GetConfigPath returns the path to userConfig.json
 func GetConfigPath() string {
 	return configPath
-}
-
-func copyFile(src, dst string) error {
-	srcFile, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer srcFile.Close()
-
-	dstFile, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer dstFile.Close()
-
-	_, err = io.Copy(dstFile, srcFile)
-	return err
 }
