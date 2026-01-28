@@ -17,7 +17,7 @@ const PBT_APMRESUMEAUTO: usize = 0x12;
 const PBT_APMRESUMESUSPEND: usize = 7;
 const PBT_POWERSETTINGCHANGE: usize = 0x8013;
 
-// GUID for monitor power setting
+// GUID for monitor power setting  
 const GUID_CONSOLE_DISPLAY_STATE: windows::core::GUID = windows::core::GUID::from_u128(
     0x6fe69556_704a_47a0_8f24_c28d936fda47
 );
@@ -27,6 +27,9 @@ pub enum PowerEvent {
     Sleep,
     Wake,
 }
+
+// Track whether we've seen a sleep event (to avoid wake on startup)
+static HAS_SLEPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub struct PowerEventListener {
     state: Arc<AppState>,
@@ -184,10 +187,13 @@ impl PowerEventListener {
                 match wparam.0 {
                     PBT_APMSUSPEND => {
                         info!("Received PBT_APMSUSPEND");
+                        HAS_SLEPT.store(true, Ordering::SeqCst);
                         let _ = event_tx.blocking_send(PowerEvent::Sleep);
                     }
                     PBT_APMRESUMEAUTO | PBT_APMRESUMESUSPEND => {
                         info!("Received PBT_APMRESUME*");
+                        // These are real system resume events, always trigger wake
+                        HAS_SLEPT.store(true, Ordering::SeqCst); // Ensure future display-on events work
                         let _ = event_tx.blocking_send(PowerEvent::Wake);
                     }
                     PBT_POWERSETTINGCHANGE => {
@@ -198,8 +204,10 @@ impl PowerEventListener {
                             debug!("Display state change: {}", state);
                             // 0 = off (sleep), 1 = on, 2 = dimmed
                             if state == 0 {
+                                HAS_SLEPT.store(true, Ordering::SeqCst);
                                 let _ = event_tx.blocking_send(PowerEvent::Sleep);
-                            } else if state == 1 {
+                            } else if state == 1 && HAS_SLEPT.load(Ordering::SeqCst) {
+                                // Only trigger wake if we've previously slept
                                 let _ = event_tx.blocking_send(PowerEvent::Wake);
                             }
                         }
