@@ -13,14 +13,15 @@ mod sensors;
 mod commands;
 mod power;
 mod winapi;
+mod updater;
 
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{info, error, Level};
+use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use crate::config::Config;
-use crate::mqtt::{MqttClient, CommandReceiver};
+use crate::mqtt::MqttClient;
 use crate::sensors::{GameSensor, IdleSensor};
 use crate::power::PowerEventListener;
 use crate::commands::CommandExecutor;
@@ -46,6 +47,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Kill any existing instances
     kill_existing_instances();
+
+    // Check for updates (non-blocking, continues after check)
+    tokio::spawn(updater::check_for_updates());
 
     // Load configuration
     let config = Config::load()?;
@@ -81,9 +85,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Publish initial state
     {
-        let config = state.config.read().await;
+        let _config = state.config.read().await;
         state.mqtt.publish_availability(true).await;
-        state.mqtt.publish_sensor("sleep_state", "awake").await;
+        state.mqtt.publish_sensor_retained("sleep_state", "awake").await;
     }
 
     // Wait for shutdown signal (Ctrl+C)

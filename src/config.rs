@@ -10,6 +10,24 @@ use tracing::{info, warn, error};
 
 use crate::AppState;
 
+/// Default config template (embedded in binary)
+const DEFAULT_CONFIG: &str = r#"{
+    "device_name": "my-pc",
+    "mqtt": {
+        "broker": "tcp://homeassistant.local:1883",
+        "user": "",
+        "pass": ""
+    },
+    "intervals": {
+        "game_sensor": 5,
+        "last_active": 10,
+        "availability": 30
+    },
+    "games": {
+        "example_game": "ExampleGame.exe"
+    }
+}"#;
+
 /// User configuration structure (matches userConfig.json)
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -52,9 +70,18 @@ impl Config {
         let config_path = Self::config_path()?;
 
         if !config_path.exists() {
+            // Create default config file
+            std::fs::write(&config_path, DEFAULT_CONFIG)
+                .with_context(|| format!("Failed to create {:?}", config_path))?;
+            
+            info!("Created default userConfig.json at {:?}", config_path);
+            
+            // Show alert to user
+            Self::show_config_alert(&config_path);
+            
             bail!(
-                "userConfig.json not found at {:?}\n\
-                 Create it from userConfig.example.json first.",
+                "userConfig.json created at {:?}\n\
+                 Please edit it with your settings and restart.",
                 config_path
             );
         }
@@ -105,6 +132,32 @@ impl Config {
     /// Get device ID (device_name with dashes replaced by underscores)
     pub fn device_id(&self) -> String {
         self.device_name.replace('-', "_")
+    }
+
+    /// Show Windows message box alerting user to configure
+    fn show_config_alert(path: &PathBuf) {
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        use windows::core::w;
+        
+        let message = format!(
+            "Welcome to PC Agent!\n\n\
+             A default configuration file has been created at:\n\
+             {}\n\n\
+             Please edit this file with your MQTT broker settings \
+             and device name, then restart the application.",
+            path.display()
+        );
+        
+        let wide_message: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+        
+        unsafe {
+            MessageBoxW(
+                None,
+                windows::core::PCWSTR::from_raw(wide_message.as_ptr()),
+                w!("PC Agent - Configuration Required"),
+                MB_OK | MB_ICONINFORMATION,
+            );
+        }
     }
 
     /// Get MQTT client ID
