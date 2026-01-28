@@ -6,7 +6,7 @@ authors = ["dank0i"]
 description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
 
 [build-dependencies]
-winresource = { version = "0.1", optional = true }
+winresource = "0.1"
 
 [features]
 default = []
@@ -54,9 +54,6 @@ windows = { version = "0.58", features = [
     "Win32_Security",
 ] }
 windows-service = "0.7"
-
-[target.'cfg(windows)'.build-dependencies]
-winresource = "0.1"
 
 [profile.release]
 opt-level = 3
