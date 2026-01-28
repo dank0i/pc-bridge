@@ -128,17 +128,18 @@ fn kill_existing_instances() {
     use windows::Win32::Foundation::*;
 
     let my_pid = std::process::id();
-    let exe_name = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase().to_string()))
-        .unwrap_or_default();
+    
+    // Match any of these exe names (covers renames)
+    let exe_names = ["pc-bridge.exe", "pc bridge.exe", "pc-agent.exe"];
 
     unsafe {
-        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if snapshot.is_err() {
-            return;
-        }
-        let snapshot = snapshot.unwrap();
+        let snapshot = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+            Ok(s) => s,
+            Err(e) => {
+                info!("Failed to create process snapshot: {:?}", e);
+                return;
+            }
+        };
 
         let mut entry = PROCESSENTRY32W {
             dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
@@ -151,9 +152,12 @@ fn kill_existing_instances() {
                     .trim_end_matches('\0')
                     .to_lowercase();
 
-                if proc_name == exe_name && entry.th32ProcessID != my_pid {
+                // Check if this process matches any of our exe names
+                let is_match = exe_names.iter().any(|&name| proc_name == name);
+                
+                if is_match && entry.th32ProcessID != my_pid {
                     if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, entry.th32ProcessID) {
-                        info!("Killing existing instance (PID {})", entry.th32ProcessID);
+                        info!("Killing existing instance: {} (PID {})", proc_name, entry.th32ProcessID);
                         let _ = TerminateProcess(handle, 0);
                         let _ = CloseHandle(handle);
                     }
@@ -169,7 +173,7 @@ fn kill_existing_instances() {
     }
 
     // Give processes time to exit
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    std::thread::sleep(std::time::Duration::from_millis(500));
 }
 
 /// Kill any other running instances (Linux)
