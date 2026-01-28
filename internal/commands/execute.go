@@ -103,12 +103,15 @@ func executeShellCommand(command, payload string) error {
 		done := make(chan error, 1)
 		go func() { done <- cmd.Wait() }()
 
+		timer := time.NewTimer(commandTimeout)
+		defer timer.Stop() // CRITICAL: Stop timer to prevent memory leak
+
 		select {
 		case err := <-done:
 			if err != nil {
 				log.Printf("Command finished with error: %v", err)
 			}
-		case <-time.After(commandTimeout):
+		case <-timer.C:
 			log.Printf("Command timed out after %v, killing process", commandTimeout)
 			if cmd.Process != nil {
 				cmd.Process.Kill()
@@ -270,12 +273,15 @@ $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 		done := make(chan error, 1)
 		go func() { done <- cmd.Wait() }()
 
+		timer := time.NewTimer(30 * time.Second)
+		defer timer.Stop() // CRITICAL: Stop timer to prevent memory leak
+
 		select {
 		case err := <-done:
 			if err != nil {
 				log.Printf("Notification command error: %v", err)
 			}
-		case <-time.After(30 * time.Second):
+		case <-timer.C:
 			log.Printf("Notification timed out, killing process")
 			if cmd.Process != nil {
 				cmd.Process.Kill()
