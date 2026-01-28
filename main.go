@@ -76,8 +76,8 @@ type pcAgentService struct {
 	displayWakeHandler *power.DisplayWakeHandler
 	stopChan           chan struct{}
 	wg                 sync.WaitGroup
-	mu                 sync.Mutex       // protects mqttClient access
-	cmdSem             chan struct{}    // semaphore to limit concurrent commands
+	mu                 sync.Mutex    // protects mqttClient access
+	cmdSem             chan struct{} // semaphore to limit concurrent commands (initialized at creation)
 }
 
 const maxConcurrentCommands = 5
@@ -138,7 +138,9 @@ func (s *pcAgentService) Execute(args []string, r <-chan svc.ChangeRequest, chan
 	changes <- svc.Status{State: svc.StartPending}
 
 	s.stopChan = make(chan struct{})
-	s.cmdSem = make(chan struct{}, maxConcurrentCommands)
+	if s.cmdSem == nil {
+		s.cmdSem = make(chan struct{}, maxConcurrentCommands)
+	}
 	s.run()
 
 	changes <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
@@ -299,18 +301,26 @@ func (s *pcAgentService) pollSensors() {
 
 func (s *pcAgentService) publishGameSensor() {
 	game := sensors.GetRunningGame()
+	
+	// Copy client ref under lock, publish outside to avoid blocking power events
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.mqttClient != nil && s.mqttClient.IsConnected() {
-		s.mqttClient.PublishSensor("runninggames", game)
+	client := s.mqttClient
+	s.mu.Unlock()
+	
+	if client != nil && client.IsConnected() {
+		client.PublishSensor("runninggames", game)
 	}
 }
 
 func (s *pcAgentService) publishLastActive() {
 	lastActive := sensors.GetLastActiveTime()
+	
+	// Copy client ref under lock, publish outside to avoid blocking power events
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.mqttClient != nil && s.mqttClient.IsConnected() {
-		s.mqttClient.PublishSensor("lastactive", lastActive.Format(time.RFC3339))
+	client := s.mqttClient
+	s.mu.Unlock()
+	
+	if client != nil && client.IsConnected() {
+		client.PublishSensor("lastactive", lastActive.Format(time.RFC3339))
 	}
 }

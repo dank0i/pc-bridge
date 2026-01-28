@@ -188,12 +188,17 @@ type Notification struct {
 	} `json:"data"`
 }
 
-// escapeXML escapes special XML characters to prevent injection
-// Uses strings.Builder for efficiency
+// escapeXML escapes special XML characters and strips control characters.
+// XML 1.0 prohibits control chars 0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F (except tab, newline, CR).
+// Uses strings.Builder for efficiency.
 func escapeXML(s string) string {
 	var b strings.Builder
 	b.Grow(len(s) + 10) // Pre-allocate with some extra space for escapes
 	for _, r := range s {
+		// Skip XML 1.0 prohibited control characters
+		if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
+			continue // Strip prohibited control chars
+		}
 		switch r {
 		case '&':
 			b.WriteString("&amp;")

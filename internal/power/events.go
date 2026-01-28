@@ -9,8 +9,6 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
-
-	"golang.org/x/sys/windows"
 )
 
 const (
@@ -150,22 +148,7 @@ func (p *PowerEventListener) listen() {
 		return ret
 	})
 
-	type WNDCLASSEXW struct {
-		Size       uint32
-		Style      uint32
-		WndProc    uintptr
-		ClsExtra   int32
-		WndExtra   int32
-		Instance   windows.Handle
-		Icon       windows.Handle
-		Cursor     windows.Handle
-		Background windows.Handle
-		MenuName   *uint16
-		ClassName  *uint16
-		IconSm     windows.Handle
-	}
-
-	var wc WNDCLASSEXW
+	var wc winapi.WNDCLASSEXW
 	wc.Size = uint32(unsafe.Sizeof(wc))
 	wc.WndProc = wndProc
 	wc.ClassName = className
@@ -182,16 +165,7 @@ func (p *PowerEventListener) listen() {
 	p.hwnd = hwnd
 	p.mu.Unlock()
 
-	type MSG struct {
-		Hwnd    uintptr
-		Message uint32
-		WParam  uintptr
-		LParam  uintptr
-		Time    uint32
-		Pt      struct{ X, Y int32 }
-	}
-
-	var msg MSG
+	var msg winapi.MSG
 	// GetMessageW blocks until a message is available - no busy loop!
 	for {
 		ret, _, _ := winapi.GetMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)

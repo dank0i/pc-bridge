@@ -100,3 +100,29 @@ type LastInputInfo struct {
 	CbSize uint32
 	DwTime uint32
 }
+
+// WNDCLASSEXW for window class registration
+type WNDCLASSEXW struct {
+	Size       uint32
+	Style      uint32
+	WndProc    uintptr
+	ClsExtra   int32
+	WndExtra   int32
+	Instance   uintptr
+	Icon       uintptr
+	Cursor     uintptr
+	Background uintptr
+	MenuName   *uint16
+	ClassName  *uint16
+	IconSm     uintptr
+}
+
+// MSG for Windows message loop
+type MSG struct {
+	Hwnd    uintptr
+	Message uint32
+	WParam  uintptr
+	LParam  uintptr
+	Time    uint32
+	Pt      struct{ X, Y int32 }
+}

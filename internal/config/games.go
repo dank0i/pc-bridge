@@ -101,8 +101,9 @@ func watchConfigFile() {
 				return
 			}
 			// Check if it's our file
+			// Include Rename for editors that use atomic save (write temp -> rename)
 			if filepath.Base(event.Name) == filename {
-				if event.Op&(fsnotify.Write|fsnotify.Create) != 0 {
+				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) != 0 {
 					log.Println("userConfig.json changed, reloading games...")
 					reloadGamesFromConfig()
 				}
