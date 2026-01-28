@@ -55,6 +55,11 @@ func executeShellCommand(command, payload string) error {
 		return nil
 	}
 
+	// Check for launcher shortcuts (steam:APPID, epic:GAME, exe:PATH)
+	if launchCmd := expandLauncherShortcut(cmdStr); launchCmd != "" {
+		cmdStr = launchCmd
+	}
+
 	// Expand environment variables (both %VAR% Windows style and $VAR Unix style)
 	cmdStr = expandWindowsEnv(cmdStr)
 
@@ -283,4 +288,106 @@ $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 	}()
 
 	return nil
+}
+
+// expandLauncherShortcut converts launcher shortcuts to full commands.
+// Supported formats:
+//   - steam:APPID         → launches Steam game by App ID (e.g., steam:1517290)
+//   - epic:GAME           → launches Epic game by name (e.g., epic:Fortnite)
+//   - battlenet:CODE      → launches Battle.net game (e.g., battlenet:Pro for Overwatch)
+//   - exe:PATH            → launches executable directly (e.g., exe:C:\Games\Game.exe)
+//   - url:URL             → opens URL in default browser (e.g., url:https://example.com)
+//
+// Returns empty string if not a launcher shortcut.
+func expandLauncherShortcut(cmd string) string {
+	// Split on first colon to get launcher:argument
+	parts := strings.SplitN(cmd, ":", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+
+	launcher := strings.ToLower(strings.TrimSpace(parts[0]))
+	arg := strings.TrimSpace(parts[1])
+
+	if arg == "" {
+		return ""
+	}
+
+	switch launcher {
+	case "steam":
+		// Steam App ID - launch via steam:// protocol
+		// Example: steam:1517290 → Start-Process "steam://rungameid/1517290"
+		log.Printf("Launching Steam game: App ID %s", arg)
+		return `Start-Process "steam://rungameid/` + arg + `"`
+
+	case "epic":
+		// Epic Games - launch via com.epicgames.launcher:// protocol
+		// The game name needs to match Epic's internal name
+		// Example: epic:Fortnite → Start-Process "com.epicgames.launcher://apps/Fortnite?action=launch&silent=true"
+		log.Printf("Launching Epic game: %s", arg)
+		return `Start-Process "com.epicgames.launcher://apps/` + arg + `?action=launch&silent=true"`
+
+	case "battlenet", "bnet":
+		// Battle.net games use product codes:
+		// Pro = Overwatch, D3 = Diablo 3, WTCG = Hearthstone, Hero = Heroes of the Storm
+		// S2 = StarCraft 2, WoW = World of Warcraft, DST2 = Diablo 4
+		// Example: battlenet:Pro → Start-Process "battlenet://Pro"
+		log.Printf("Launching Battle.net game: %s", arg)
+		return `Start-Process "battlenet://` + arg + `"`
+
+	case "ea", "origin":
+		// EA App (formerly Origin) - uses origin2:// protocol
+		// Game IDs can be found in EA App's installed games
+		// Example: ea:Origin.OFR.50.0001452 (Battlefield)
+		log.Printf("Launching EA game: %s", arg)
+		return `Start-Process "origin2://game/launch?offerIds=` + arg + `"`
+
+	case "ubisoft", "uplay":
+		// Ubisoft Connect - uses uplay:// protocol
+		// Example: ubisoft:5595 (Rainbow Six Siege)
+		log.Printf("Launching Ubisoft game: %s", arg)
+		return `Start-Process "uplay://launch/` + arg + `"`
+
+	case "gog":
+		// GOG Galaxy - uses goggalaxy:// protocol
+		// Example: gog:1495134320 (Cyberpunk 2077)
+		log.Printf("Launching GOG game: %s", arg)
+		return `Start-Process "goggalaxy://openGameView/` + arg + `"`
+
+	case "xbox", "msstore":
+		// Xbox/Microsoft Store games - uses shell:AppsFolder
+		// Requires the app's package family name
+		// Example: xbox:Microsoft.MinecraftUWP_8wekyb3d8bbwe!App
+		log.Printf("Launching Xbox/MS Store game: %s", arg)
+		return `Start-Process "shell:AppsFolder\` + arg + `"`
+
+	case "exe", "run":
+		// Direct executable path
+		// Example: exe:C:\Games\MyGame\game.exe
+		// Example: exe:"C:\Program Files\Game\game.exe"
+		log.Printf("Launching executable: %s", arg)
+		// If path contains spaces and isn't quoted, quote it
+		if strings.Contains(arg, " ") && !strings.HasPrefix(arg, `"`) {
+			arg = `"` + arg + `"`
+		}
+		return `Start-Process ` + arg
+
+	case "url", "open":
+		// Open URL in default browser
+		// Example: url:https://discord.gg/invite
+		log.Printf("Opening URL: %s", arg)
+		return `Start-Process "` + arg + `"`
+
+	case "close", "kill":
+		// Kill a process by name (useful for closing games)
+		// Example: close:bf6.exe
+		log.Printf("Closing process: %s", arg)
+		// Remove .exe if present for the filter, but handle both cases
+		processName := strings.TrimSuffix(arg, ".exe")
+		return `Get-Process | Where-Object { $_.ProcessName -eq '` + processName + `' } | ForEach-Object { $_.CloseMainWindow() }`
+
+	default:
+		// Not a recognized launcher shortcut
+		return ""
+	}
 }
