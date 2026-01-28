@@ -152,6 +152,7 @@ fn is_newer_version(remote: &str, current: &str) -> bool {
     remote_parts.len() > current_parts.len()
 }
 
+#[cfg(windows)]
 fn show_update_message(version: &str, path: &PathBuf) {
     use windows::Win32::UI::WindowsAndMessaging::*;
     use windows::core::w;
@@ -161,7 +162,7 @@ fn show_update_message(version: &str, path: &PathBuf) {
          The update is saved at:\n{}\n\n\
          To install:\n\
          1. Close this application\n\
-         2. Rename the .update file to pc-agent.exe\n\
+         2. Rename the .update file to pc-bridge.exe\n\
          3. Restart the application",
         version, path.display()
     );
@@ -172,8 +173,21 @@ fn show_update_message(version: &str, path: &PathBuf) {
         MessageBoxW(
             None,
             windows::core::PCWSTR::from_raw(wide_message.as_ptr()),
-            w!("PC Agent Update Available"),
+            w!("PC Bridge Update Available"),
             MB_OK | MB_ICONINFORMATION,
         );
     }
+}
+
+#[cfg(unix)]
+fn show_update_message(version: &str, path: &PathBuf) {
+    eprintln!(
+        "A new version ({}) has been downloaded!\n\n\
+         The update is saved at:\n{}\n\n\
+         To install:\n\
+         1. Stop this application\n\
+         2. Rename the .update file to pc-bridge\n\
+         3. Restart the application",
+        version, path.display()
+    );
 }

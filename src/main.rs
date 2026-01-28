@@ -1,4 +1,4 @@
-//! PC Bridge - Home Assistant integration for Windows
+//! PC Bridge - Home Assistant integration for Windows and Linux
 //!
 //! Provides:
 //! - Game detection via process monitoring
@@ -7,15 +7,17 @@
 //! - Remote command execution
 //! - MQTT-based communication with Home Assistant
 
-#![windows_subsystem = "windows"]
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod config;
 mod mqtt;
 mod sensors;
 mod commands;
 mod power;
-mod winapi;
 mod updater;
+
+#[cfg(windows)]
+mod winapi;
 
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
@@ -118,7 +120,8 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Kill any other running pc-agent.exe processes
+/// Kill any other running instances (platform-specific)
+#[cfg(windows)]
 fn kill_existing_instances() {
     use windows::Win32::System::Diagnostics::ToolHelp::*;
     use windows::Win32::System::Threading::*;
@@ -166,5 +169,29 @@ fn kill_existing_instances() {
     }
 
     // Give processes time to exit
+    std::thread::sleep(std::time::Duration::from_millis(200));
+}
+
+/// Kill any other running instances (Linux)
+#[cfg(unix)]
+fn kill_existing_instances() {
+    use std::process::Command;
+    
+    let my_pid = std::process::id();
+    let exe_name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_default();
+    
+    if exe_name.is_empty() {
+        return;
+    }
+    
+    // Use pkill to kill other instances, excluding our PID
+    // This is a safe approach - pkill won't kill itself
+    let _ = Command::new("pkill")
+        .args(["-f", &exe_name, "--signal", "TERM"])
+        .spawn();
+    
     std::thread::sleep(std::time::Duration::from_millis(200));
 }

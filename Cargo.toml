@@ -1,12 +1,15 @@
 [package]
 name = "pc-bridge"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2021"
 authors = ["dank0i"]
-description = "Home Assistant PC Bridge - Windows app for game detection and remote control"
+description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
 
 [build-dependencies]
-winresource = "0.1"
+winresource = { version = "0.1", optional = true }
+
+[features]
+default = []
 
 [dependencies]
 # Async runtime
@@ -25,7 +28,18 @@ anyhow = "1"
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
 
-# Windows API
+# File watching for config hot-reload
+notify = "6"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Process/command execution
+which = "6"
+
+# Windows-specific dependencies
+[target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
@@ -39,19 +53,10 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Gdi",
     "Win32_Security",
 ] }
-
-# Windows service support
 windows-service = "0.7"
 
-# File watching for config hot-reload
-notify = "6"
-
-# Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Process/command execution
-which = "6"
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
 
 [profile.release]
 opt-level = 3

@@ -134,13 +134,14 @@ impl Config {
         self.device_name.replace('-', "_")
     }
 
-    /// Show Windows message box alerting user to configure
+    /// Show alert to user about config (platform-specific)
+    #[cfg(windows)]
     fn show_config_alert(path: &PathBuf) {
         use windows::Win32::UI::WindowsAndMessaging::*;
         use windows::core::w;
         
         let message = format!(
-            "Welcome to PC Agent!\n\n\
+            "Welcome to PC Bridge!\n\n\
              A default configuration file has been created at:\n\
              {}\n\n\
              Please edit this file with your MQTT broker settings \
@@ -154,10 +155,23 @@ impl Config {
             MessageBoxW(
                 None,
                 windows::core::PCWSTR::from_raw(wide_message.as_ptr()),
-                w!("PC Agent - Configuration Required"),
+                w!("PC Bridge - Configuration Required"),
                 MB_OK | MB_ICONINFORMATION,
             );
         }
+    }
+
+    #[cfg(unix)]
+    fn show_config_alert(path: &PathBuf) {
+        // On Unix, just print to stderr (no GUI assumed)
+        eprintln!(
+            "Welcome to PC Bridge!\n\n\
+             A default configuration file has been created at:\n\
+             {}\n\n\
+             Please edit this file with your MQTT broker settings \
+             and device name, then restart the application.",
+            path.display()
+        );
     }
 
     /// Get MQTT client ID
