@@ -5,7 +5,7 @@ fn main() {
         res.set_icon("assets/icon.ico");
         res.set("ProductName", "PC Bridge");
         res.set("FileDescription", "PC Bridge");
-        res.set("CompanyName", "dank0i");
+        res.set("CompanyName", "PC Bridge");
         res.set("OriginalFilename", "PC Bridge.exe");
         res.compile().expect("Failed to compile Windows resources");
     }

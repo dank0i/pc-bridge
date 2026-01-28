@@ -214,7 +214,7 @@ impl MqttClient {
 
         // Command buttons
         let commands = vec![
-            ("SteamLaunch", "mdi:steam"),
+            ("Launch", "mdi:rocket-launch"),
             ("Screensaver", "mdi:monitor"),
             ("Wake", "mdi:monitor-eye"),
             ("Shutdown", "mdi:power"),
@@ -250,7 +250,7 @@ impl MqttClient {
     }
 
     async fn subscribe_commands(&self) {
-        let commands = ["SteamLaunch", "Screensaver", "Wake", "Shutdown", "sleep", "discord_join", "discord_leave_channel"];
+        let commands = ["Launch", "Screensaver", "Wake", "Shutdown", "sleep", "discord_join", "discord_leave_channel"];
         
         for cmd in commands {
             let topic = self.command_topic(cmd);

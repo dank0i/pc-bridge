@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 
 const GITHUB_OWNER: &str = "dank0i";
-const GITHUB_REPO: &str = "pc-agent";
+const GITHUB_REPO: &str = "pc-bridge";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// GitHub release info (minimal fields we need)
