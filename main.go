@@ -217,11 +217,13 @@ func (s *pcAgentService) run() {
 			go func() {
 				delays := []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}
 				for _, delay := range delays {
-					// Check if we're shutting down before sleeping
+					// Use NewTimer to avoid memory leak
+					timer := time.NewTimer(delay)
 					select {
 					case <-s.stopChan:
+						timer.Stop()
 						return
-					case <-time.After(delay):
+					case <-timer.C:
 					}
 
 					s.mu.Lock()

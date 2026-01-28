@@ -85,10 +85,13 @@ func (p *PowerEventListener) monitorHeartbeat() {
 		}
 
 		// Check if we got a response within 5 seconds
+		// Use NewTimer to avoid memory leak
+		timer := time.NewTimer(5 * time.Second)
 		select {
 		case <-p.heartbeatDone:
+			timer.Stop()
 			return
-		case <-time.After(5 * time.Second):
+		case <-timer.C:
 		}
 		lastBeat := p.lastHeartbeat.Load()
 		if time.Since(time.Unix(lastBeat, 0)) > 70*time.Second {
