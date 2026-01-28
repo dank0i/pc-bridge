@@ -39,7 +39,7 @@ impl MemorySensor {
     }
 }
 
-/// Get current process memory usage in MB
+/// Get current process memory usage in MB (Private Working Set - matches Task Manager)
 #[cfg(windows)]
 fn get_memory_usage_mb() -> f64 {
     use windows::Win32::System::ProcessStatus::*;
@@ -47,12 +47,16 @@ fn get_memory_usage_mb() -> f64 {
 
     unsafe {
         let process = GetCurrentProcess();
-        let mut counters = PROCESS_MEMORY_COUNTERS::default();
-        counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        // Use PROCESS_MEMORY_COUNTERS_EX to get PrivateUsage (matches Task Manager)
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX::default();
+        counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
         
-        if GetProcessMemoryInfo(process, &mut counters, counters.cb).is_ok() {
-            // WorkingSetSize is in bytes, convert to MB
-            counters.WorkingSetSize as f64 / (1024.0 * 1024.0)
+        // Cast to PROCESS_MEMORY_COUNTERS* as GetProcessMemoryInfo expects that type
+        let counters_ptr = &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS;
+        
+        if GetProcessMemoryInfo(process, counters_ptr, counters.cb).is_ok() {
+            // PrivateUsage matches Task Manager's "Memory" column
+            counters.PrivateUsage as f64 / (1024.0 * 1024.0)
         } else {
             0.0
         }
