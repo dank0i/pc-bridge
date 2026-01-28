@@ -174,7 +174,7 @@ impl MqttClient {
     }
 
     async fn register_discovery(&self) {
-        let device = HADevice {
+        let _device = HADevice {
             identifiers: vec![self.device_id.clone()],
             name: self.device_name.clone(),
             model: "PC Agent Rust".to_string(),

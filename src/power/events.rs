@@ -15,6 +15,12 @@ const WM_POWERBROADCAST: u32 = 0x218;
 const PBT_APMSUSPEND: usize = 4;
 const PBT_APMRESUMEAUTO: usize = 0x12;
 const PBT_APMRESUMESUSPEND: usize = 7;
+const PBT_POWERSETTINGCHANGE: usize = 0x8013;
+
+// GUID for monitor power setting
+const GUID_CONSOLE_DISPLAY_STATE: windows::core::GUID = windows::core::GUID::from_u128(
+    0x6fe69556_704a_47a0_8f24_c28d936fda47
+);
 
 #[derive(Debug, Clone, Copy)]
 pub enum PowerEvent {
@@ -82,7 +88,7 @@ impl PowerEventListener {
             tokio::time::sleep(delay).await;
             self.state.mqtt.publish_sensor_retained("sleep_state", "awake").await;
             info!("Published awake state");
-            return; // TODO: Check if actually connected before returning
+            return;
         }
     }
 
@@ -100,17 +106,18 @@ impl PowerEventListener {
 
             RegisterClassExW(&wc);
 
-            // Create message-only window
+            // Create a real window (not HWND_MESSAGE) to receive power broadcasts
+            // HWND_MESSAGE windows don't receive broadcast messages!
             let hwnd = match CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 class_name,
-                windows::core::w!(""),
+                windows::core::w!("PC Agent Power Monitor"),
                 WINDOW_STYLE::default(),
                 0, 0, 0, 0,
-                HWND_MESSAGE,
+                None,  // No parent - creates top-level window that can receive broadcasts
                 None,
                 None,
-                Some(&event_tx as *const _ as *const std::ffi::c_void),
+                None,
             ) {
                 Ok(h) => h,
                 Err(e) => {
@@ -119,22 +126,43 @@ impl PowerEventListener {
                 }
             };
 
-            // Store event_tx in window's user data
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, &event_tx as *const _ as isize);
+            // Store event_tx in window's user data using Box to ensure stable address
+            let event_tx_box = Box::new(event_tx);
+            let event_tx_ptr = Box::into_raw(event_tx_box);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, event_tx_ptr as isize);
 
-            info!("Power event listener started");
+            // Register for power setting notifications (modern API, more reliable)
+            let _power_notify = RegisterPowerSettingNotification(
+                hwnd,
+                &GUID_CONSOLE_DISPLAY_STATE,
+                DEVICE_NOTIFY_WINDOW_HANDLE,
+            );
+            
+            info!("Power event listener started (hwnd: {:?})", hwnd);
 
             // Message loop
             let mut msg = MSG::default();
-            while !stopped.load(Ordering::SeqCst) {
-                let ret = GetMessageW(&mut msg, HWND::default(), 0, 0);
-                if ret.0 <= 0 {
+            loop {
+                if stopped.load(Ordering::SeqCst) {
                     break;
                 }
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
+                
+                // Use PeekMessage with timeout to allow checking stopped flag
+                let ret = PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE);
+                if ret.as_bool() {
+                    if msg.message == WM_QUIT {
+                        break;
+                    }
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                } else {
+                    // No message, sleep briefly
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
             }
 
+            // Cleanup
+            let _ = Box::from_raw(event_tx_ptr); // Reclaim the Box to drop it
             let _ = DestroyWindow(hwnd);
         }
     }
@@ -151,12 +179,30 @@ impl PowerEventListener {
             if !event_tx_ptr.is_null() {
                 let event_tx = &*event_tx_ptr;
                 
+                debug!("WM_POWERBROADCAST: wparam={}", wparam.0);
+                
                 match wparam.0 {
                     PBT_APMSUSPEND => {
+                        info!("Received PBT_APMSUSPEND");
                         let _ = event_tx.blocking_send(PowerEvent::Sleep);
                     }
                     PBT_APMRESUMEAUTO | PBT_APMRESUMESUSPEND => {
+                        info!("Received PBT_APMRESUME*");
                         let _ = event_tx.blocking_send(PowerEvent::Wake);
+                    }
+                    PBT_POWERSETTINGCHANGE => {
+                        // Handle power setting change (from RegisterPowerSettingNotification)
+                        let setting = &*(lparam.0 as *const POWERBROADCAST_SETTING);
+                        if setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE {
+                            let state = setting.Data[0];
+                            debug!("Display state change: {}", state);
+                            // 0 = off (sleep), 1 = on, 2 = dimmed
+                            if state == 0 {
+                                let _ = event_tx.blocking_send(PowerEvent::Sleep);
+                            } else if state == 1 {
+                                let _ = event_tx.blocking_send(PowerEvent::Wake);
+                            }
+                        }
                     }
                     _ => {}
                 }

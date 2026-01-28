@@ -11,7 +11,6 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(serde::Deserialize)]
 struct GitHubRelease {
     tag_name: String,
-    prerelease: bool,
     assets: Vec<GitHubAsset>,
 }
 
@@ -59,19 +58,18 @@ pub async fn check_for_updates() {
 }
 
 async fn fetch_latest_release() -> anyhow::Result<Option<GitHubRelease>> {
+    // Use /releases (not /releases/latest) since latest doesn't include pre-releases
     let url = format!(
-        "https://api.github.com/repos/{}/{}/releases/latest",
+        "https://api.github.com/repos/{}/{}/releases",
         GITHUB_OWNER, GITHUB_REPO
     );
     
-    // Use reqwest or a simple TCP client
-    // For now, use Windows WinHTTP via a blocking call
     let response = tokio::task::spawn_blocking(move || {
         fetch_url_blocking(&url)
     }).await??;
     
-    let release: GitHubRelease = serde_json::from_str(&response)?;
-    Ok(Some(release))
+    let releases: Vec<GitHubRelease> = serde_json::from_str(&response)?;
+    Ok(releases.into_iter().next())
 }
 
 fn fetch_url_blocking(url: &str) -> anyhow::Result<String> {

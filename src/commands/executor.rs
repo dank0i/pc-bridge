@@ -59,7 +59,7 @@ impl CommandExecutor {
                         }
                     };
 
-                    let state = Arc::clone(&self.state);
+                    let _state = Arc::clone(&self.state);
                     tokio::spawn(async move {
                         let _permit = permit; // Keep permit alive until done
                         if let Err(e) = Self::execute_command(&cmd.name, &cmd.payload).await {
