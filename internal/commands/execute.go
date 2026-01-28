@@ -142,25 +142,18 @@ func expandWindowsEnv(s string) string {
 	return result
 }
 
-// dismissScreensaver kills the screensaver process to dismiss it
+// dismissScreensaver kills any running screensaver process to dismiss it.
+// Uses a single PowerShell command to kill all .scr processes at once.
 func dismissScreensaver() error {
-	log.Printf("Attempting to dismiss screensaver by killing process")
+	log.Printf("Attempting to dismiss screensaver")
 	
-	// Kill any running screensaver process
-	// Screensavers are .scr files - kill them directly
-	cmd := exec.Command("taskkill", "/F", "/IM", "scrnsave.scr")
+	// Kill all screensaver processes (.scr) with a single PowerShell command
+	// This is more efficient than spawning multiple taskkill processes
+	psCmd := `Get-Process | Where-Object { $_.Path -like '*.scr' } | Stop-Process -Force -ErrorAction SilentlyContinue`
+	
+	cmd := exec.Command("powershell", "-NoProfile", "-Command", psCmd)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	if err := cmd.Run(); err != nil {
-		log.Printf("scrnsave.scr not running or couldn't kill: %v", err)
-	}
-	
-	// Also try common screensaver names
-	// Note: *.scr won't work with taskkill, need specific names or use PowerShell
-	for _, scr := range []string{"PhotoScreensaver.scr", "Bubbles.scr", "Mystify.scr", "Ribbons.scr"} {
-		cmd := exec.Command("taskkill", "/F", "/IM", scr)
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		_ = cmd.Run() // Ignore errors - process might not exist
-	}
+	_ = cmd.Run() // Ignore errors - no screensaver might be running
 	
 	log.Printf("Screensaver dismiss attempted")
 	return nil
