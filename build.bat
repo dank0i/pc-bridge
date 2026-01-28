@@ -1,56 +1,64 @@
 @echo off
-cd /d %~dp0
+setlocal
 
-echo Updating...
-git pull >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    echo Warning: Update failed, continuing with local files...
+echo ========================================
+echo PC Agent (Rust) Build Script
+echo ========================================
+echo.
+
+:: Pull latest from git
+echo Pulling latest changes...
+git pull
+if errorlevel 1 (
+    echo Warning: Git pull failed, continuing with local files
+)
+echo.
+
+:: Check if Rust is installed
+where cargo >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: Rust/Cargo not found!
+    echo Install from: https://rustup.rs/
+    pause
+    exit /b 1
 )
 
-REM Create userConfig.json from example if it doesn't exist
-if not exist userConfig.json (
-    REM Restore example from git if deleted
-    if not exist userConfig.example.json (
-        git checkout userConfig.example.json >nul 2>&1
-    )
-    if exist userConfig.example.json (
+:: Build release
+echo Building release binary...
+cargo build --release
+if errorlevel 1 (
+    echo.
+    echo ERROR: Build failed!
+    pause
+    exit /b 1
+)
+
+:: Copy binary to current directory
+echo.
+echo Copying binary...
+copy /Y "target\release\pc-agent.exe" "pc-agent.exe"
+
+:: Copy config if it doesn't exist
+if not exist "userConfig.json" (
+    if exist "userConfig.example.json" (
         echo Creating userConfig.json from example...
-        copy userConfig.example.json userConfig.json >nul
-        del userConfig.example.json >nul 2>&1
+        copy "userConfig.example.json" "userConfig.json"
         echo.
-        echo ==========================================
-        echo  userConfig.json created!
-        echo  Edit it with your settings before running.
-        echo ==========================================
-        echo.
-    ) else (
-        echo ERROR: userConfig.example.json not found!
-        pause
-        exit /b 1
+        echo IMPORTANT: Edit userConfig.json with your settings!
     )
 )
-
-echo Generating Windows resources...
-go-winres make >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    echo Warning: go-winres failed, continuing without resources...
-)
-
-echo Tidying dependencies...
-go mod tidy >nul 2>&1
-
-echo Building PC Agent...
-go build -ldflags="-H windowsgui -s -w" -o pc-agent.exe .
-if %ERRORLEVEL% EQU 0 (
-    echo Build successful: pc-agent.exe
-) else (
-    echo Build failed!
-)
-
-REM Clean up build artifacts
-del *.syso >nul 2>&1
-echo Cleaned up build artifacts...
 
 echo.
-echo Press any key to exit...
-pause >nul
+echo ========================================
+echo Build complete!
+echo.
+echo Binary: %CD%\pc-agent.exe
+echo Size: 
+for %%A in (pc-agent.exe) do echo   %%~zA bytes (%%~zA / 1048576 MB)
+echo.
+echo To run: pc-agent.exe
+echo To install as service:
+echo   sc create PCAgentService binPath= "%CD%\pc-agent.exe"
+echo   sc start PCAgentService
+echo ========================================
+pause

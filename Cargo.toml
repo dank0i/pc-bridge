@@ -1,0 +1,60 @@
+[package]
+name = "pc-agent"
+version = "0.1.0"
+edition = "2021"
+authors = ["dank0i"]
+description = "Home Assistant PC Agent - Windows service for game detection and remote control"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full", "sync", "time", "signal"] }
+
+# MQTT
+rumqttc = "0.24"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+anyhow = "1"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Windows API
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Power",
+    "Win32_System_Console",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+] }
+
+# Windows service support
+windows-service = "0.7"
+
+# File watching for config hot-reload
+notify = "6"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Process/command execution
+which = "6"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 0

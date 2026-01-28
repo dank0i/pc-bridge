@@ -3,7 +3,8 @@
   "mqtt": {
     "broker": "tcp://homeassistant.local:1883",
     "user": "",
-    "pass": ""
+    "pass": "",
+    "client_id": null
   },
   "intervals": {
     "game_sensor": 5,
@@ -11,9 +12,12 @@
     "availability": 30
   },
   "games": {
-    "FortniteClient": "fortnite",
-    "r5apex": "apex_legends",
-    "bg3": "baldur_s_gate_3",
-    "Overwatch": "overwatch_2"
+    "bf6": "battlefield_6",
+    "destiny2": "destiny2",
+    "FortniteClient-Win64-Shipping": "fortnite",
+    "Minecraft.Windows": "minecraft",
+    "MarvelRivals_Shipping": "marvel_rivals",
+    "eldenring": "elden_ring",
+    "HellDivers2": "helldivers2"
   }
 }
