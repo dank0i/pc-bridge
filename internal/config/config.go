@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,12 +84,12 @@ func loadConfigFromFile() error {
 
 	var cfg UserConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return fmt.Errorf("couldn't parse userConfig.json: %w", err)
+		return fmt.Errorf("couldn't parse userConfig.json (invalid JSON): %w", err)
 	}
 
-	// Validate required fields
-	if cfg.DeviceName == "" || cfg.DeviceName == "my-pc" {
-		return fmt.Errorf("please set device_name in userConfig.json (currently: %q)", cfg.DeviceName)
+	// Validate configuration
+	if err := validateConfig(&cfg); err != nil {
+		return err
 	}
 
 	// Populate global config vars
@@ -136,4 +137,66 @@ func loadConfigFromFile() error {
 // GetConfigPath returns the path to userConfig.json
 func GetConfigPath() string {
 	return configPath
+}
+
+// validateConfig checks all config fields for validity
+func validateConfig(cfg *UserConfig) error {
+	var errors []string
+
+	// Device name validation
+	if cfg.DeviceName == "" {
+		errors = append(errors, "device_name is required")
+	} else if cfg.DeviceName == "my-pc" {
+		errors = append(errors, "device_name is still the default 'my-pc' - please change it")
+	} else if strings.ContainsAny(cfg.DeviceName, " \t\n") {
+		errors = append(errors, "device_name cannot contain whitespace")
+	}
+
+	// MQTT broker validation
+	if cfg.MQTT.Broker != "" {
+		u, err := url.Parse(cfg.MQTT.Broker)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("mqtt.broker is not a valid URL: %v", err))
+		} else if u.Scheme != "tcp" && u.Scheme != "ssl" && u.Scheme != "ws" && u.Scheme != "wss" {
+			errors = append(errors, fmt.Sprintf("mqtt.broker has unsupported scheme %q (use tcp, ssl, ws, or wss)", u.Scheme))
+		} else if u.Host == "" {
+			errors = append(errors, "mqtt.broker is missing host")
+		}
+	}
+
+	// Interval validation (warn on suspicious values)
+	if cfg.Intervals.GameSensor < 0 {
+		errors = append(errors, "intervals.game_sensor cannot be negative")
+	} else if cfg.Intervals.GameSensor > 0 && cfg.Intervals.GameSensor < 1 {
+		log.Println("Warning: intervals.game_sensor < 1 second may cause high CPU usage")
+	}
+
+	if cfg.Intervals.LastActive < 0 {
+		errors = append(errors, "intervals.last_active cannot be negative")
+	}
+
+	if cfg.Intervals.Availability < 0 {
+		errors = append(errors, "intervals.availability cannot be negative")
+	}
+
+	// Games validation (warn on empty)
+	if len(cfg.Games) == 0 {
+		log.Println("Warning: no games configured - game detection will always return 'none'")
+	} else {
+		// Check for empty patterns or IDs
+		for pattern, gameID := range cfg.Games {
+			if pattern == "" {
+				errors = append(errors, "games map has empty process pattern")
+			}
+			if gameID == "" {
+				errors = append(errors, fmt.Sprintf("games[%q] has empty game ID", pattern))
+			}
+		}
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("config validation failed:\n  - %s", strings.Join(errors, "\n  - "))
+	}
+
+	return nil
 }
