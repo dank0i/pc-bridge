@@ -37,8 +37,9 @@ pub async fn check_for_updates() {
                 // Find the exe asset
                 if let Some(asset) = release.assets.iter().find(|a| a.name.ends_with(".exe")) {
                     match download_update(&asset.browser_download_url, &asset.name).await {
-                        Ok(path) => {
-                            show_update_message(&release.tag_name, &path);
+                        Ok(update_path) => {
+                            info!("Update downloaded, installing...");
+                            install_and_restart(&update_path);
                         }
                         Err(e) => {
                             warn!("Failed to download update: {}", e);
@@ -48,7 +49,7 @@ pub async fn check_for_updates() {
                     warn!("No exe asset found in release");
                 }
             } else {
-                info!("Already up to date");
+                info!("Already up to date (v{})", CURRENT_VERSION);
             }
         }
         Ok(None) => {
@@ -161,42 +162,100 @@ fn is_newer_version(remote: &str, current: &str) -> bool {
     remote_parts.len() > current_parts.len()
 }
 
+/// Install update and restart the application
 #[cfg(windows)]
-fn show_update_message(version: &str, path: &PathBuf) {
-    use windows::Win32::UI::WindowsAndMessaging::*;
-    use windows::core::w;
+fn install_and_restart(update_path: &PathBuf) {
+    use std::process::Command;
     
-    let message = format!(
-        "A new version ({}) has been downloaded!\n\n\
-         The update is saved at:\n{}\n\n\
-         To install:\n\
-         1. Close this application\n\
-         2. Rename the .update file to pc-bridge.exe\n\
-         3. Restart the application",
-        version, path.display()
+    let current_exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("Failed to get current exe path: {}", e);
+            return;
+        }
+    };
+    
+    let my_pid = std::process::id();
+    
+    // PowerShell script that:
+    // 1. Waits for this process to exit
+    // 2. Replaces the old exe with the new one
+    // 3. Starts the new exe
+    let ps_script = format!(
+        r#"
+        Start-Sleep -Milliseconds 500
+        $maxWait = 30
+        $waited = 0
+        while ((Get-Process -Id {pid} -ErrorAction SilentlyContinue) -and ($waited -lt $maxWait)) {{
+            Start-Sleep -Seconds 1
+            $waited++
+        }}
+        Start-Sleep -Milliseconds 500
+        Remove-Item -Path '{current}' -Force -ErrorAction SilentlyContinue
+        Move-Item -Path '{update}' -Destination '{current}' -Force
+        Start-Process -FilePath '{current}'
+        "#,
+        pid = my_pid,
+        current = current_exe.display(),
+        update = update_path.display()
     );
     
-    let wide_message: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+    info!("Launching update installer and exiting...");
     
-    unsafe {
-        MessageBoxW(
-            None,
-            windows::core::PCWSTR::from_raw(wide_message.as_ptr()),
-            w!("PC Bridge Update Available"),
-            MB_OK | MB_ICONINFORMATION,
-        );
+    // Launch PowerShell in background to do the swap
+    let mut cmd = Command::new("powershell");
+    cmd.args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps_script]);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    
+    if let Err(e) = cmd.spawn() {
+        warn!("Failed to spawn update installer: {}", e);
+        return;
     }
+    
+    // Exit so the installer can replace us
+    std::process::exit(0);
 }
 
 #[cfg(unix)]
-fn show_update_message(version: &str, path: &PathBuf) {
-    eprintln!(
-        "A new version ({}) has been downloaded!\n\n\
-         The update is saved at:\n{}\n\n\
-         To install:\n\
-         1. Stop this application\n\
-         2. Rename the .update file to pc-bridge\n\
-         3. Restart the application",
-        version, path.display()
+fn install_and_restart(update_path: &PathBuf) {
+    use std::process::Command;
+    use std::os::unix::fs::PermissionsExt;
+    
+    let current_exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("Failed to get current exe path: {}", e);
+            return;
+        }
+    };
+    
+    // Make update executable
+    if let Err(e) = std::fs::set_permissions(update_path, std::fs::Permissions::from_mode(0o755)) {
+        warn!("Failed to set permissions: {}", e);
+    }
+    
+    let my_pid = std::process::id();
+    
+    // Bash script to wait, replace, and restart
+    let script = format!(
+        r#"
+        sleep 1
+        while kill -0 {pid} 2>/dev/null; do sleep 1; done
+        sleep 0.5
+        mv -f '{update}' '{current}'
+        '{current}' &
+        "#,
+        pid = my_pid,
+        current = current_exe.display(),
+        update = update_path.display()
     );
+    
+    info!("Launching update installer and exiting...");
+    
+    if let Err(e) = Command::new("bash").args(["-c", &script]).spawn() {
+        warn!("Failed to spawn update installer: {}", e);
+        return;
+    }
+    
+    std::process::exit(0);
 }
