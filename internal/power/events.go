@@ -2,6 +2,7 @@ package power
 
 import (
 	"log"
+	"pc-agent/internal/winapi"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -13,24 +14,7 @@ import (
 )
 
 const (
-	WM_POWERBROADCAST    = 0x218
-	WM_QUIT              = 0x12
-	WM_USER              = 0x0400
-	WM_APP_HEARTBEAT     = WM_USER + 1 // Custom message for heartbeat
-	PBT_APMSUSPEND       = 4
-	PBT_APMRESUMEAUTO    = 0x12
-	PBT_APMRESUMESUSPEND = 7
-)
-
-var (
-	user32               = windows.NewLazySystemDLL("user32.dll")
-	procCreateWindowExW  = user32.NewProc("CreateWindowExW")
-	procDefWindowProcW   = user32.NewProc("DefWindowProcW")
-	procRegisterClassW   = user32.NewProc("RegisterClassExW")
-	procGetMessageW      = user32.NewProc("GetMessageW")
-	procDispatchMessageW = user32.NewProc("DispatchMessageW")
-	procPostMessageW     = user32.NewProc("PostMessageW")
-	procDestroyWindow    = user32.NewProc("DestroyWindow")
+	WM_APP_HEARTBEAT = winapi.WM_USER + 1 // Custom message for heartbeat
 )
 
 type PowerEventListener struct {
@@ -41,12 +25,14 @@ type PowerEventListener struct {
 	stopped       atomic.Bool
 	lastHeartbeat atomic.Int64 // Unix timestamp of last heartbeat response
 	mu            sync.Mutex
+	heartbeatDone chan struct{} // Signal to stop heartbeat monitor
 }
 
 func NewPowerEventListener(onSleep, onWake func()) *PowerEventListener {
 	p := &PowerEventListener{
-		OnSleep: onSleep,
-		OnWake:  onWake,
+		OnSleep:       onSleep,
+		OnWake:        onWake,
+		heartbeatDone: make(chan struct{}),
 	}
 	p.lastHeartbeat.Store(time.Now().Unix())
 	return p
@@ -63,13 +49,16 @@ func (p *PowerEventListener) Start() {
 func (p *PowerEventListener) Stop() {
 	p.stopped.Store(true)
 
+	// Stop heartbeat monitor
+	close(p.heartbeatDone)
+
 	p.mu.Lock()
 	hwnd := p.hwnd
 	p.mu.Unlock()
 
 	// Post WM_QUIT to unblock GetMessageW
 	if hwnd != 0 {
-		procPostMessageW.Call(hwnd, WM_QUIT, 0, 0)
+		winapi.PostMessageW.Call(hwnd, winapi.WM_QUIT, 0, 0)
 	}
 
 	p.wg.Wait()
@@ -82,13 +71,10 @@ func (p *PowerEventListener) monitorHeartbeat() {
 	defer ticker.Stop()
 
 	for {
-		if p.stopped.Load() {
+		select {
+		case <-p.heartbeatDone:
 			return
-		}
-
-		<-ticker.C
-		if p.stopped.Load() {
-			return
+		case <-ticker.C:
 		}
 
 		// Send heartbeat message
@@ -97,11 +83,15 @@ func (p *PowerEventListener) monitorHeartbeat() {
 		p.mu.Unlock()
 
 		if hwnd != 0 {
-			procPostMessageW.Call(hwnd, WM_APP_HEARTBEAT, 0, 0)
+			winapi.PostMessageW.Call(hwnd, WM_APP_HEARTBEAT, 0, 0)
 		}
 
 		// Check if we got a response within 5 seconds
-		time.Sleep(5 * time.Second)
+		select {
+		case <-p.heartbeatDone:
+			return
+		case <-time.After(5 * time.Second):
+		}
 		lastBeat := p.lastHeartbeat.Load()
 		if time.Since(time.Unix(lastBeat, 0)) > 70*time.Second {
 			log.Println("WARNING: Power event message pump may be unresponsive!")
@@ -121,7 +111,7 @@ func (p *PowerEventListener) listen() {
 		// Clean up the window on exit
 		p.mu.Lock()
 		if p.hwnd != 0 {
-			procDestroyWindow.Call(p.hwnd)
+			winapi.DestroyWindow.Call(p.hwnd)
 			p.hwnd = 0
 		}
 		p.mu.Unlock()
@@ -132,19 +122,19 @@ func (p *PowerEventListener) listen() {
 
 	wndProc := syscall.NewCallback(func(hwnd, msg, wParam, lParam uintptr) uintptr {
 		switch msg {
-		case WM_POWERBROADCAST:
+		case winapi.WM_POWERBROADCAST:
 			switch wParam {
-			case PBT_APMSUSPEND:
+			case winapi.PBT_APMSUSPEND:
 				log.Println("Power event: SLEEP (PBT_APMSUSPEND)")
 				if p.OnSleep != nil {
 					p.OnSleep()
 				}
-			case PBT_APMRESUMEAUTO:
+			case winapi.PBT_APMRESUMEAUTO:
 				log.Println("Power event: WAKE (PBT_APMRESUMEAUTO)")
 				if p.OnWake != nil {
 					p.OnWake()
 				}
-			case PBT_APMRESUMESUSPEND:
+			case winapi.PBT_APMRESUMESUSPEND:
 				log.Println("Power event: WAKE (PBT_APMRESUMESUSPEND)")
 				if p.OnWake != nil {
 					p.OnWake()
@@ -156,7 +146,7 @@ func (p *PowerEventListener) listen() {
 			// Respond to heartbeat - proves message pump is alive
 			p.lastHeartbeat.Store(time.Now().Unix())
 		}
-		ret, _, _ := procDefWindowProcW.Call(hwnd, msg, wParam, lParam)
+		ret, _, _ := winapi.DefWindowProcW.Call(hwnd, msg, wParam, lParam)
 		return ret
 	})
 
@@ -180,9 +170,9 @@ func (p *PowerEventListener) listen() {
 	wc.WndProc = wndProc
 	wc.ClassName = className
 
-	procRegisterClassW.Call(uintptr(unsafe.Pointer(&wc)))
+	winapi.RegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 
-	hwnd, _, _ := procCreateWindowExW.Call(
+	hwnd, _, _ := winapi.CreateWindowExW.Call(
 		0, uintptr(unsafe.Pointer(className)), uintptr(unsafe.Pointer(windowName)),
 		0, 0, 0, 0, 0, 0, 0, 0, 0,
 	)
@@ -204,7 +194,7 @@ func (p *PowerEventListener) listen() {
 	var msg MSG
 	// GetMessageW blocks until a message is available - no busy loop!
 	for {
-		ret, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
+		ret, _, _ := winapi.GetMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
 		if ret == 0 || ret == ^uintptr(0) { // WM_QUIT or error
 			log.Println("Power event listener: message pump exiting")
 			return
@@ -215,6 +205,6 @@ func (p *PowerEventListener) listen() {
 			return
 		}
 
-		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
+		winapi.DispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
 	}
 }

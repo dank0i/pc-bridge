@@ -15,46 +15,12 @@ import (
 	"pc-agent/internal/mqtt"
 	"pc-agent/internal/power"
 	"pc-agent/internal/sensors"
+	"pc-agent/internal/winapi"
 
 	"golang.org/x/sys/windows/svc"
 )
 
 const serviceName = "PCAgentService"
-
-var (
-	kernel32                     = syscall.NewLazyDLL("kernel32.dll")
-	procCreateToolhelp32Snapshot = kernel32.NewProc("CreateToolhelp32Snapshot")
-	procProcess32FirstW          = kernel32.NewProc("Process32FirstW")
-	procProcess32NextW           = kernel32.NewProc("Process32NextW")
-	procOpenProcess              = kernel32.NewProc("OpenProcess")
-	procTerminateProcess         = kernel32.NewProc("TerminateProcess")
-	procSetConsoleCtrlHandler    = kernel32.NewProc("SetConsoleCtrlHandler")
-)
-
-const (
-	TH32CS_SNAPPROCESS = 0x00000002
-	PROCESS_TERMINATE  = 0x0001
-
-	// Console control events for graceful shutdown
-	CTRL_C_EVENT        = 0
-	CTRL_BREAK_EVENT    = 1
-	CTRL_CLOSE_EVENT    = 2
-	CTRL_LOGOFF_EVENT   = 5
-	CTRL_SHUTDOWN_EVENT = 6
-)
-
-type processEntry32 struct {
-	Size            uint32
-	Usage           uint32
-	ProcessID       uint32
-	DefaultHeapID   uintptr
-	ModuleID        uint32
-	Threads         uint32
-	ParentProcessID uint32
-	PriClassBase    int32
-	Flags           uint32
-	ExeFile         [260]uint16
-}
 
 // killExistingInstances kills any other running pc-agent.exe processes using Windows API
 func killExistingInstances() {
@@ -67,17 +33,17 @@ func killExistingInstances() {
 	exeName := strings.ToLower(filepath.Base(exe))
 	
 	// Create snapshot of all processes
-	handle, _, _ := procCreateToolhelp32Snapshot.Call(TH32CS_SNAPPROCESS, 0)
+	handle, _, _ := winapi.CreateToolhelp32Snapshot.Call(winapi.TH32CS_SNAPPROCESS, 0)
 	if handle == uintptr(syscall.InvalidHandle) {
 		return
 	}
 	defer syscall.CloseHandle(syscall.Handle(handle))
 	
-	var entry processEntry32
+	var entry winapi.ProcessEntry32
 	entry.Size = uint32(unsafe.Sizeof(entry))
 	
 	// Get first process
-	ret, _, _ := procProcess32FirstW.Call(handle, uintptr(unsafe.Pointer(&entry)))
+	ret, _, _ := winapi.Process32FirstW.Call(handle, uintptr(unsafe.Pointer(&entry)))
 	if ret == 0 {
 		return
 	}
@@ -86,16 +52,16 @@ func killExistingInstances() {
 		procName := strings.ToLower(syscall.UTF16ToString(entry.ExeFile[:]))
 		if procName == exeName && entry.ProcessID != myPID {
 			// Open and terminate the process
-			procHandle, _, _ := procOpenProcess.Call(PROCESS_TERMINATE, 0, uintptr(entry.ProcessID))
+			procHandle, _, _ := winapi.OpenProcess.Call(winapi.PROCESS_TERMINATE, 0, uintptr(entry.ProcessID))
 			if procHandle != 0 {
 				log.Printf("Killing existing instance (PID %d)", entry.ProcessID)
-				procTerminateProcess.Call(procHandle, 0)
+				winapi.TerminateProcess.Call(procHandle, 0)
 				syscall.CloseHandle(syscall.Handle(procHandle))
 			}
 		}
 		
 		// Get next process
-		ret, _, _ = procProcess32NextW.Call(handle, uintptr(unsafe.Pointer(&entry)))
+		ret, _, _ = winapi.Process32NextW.Call(handle, uintptr(unsafe.Pointer(&entry)))
 		if ret == 0 {
 			break
 		}
@@ -110,8 +76,11 @@ type pcAgentService struct {
 	displayWakeHandler *power.DisplayWakeHandler
 	stopChan           chan struct{}
 	wg                 sync.WaitGroup
-	mu                 sync.Mutex // protects mqttClient access
+	mu                 sync.Mutex       // protects mqttClient access
+	cmdSem             chan struct{}    // semaphore to limit concurrent commands
 }
+
+const maxConcurrentCommands = 5
 
 func main() {
 	// Kill any existing instances before starting
@@ -132,7 +101,10 @@ func main() {
 		log.Println("  sc start PCAgentService")
 		log.Println("")
 
-		agent := &pcAgentService{stopChan: make(chan struct{})}
+		agent := &pcAgentService{
+			stopChan: make(chan struct{}),
+			cmdSem:   make(chan struct{}, maxConcurrentCommands),
+		}
 		agent.run()
 
 		// Set up graceful shutdown via Windows console control handler
@@ -140,7 +112,7 @@ func main() {
 		shutdownChan := make(chan struct{})
 		handlerCallback := syscall.NewCallback(func(ctrlType uint32) uintptr {
 			switch ctrlType {
-			case CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT:
+			case winapi.CTRL_C_EVENT, winapi.CTRL_BREAK_EVENT, winapi.CTRL_CLOSE_EVENT, winapi.CTRL_LOGOFF_EVENT, winapi.CTRL_SHUTDOWN_EVENT:
 				log.Printf("Received shutdown signal (type %d)", ctrlType)
 				select {
 				case <-shutdownChan:
@@ -152,7 +124,7 @@ func main() {
 			}
 			return 0 // Not handled
 		})
-		procSetConsoleCtrlHandler.Call(handlerCallback, 1)
+		winapi.SetConsoleCtrlHandler.Call(handlerCallback, 1)
 
 		// Wait for shutdown signal
 		<-shutdownChan
@@ -166,6 +138,7 @@ func (s *pcAgentService) Execute(args []string, r <-chan svc.ChangeRequest, chan
 	changes <- svc.Status{State: svc.StartPending}
 
 	s.stopChan = make(chan struct{})
+	s.cmdSem = make(chan struct{}, maxConcurrentCommands)
 	s.run()
 
 	changes <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
@@ -194,12 +167,22 @@ func (s *pcAgentService) run() {
 
 	// Create MQTT client with command handler
 	s.mqttClient = mqtt.NewClient(func(command, payload string) {
-		// Run command execution in goroutine to not block MQTT handler
-		go func() {
-			if err := commands.Execute(command, payload); err != nil {
-				log.Printf("Command execution error: %v", err)
-			}
-		}()
+		// Rate limit: try to acquire semaphore, skip if full
+		if s.cmdSem == nil {
+			log.Printf("Command received before init, dropping: %s", command)
+			return
+		}
+		select {
+		case s.cmdSem <- struct{}{}:
+			go func() {
+				defer func() { <-s.cmdSem }() // Release semaphore
+				if err := commands.Execute(command, payload); err != nil {
+					log.Printf("Command execution error: %v", err)
+				}
+			}()
+		default:
+			log.Printf("Command rate limited, dropping: %s", command)
+		}
 	})
 
 	// Connect to MQTT

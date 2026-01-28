@@ -2,38 +2,14 @@ package power
 
 import (
 	"log"
+	"pc-agent/internal/winapi"
 	"runtime"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
-// Windows API constants for display control
-const (
-	HWND_BROADCAST   = 0xFFFF
-	WM_SYSCOMMAND    = 0x0112
-	SC_MONITORPOWER  = 0xF170
-	MONITOR_ON       = 0xFFFFFFFFFFFFFFFF // -1 as unsigned
-	MONITOR_STANDBY  = 1
-	MONITOR_OFF      = 2
-
-	// SetThreadExecutionState flags
-	ES_CONTINUOUS       = 0x80000000
-	ES_SYSTEM_REQUIRED  = 0x00000001
-	ES_DISPLAY_REQUIRED = 0x00000002
-
-	// Virtual key codes and flags
-	VK_F15          = 0x7E // F15 - benign key, unlikely to trigger anything
-	KEYEVENTF_KEYUP = 0x0002
-)
-
 var (
-	kernel32                    = syscall.NewLazyDLL("kernel32.dll")
-	procSetThreadExecutionState = kernel32.NewProc("SetThreadExecutionState")
-	procSendMessageW            = user32.NewProc("SendMessageW")
-	procKeybd_event             = user32.NewProc("keybd_event")
-
 	// sleepPreventionActive tracks if sleep prevention is currently active
 	// to avoid spawning multiple reset goroutines
 	sleepPreventionActive atomic.Bool
@@ -89,11 +65,11 @@ func WakeDisplayWithRetry(maxAttempts int, delayBetween time.Duration) {
 
 // turnOnMonitor sends the SC_MONITORPOWER message to turn on all monitors
 func turnOnMonitor() {
-	procSendMessageW.Call(
-		HWND_BROADCAST,
-		WM_SYSCOMMAND,
-		SC_MONITORPOWER,
-		uintptr(MONITOR_ON),
+	winapi.SendMessageW.Call(
+		winapi.HWND_BROADCAST,
+		winapi.WM_SYSCOMMAND,
+		winapi.SC_MONITORPOWER,
+		uintptr(winapi.MONITOR_ON),
 	)
 }
 
@@ -104,10 +80,10 @@ func turnOnMonitor() {
 // - It registers as user input, preventing immediate re-sleep
 func sendBenignKeypress() {
 	// Key down F15
-	procKeybd_event.Call(uintptr(VK_F15), 0, 0, 0)
+	winapi.KeybdEvent.Call(uintptr(winapi.VK_F15), 0, 0, 0)
 	time.Sleep(10 * time.Millisecond)
 	// Key up F15
-	procKeybd_event.Call(uintptr(VK_F15), 0, uintptr(KEYEVENTF_KEYUP), 0)
+	winapi.KeybdEvent.Call(uintptr(winapi.VK_F15), 0, uintptr(winapi.KEYEVENTF_KEYUP), 0)
 }
 
 // preventSleepTemporary prevents the system from sleeping for the specified duration.
@@ -125,8 +101,8 @@ func preventSleepTemporary(duration time.Duration) {
 		defer runtime.UnlockOSThread()
 
 		// Set execution state to prevent sleep
-		ret, _, _ := procSetThreadExecutionState.Call(
-			uintptr(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED),
+		ret, _, _ := winapi.SetThreadExecutionState.Call(
+			uintptr(winapi.ES_CONTINUOUS | winapi.ES_SYSTEM_REQUIRED | winapi.ES_DISPLAY_REQUIRED),
 		)
 		if ret == 0 {
 			sleepPreventionActive.Store(false)
@@ -134,7 +110,7 @@ func preventSleepTemporary(duration time.Duration) {
 		}
 
 		time.Sleep(duration)
-		procSetThreadExecutionState.Call(uintptr(ES_CONTINUOUS))
+		winapi.SetThreadExecutionState.Call(uintptr(winapi.ES_CONTINUOUS))
 		sleepPreventionActive.Store(false)
 		log.Println("WakeDisplay: Sleep prevention ended")
 	}()

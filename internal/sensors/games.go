@@ -1,12 +1,12 @@
 package sensors
 
 import (
-	"log"
 	"pc-agent/internal/config"
+	"pc-agent/internal/winapi"
 	"strings"
 	"sync"
-
-	"github.com/shirou/gopsutil/v3/process"
+	"syscall"
+	"unsafe"
 )
 
 type gamePattern struct {
@@ -54,32 +54,47 @@ func getPatterns() []gamePattern {
 	return patternCache
 }
 
-// GetRunningGame checks for running game processes and returns the game identifier
+// GetRunningGame checks for running game processes and returns the game identifier.
+// Uses Windows API directly to avoid gopsutil allocations.
 func GetRunningGame() string {
-	processes, err := process.Processes()
-	if err != nil {
-		log.Printf("Error getting processes: %v", err)
+	// Get cached patterns (rebuilds only on game map change)
+	gamePatterns := getPatterns()
+	if len(gamePatterns) == 0 {
 		return "none"
 	}
 
-	// Get cached patterns (rebuilds only on game map change)
-	gamePatterns := getPatterns()
+	// Create snapshot of all processes
+	handle, _, _ := winapi.CreateToolhelp32Snapshot.Call(winapi.TH32CS_SNAPPROCESS, 0)
+	if handle == uintptr(syscall.InvalidHandle) {
+		return "none"
+	}
+	defer syscall.CloseHandle(syscall.Handle(handle))
 
-	for _, p := range processes {
-		name, err := p.Name()
-		if err != nil {
-			continue
-		}
+	var entry winapi.ProcessEntry32
+	entry.Size = uint32(unsafe.Sizeof(entry))
 
-		// Lowercase once per process
-		nameLower := strings.ToLower(name)
-		baseNameLower := strings.TrimSuffix(nameLower, ".exe")
+	// Get first process
+	ret, _, _ := winapi.Process32FirstW.Call(handle, uintptr(unsafe.Pointer(&entry)))
+	if ret == 0 {
+		return "none"
+	}
+
+	for {
+		// Convert process name to lowercase string
+		procName := strings.ToLower(syscall.UTF16ToString(entry.ExeFile[:]))
+		baseNameLower := strings.TrimSuffix(procName, ".exe")
 
 		// Check against patterns
 		for _, gp := range gamePatterns {
-			if strings.HasPrefix(nameLower, gp.patternLower) || baseNameLower == gp.patternLower {
+			if strings.HasPrefix(procName, gp.patternLower) || baseNameLower == gp.patternLower {
 				return gp.gameID
 			}
+		}
+
+		// Get next process
+		ret, _, _ = winapi.Process32NextW.Call(handle, uintptr(unsafe.Pointer(&entry)))
+		if ret == 0 {
+			break
 		}
 	}
 

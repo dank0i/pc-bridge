@@ -36,6 +36,9 @@ if %ERRORLEVEL% NEQ 0 (
     echo Warning: go-winres failed, continuing without resources...
 )
 
+echo Tidying dependencies...
+go mod tidy >nul 2>&1
+
 echo Building PC Agent...
 go build -ldflags="-H windowsgui -s -w" -o pc-agent.exe .
 if %ERRORLEVEL% EQU 0 (

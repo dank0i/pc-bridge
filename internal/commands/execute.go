@@ -6,21 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"pc-agent/internal/config"
+	"pc-agent/internal/winapi"
 	"strings"
 	"syscall"
 	"time"
 )
 
-var (
-	user32      = syscall.NewLazyDLL("user32.dll")
-	keybd_event = user32.NewProc("keybd_event")
-)
-
-const (
-	KEYEVENTF_KEYUP = 0x0002
-	VK_CONTROL      = 0x11
-	VK_F6           = 0x75
-)
+// Command timeout - kills stuck processes after this duration
+const commandTimeout = 5 * time.Minute
 
 // Execute runs a command based on the command name and optional payload
 func Execute(command, payload string) error {
@@ -105,10 +98,21 @@ func executeShellCommand(command, payload string) error {
 		return err
 	}
 
-	// Wait in goroutine to clean up process resources and prevent zombie processes
+	// Wait in goroutine with timeout to prevent zombie processes
 	go func() {
-		if err := cmd.Wait(); err != nil {
-			log.Printf("Command finished with error: %v", err)
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+
+		select {
+		case err := <-done:
+			if err != nil {
+				log.Printf("Command finished with error: %v", err)
+			}
+		case <-time.After(commandTimeout):
+			log.Printf("Command timed out after %v, killing process", commandTimeout)
+			if cmd.Process != nil {
+				cmd.Process.Kill()
+			}
 		}
 	}()
 
@@ -162,16 +166,16 @@ func dismissScreensaver() error {
 // sendCtrlF6 sends Ctrl+F6 keypress (Discord leave channel hotkey)
 func sendCtrlF6() error {
 	// Key down Ctrl
-	keybd_event.Call(uintptr(VK_CONTROL), 0, 0, 0)
+	winapi.KeybdEvent.Call(uintptr(winapi.VK_CONTROL), 0, 0, 0)
 	time.Sleep(10 * time.Millisecond)
 	// Key down F6
-	keybd_event.Call(uintptr(VK_F6), 0, 0, 0)
+	winapi.KeybdEvent.Call(uintptr(winapi.VK_F6), 0, 0, 0)
 	time.Sleep(10 * time.Millisecond)
 	// Key up F6
-	keybd_event.Call(uintptr(VK_F6), 0, uintptr(KEYEVENTF_KEYUP), 0)
+	winapi.KeybdEvent.Call(uintptr(winapi.VK_F6), 0, uintptr(winapi.KEYEVENTF_KEYUP), 0)
 	time.Sleep(10 * time.Millisecond)
 	// Key up Ctrl
-	keybd_event.Call(uintptr(VK_CONTROL), 0, uintptr(KEYEVENTF_KEYUP), 0)
+	winapi.KeybdEvent.Call(uintptr(winapi.VK_CONTROL), 0, uintptr(winapi.KEYEVENTF_KEYUP), 0)
 	return nil
 }
 
@@ -251,5 +255,28 @@ $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 
 	cmd := exec.Command("powershell", "-NoProfile", "-Command", psCmd)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	return cmd.Run()
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	// Wait in goroutine with timeout - notifications should complete quickly
+	go func() {
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+
+		select {
+		case err := <-done:
+			if err != nil {
+				log.Printf("Notification command error: %v", err)
+			}
+		case <-time.After(30 * time.Second):
+			log.Printf("Notification timed out, killing process")
+			if cmd.Process != nil {
+				cmd.Process.Kill()
+			}
+		}
+	}()
+
+	return nil
 }

@@ -116,9 +116,10 @@ func watchConfigFile() {
 	}
 }
 
-// GetGameMap returns the current game map and its version (thread-safe)
+// GetGameMap returns the current game map and its version (thread-safe).
 // The version increments whenever the map is reloaded from disk.
 // Callers can cache results and only rebuild when version changes.
+// WARNING: The returned map is a direct reference - do not modify it.
 func GetGameMap() (map[string]string, uint64) {
 	gameMapMutex.RLock()
 	defer gameMapMutex.RUnlock()
