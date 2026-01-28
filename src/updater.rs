@@ -22,12 +22,6 @@ struct GitHubAsset {
 
 /// Check for updates and download if available
 pub async fn check_for_updates() {
-    // Skip update check - repo is private and requires authentication
-    // TODO: Re-enable when repo is made public or add token support
-    info!("Update check skipped (private repo)");
-    return;
-    
-    #[allow(unreachable_code)]
     match fetch_latest_release().await {
         Ok(Some(release)) => {
             let remote_version = release.tag_name.trim_start_matches('v');
