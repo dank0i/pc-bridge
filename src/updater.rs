@@ -1,11 +1,16 @@
 //! Auto-updater - checks GitHub releases on launch
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use tracing::{info, warn};
 
 const GITHUB_OWNER: &str = "dank0i";
 const GITHUB_REPO: &str = "pc-bridge";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// GitHub release info (minimal fields we need)
 #[derive(serde::Deserialize)]
@@ -74,8 +79,9 @@ fn fetch_url_blocking(url: &str) -> anyhow::Result<String> {
     use std::process::Command;
     
     // Use PowerShell to fetch URL (works on all Windows)
-    let output = Command::new("powershell")
-        .args([
+    #[allow(unused_mut)]
+    let mut cmd = Command::new("powershell");
+    cmd.args([
             "-NoProfile",
             "-Command",
             &format!(
@@ -83,8 +89,12 @@ fn fetch_url_blocking(url: &str) -> anyhow::Result<String> {
                  (Invoke-WebRequest -Uri '{}' -UseBasicParsing -Headers @{{'User-Agent'='pc-agent'}}).Content",
                 url
             ),
-        ])
-        .output()?;
+        ]);
+    
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    
+    let output = cmd.output()?;
     
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -106,8 +116,9 @@ async fn download_update(url: &str, filename: &str) -> anyhow::Result<PathBuf> {
     
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         // Download using PowerShell
-        let output = std::process::Command::new("powershell")
-            .args([
+        #[allow(unused_mut)]
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.args([
                 "-NoProfile",
                 "-Command",
                 &format!(
@@ -115,8 +126,12 @@ async fn download_update(url: &str, filename: &str) -> anyhow::Result<PathBuf> {
                      Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing",
                     url, path.display()
                 ),
-            ])
-            .output()?;
+            ]);
+        
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        
+        let output = cmd.output()?;
         
         if !output.status.success() {
             anyhow::bail!("Download failed: {}", String::from_utf8_lossy(&output.stderr));
