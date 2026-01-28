@@ -294,8 +294,8 @@ $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 // Supported formats:
 //   - steam:APPID   → launches Steam game by App ID (e.g., steam:1517290)
 //   - epic:GAME     → launches Epic game by name (e.g., epic:Fortnite)
-//   - xbox:PKG      → launches Xbox/MS Store game (e.g., xbox:Microsoft.MinecraftUWP_8wekyb3d8bbwe!App)
-//   - exe:PATH      → launches executable directly (e.g., exe:C:\Games\Game.exe)
+//   - exe:PATH      → launches executable (e.g., exe:C:\Games\Game.exe)
+//   - lnk:PATH      → launches shortcut (e.g., lnk:C:\Users\me\Desktop\Game.lnk)
 //   - close:NAME    → gracefully closes process (e.g., close:bf6)
 //
 // Returns empty string if not a launcher shortcut.
@@ -332,26 +332,20 @@ func expandLauncherShortcut(cmd string) string {
 		log.Printf("Launching Epic game: %s", arg)
 		return `Start-Process "com.epicgames.launcher://apps/` + arg + `?action=launch&silent=true"`
 
-	case "xbox", "msstore":
-		// Xbox package names contain alphanumeric, dots, underscores, exclamation
-		if !isSafePackageName(arg) {
-			log.Printf("Invalid Xbox/MS Store package name: %s", arg)
-			return ""
-		}
-		log.Printf("Launching Xbox/MS Store game: %s", arg)
-		// Use explorer.exe to launch - more reliable than Start-Process with shell:
-		return `Start-Process explorer.exe -ArgumentList 'shell:AppsFolder\` + arg + `'`
-
-	case "exe", "run":
-		// Executable paths - allow file path characters but reject shell metacharacters
+	case "exe", "lnk", "run", "path":
+		// Executable or shortcut paths - allow file path characters but reject shell metacharacters
 		if !isSafePath(arg) {
-			log.Printf("Invalid executable path (contains shell metacharacters): %s", arg)
+			log.Printf("Invalid path (contains shell metacharacters): %s", arg)
 			return ""
 		}
-		log.Printf("Launching executable: %s", arg)
-		// Split path and arguments if present (first space after .exe or no extension)
+		log.Printf("Launching: %s", arg)
+		// Split path and arguments if present (first space after .exe/.lnk or no extension)
 		var exePath, exeArgs string
-		if idx := strings.Index(strings.ToLower(arg), ".exe "); idx != -1 {
+		lowerArg := strings.ToLower(arg)
+		if idx := strings.Index(lowerArg, ".exe "); idx != -1 {
+			exePath = arg[:idx+4]
+			exeArgs = strings.TrimSpace(arg[idx+5:])
+		} else if idx := strings.Index(lowerArg, ".lnk "); idx != -1 {
 			exePath = arg[:idx+4]
 			exeArgs = strings.TrimSpace(arg[idx+5:])
 		} else {
@@ -396,17 +390,6 @@ func isSafeIdentifier(s string) bool {
 	for _, r := range s {
 		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
 			r == '.' || r == '-' || r == '_') {
-			return false
-		}
-	}
-	return len(s) > 0
-}
-
-// isSafePackageName returns true if s is valid for Xbox/MS Store package names
-func isSafePackageName(s string) bool {
-	for _, r := range s {
-		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
-			r == '.' || r == '-' || r == '_' || r == '!') {
 			return false
 		}
 	}
