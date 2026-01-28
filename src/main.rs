@@ -26,7 +26,7 @@ use tracing_subscriber::FmtSubscriber;
 
 use crate::config::Config;
 use crate::mqtt::MqttClient;
-use crate::sensors::{GameSensor, IdleSensor};
+use crate::sensors::{GameSensor, IdleSensor, MemorySensor};
 use crate::power::PowerEventListener;
 use crate::commands::CommandExecutor;
 
@@ -75,12 +75,14 @@ async fn main() -> anyhow::Result<()> {
     // Start subsystems
     let game_sensor = GameSensor::new(Arc::clone(&state));
     let idle_sensor = IdleSensor::new(Arc::clone(&state));
+    let memory_sensor = MemorySensor::new(Arc::clone(&state));
     let power_listener = PowerEventListener::new(Arc::clone(&state));
     let command_executor = CommandExecutor::new(Arc::clone(&state), command_rx);
 
     // Spawn sensor tasks
     let game_handle = tokio::spawn(game_sensor.run());
     let idle_handle = tokio::spawn(idle_sensor.run());
+    let memory_handle = tokio::spawn(memory_sensor.run());
     let power_handle = tokio::spawn(power_listener.run());
     let command_handle = tokio::spawn(command_executor.run());
 
@@ -107,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
         async {
             let _ = game_handle.await;
             let _ = idle_handle.await;
+            let _ = memory_handle.await;
             let _ = power_handle.await;
             let _ = command_handle.await;
             let _ = config_watcher_handle.await;

@@ -1,0 +1,76 @@
+//! Memory usage sensor - reports process memory consumption
+
+use std::sync::Arc;
+use tokio::time::{interval, Duration};
+use tracing::debug;
+
+use crate::AppState;
+
+pub struct MemorySensor {
+    state: Arc<AppState>,
+}
+
+impl MemorySensor {
+    pub fn new(state: Arc<AppState>) -> Self {
+        Self { state }
+    }
+
+    pub async fn run(self) {
+        // Report memory every 30 seconds
+        let mut tick = interval(Duration::from_secs(30));
+        let mut shutdown_rx = self.state.shutdown_tx.subscribe();
+
+        // Publish initial state
+        let memory_mb = get_memory_usage_mb();
+        self.state.mqtt.publish_sensor("agent_memory", &format!("{:.1}", memory_mb)).await;
+
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    debug!("Memory sensor shutting down");
+                    break;
+                }
+                _ = tick.tick() => {
+                    let memory_mb = get_memory_usage_mb();
+                    self.state.mqtt.publish_sensor("agent_memory", &format!("{:.1}", memory_mb)).await;
+                }
+            }
+        }
+    }
+}
+
+/// Get current process memory usage in MB
+#[cfg(windows)]
+fn get_memory_usage_mb() -> f64 {
+    use windows::Win32::System::ProcessStatus::*;
+    use windows::Win32::System::Threading::*;
+
+    unsafe {
+        let process = GetCurrentProcess();
+        let mut counters = PROCESS_MEMORY_COUNTERS::default();
+        counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        
+        if GetProcessMemoryInfo(process, &mut counters, counters.cb).is_ok() {
+            // WorkingSetSize is in bytes, convert to MB
+            counters.WorkingSetSize as f64 / (1024.0 * 1024.0)
+        } else {
+            0.0
+        }
+    }
+}
+
+#[cfg(unix)]
+fn get_memory_usage_mb() -> f64 {
+    // Read from /proc/self/statm
+    if let Ok(statm) = std::fs::read_to_string("/proc/self/statm") {
+        let parts: Vec<&str> = statm.split_whitespace().collect();
+        if let Some(rss_pages) = parts.get(1) {
+            if let Ok(pages) = rss_pages.parse::<u64>() {
+                // Pages are typically 4KB
+                let page_size = 4096u64;
+                return (pages * page_size) as f64 / (1024.0 * 1024.0);
+            }
+        }
+    }
+    0.0
+}
