@@ -1,100 +1,105 @@
-# PC Agent
+# PC Agent (Rust)
 
-A lightweight Windows agent that bridges a gaming PC with Home Assistant via MQTT.
+A lightweight Windows agent that bridges your gaming PC with Home Assistant via MQTT.
 
 ## Features
 
-- **Game Detection**: Monitors running processes and reports the current game to Home Assistant
-- **Power Events**: Detects sleep/wake events and publishes state to MQTT
-- **Display Wake**: Automatically wakes displays after Wake-on-LAN (fixes BIOS/motherboard issues where WoL doesn't turn on monitors)
-- **Remote Commands**: Receives commands via MQTT (launch Steam, screensaver, shutdown, sleep, Discord controls)
-- **Hot-Reload Config**: Updates game mappings from `userConfig.json` without restart
+- **Game Detection** - Monitors running processes and reports current game
+- **Idle Tracking** - Reports last user input time
+- **Power Events** - Detects sleep/wake and publishes state
+- **Display Wake** - Fixes WoL display issues automatically
+- **Remote Commands** - Launch games, screensaver, shutdown, Discord controls
+- **Hot-Reload** - Updates game mappings without restart
 
 ## Requirements
 
 - Windows 10/11
-- Go 1.21+ (for building)
+- [Rust](https://rustup.rs/) (for building)
 - MQTT broker (e.g., Mosquitto on Home Assistant)
 
 ## Quick Start
 
-1. Clone the repo
-2. Install go-winres: `go install github.com/tc-hib/go-winres@latest`
-3. Run `build.bat`
-4. Run `pc-agent.exe` - it will create `userConfig.json` from the example
-5. Edit `userConfig.json` with your settings
-6. Run `pc-agent.exe` again
+**On your Windows PC:**
+
+```powershell
+# 1. Install Rust (if not installed)
+# Download from https://rustup.rs/
+
+# 2. Clone and build
+git clone https://github.com/dank0i/pc-agent.git
+cd pc-agent
+git checkout rust
+cargo build --release
+
+# 3. Setup
+copy target\release\pc-agent.exe .
+copy userConfig.example.json userConfig.json
+notepad userConfig.json   # Edit with your settings
+
+# 4. Run
+.\pc-agent.exe
+```
+
+Or just run `build.bat` after cloning.
 
 ## Configuration
 
-All settings are in `userConfig.json` (created on first run):
+Edit `userConfig.json`:
 
 ```json
 {
-  "device_name": "my-pc",
+  "device_name": "dank0i-pc",
   "mqtt": {
     "broker": "tcp://homeassistant.local:1883",
-    "user": "",
-    "pass": "",
-    "client_id": "pc-agent-my-pc"
+    "user": "mqtt_user",
+    "pass": "mqtt_pass"
   },
   "intervals": {
     "game_sensor": 5,
-    "last_active": 10,
-    "availability": 30
+    "last_active": 10
   },
   "games": {
-    "FortniteClient": "fortnite",
-    "r5apex": "apex_legends"
+    "bf6": "battlefield_6",
+    "FortniteClient-Win64-Shipping": "fortnite",
+    "MarvelRivals_Shipping": "marvel_rivals"
   }
 }
 ```
 
-- **device_name**: Your PC's name in Home Assistant (used in MQTT topics)
-- **mqtt**: Broker connection settings
-- **intervals**: Sensor update rates in seconds
-- **games**: Map of process names to game IDs (hot-reloaded on save)
+## Commands
 
-## MQTT Topics
+Send commands via MQTT (payload to `SteamLaunch`):
 
-### Sensors (Published)
-```
-homeassistant/sensor/{device_name}/runninggames/state   # Current game name
-homeassistant/sensor/{device_name}/lastactive/state     # Last input timestamp
-homeassistant/sensor/{device_name}/sleep_state/state    # "sleeping" or "awake"
-homeassistant/sensor/{device_name}/availability         # "online" or "offline" (LWT)
-```
+| Payload | Description |
+|---------|-------------|
+| `steam:1234` | Launch Steam game by App ID |
+| `epic:Fortnite` | Launch Epic game |
+| `exe:C:\path\to.exe` | Run executable |
+| `lnk:C:\path\to.lnk` | Run shortcut |
+| `close:processname` | Close process gracefully |
 
-### Commands (Subscribed)
-```
-homeassistant/button/{device_name}/SteamLaunch/action
-homeassistant/button/{device_name}/Screensaver/action
-homeassistant/button/{device_name}/Wake/action
-homeassistant/button/{device_name}/Shutdown/action
-homeassistant/button/{device_name}/sleep/action
-homeassistant/button/{device_name}/discord_join/action
-homeassistant/button/{device_name}/discord_leave_channel/action
-```
+Other buttons: `Screensaver`, `Wake`, `Shutdown`, `sleep`
 
-## Running
+## Home Assistant
 
-### Console Mode (for testing)
-```cmd
-pc-agent.exe
-```
-Press Ctrl+C to stop.
+Auto-discovers via MQTT. You'll get sensors like:
+- `sensor.dank0i_pc_runninggames`
+- `sensor.dank0i_pc_sleep_state`
+- `sensor.dank0i_pc_lastactive`
 
-### Auto-Start
-Add a shortcut to `pc-agent.exe` in your Startup folder:
-`shell:startup`
+## Install as Windows Service
 
-## Building
-
-```cmd
-build.bat
+```powershell
+sc create PCAgentService binPath= "C:\Scripts\pc-agent\pc-agent.exe"
+sc start PCAgentService
 ```
 
-This pulls latest changes from git, generates Windows resources, and builds the exe.
+## Why Rust?
+
+- ~3MB binary (vs ~10MB Go)
+- ~5MB RAM (vs ~15MB Go)  
+- No garbage collector
+- Compile-time safety
 
 ## License
 
