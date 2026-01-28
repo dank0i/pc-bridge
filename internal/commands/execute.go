@@ -339,7 +339,8 @@ func expandLauncherShortcut(cmd string) string {
 			return ""
 		}
 		log.Printf("Launching Xbox/MS Store game: %s", arg)
-		return `Start-Process "shell:AppsFolder\` + arg + `"`
+		// Use explorer.exe to launch - more reliable than Start-Process with shell:
+		return `Start-Process explorer.exe -ArgumentList 'shell:AppsFolder\` + arg + `'`
 
 	case "exe", "run":
 		// Executable paths - allow file path characters but reject shell metacharacters
@@ -348,11 +349,22 @@ func expandLauncherShortcut(cmd string) string {
 			return ""
 		}
 		log.Printf("Launching executable: %s", arg)
-		// If path contains spaces and isn't quoted, quote it
-		if strings.Contains(arg, " ") && !strings.HasPrefix(arg, `"`) {
-			arg = `"` + arg + `"`
+		// Split path and arguments if present (first space after .exe or no extension)
+		var exePath, exeArgs string
+		if idx := strings.Index(strings.ToLower(arg), ".exe "); idx != -1 {
+			exePath = arg[:idx+4]
+			exeArgs = strings.TrimSpace(arg[idx+5:])
+		} else {
+			exePath = arg
 		}
-		return `Start-Process ` + arg
+		// Quote path if it contains spaces
+		if strings.Contains(exePath, " ") && !strings.HasPrefix(exePath, `"`) {
+			exePath = `"` + exePath + `"`
+		}
+		if exeArgs != "" {
+			return `Start-Process ` + exePath + ` -ArgumentList '` + exeArgs + `'`
+		}
+		return `Start-Process ` + exePath
 
 	case "close", "kill":
 		// Process names should be simple identifiers
