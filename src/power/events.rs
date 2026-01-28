@@ -52,6 +52,10 @@ impl PowerEventListener {
             Self::message_pump(event_tx, stopped_clone);
         });
 
+        // Debounce tracking
+        let mut last_wake_time: Option<std::time::Instant> = None;
+        const WAKE_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(30);
+
         // Handle events
         loop {
             tokio::select! {
@@ -65,14 +69,28 @@ impl PowerEventListener {
                         PowerEvent::Sleep => {
                             info!("Power event: SLEEP");
                             self.state.mqtt.publish_sensor_retained("sleep_state", "sleeping").await;
+                            last_wake_time = None; // Reset debounce on sleep
                         }
                         PowerEvent::Wake => {
-                            info!("Power event: WAKE");
-                            // Wake display first
-                            wake_display_with_retry(3, std::time::Duration::from_millis(500));
+                            // Debounce multiple wake events
+                            let should_process = match last_wake_time {
+                                Some(t) if t.elapsed() < WAKE_DEBOUNCE => {
+                                    debug!("Ignoring duplicate wake event (debounce)");
+                                    false
+                                }
+                                _ => true
+                            };
                             
-                            // Try to publish wake state with retries (network may take time)
-                            self.publish_wake_with_retry().await;
+                            if should_process {
+                                info!("Power event: WAKE");
+                                last_wake_time = Some(std::time::Instant::now());
+                                
+                                // Wake display first
+                                wake_display_with_retry(3, std::time::Duration::from_millis(500));
+                                
+                                // Try to publish wake state with retries (network may take time)
+                                self.publish_wake_with_retry().await;
+                            }
                         }
                     }
                 }
