@@ -1,12 +1,14 @@
 //! Power event listener - detects sleep/wake events
+//!
+//! Uses atomic state machine to ensure exactly one sleep and one wake event
+//! per actual power state transition, regardless of how many Windows messages arrive.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use tokio::sync::mpsc;
 use tracing::{info, debug, error};
 use windows::Win32::Foundation::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::Win32::System::Power::*;
 
 use crate::AppState;
 use super::display::wake_display_with_retry;
@@ -15,21 +17,28 @@ const WM_POWERBROADCAST: u32 = 0x218;
 const PBT_APMSUSPEND: usize = 4;
 const PBT_APMRESUMEAUTO: usize = 0x12;
 const PBT_APMRESUMESUSPEND: usize = 7;
-const PBT_POWERSETTINGCHANGE: usize = 0x8013;
 
-// GUID for monitor power setting  
-const GUID_CONSOLE_DISPLAY_STATE: windows::core::GUID = windows::core::GUID::from_u128(
-    0x6fe69556_704a_47a0_8f24_c28d936fda47
-);
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PowerEvent {
     Sleep,
     Wake,
 }
 
-// Track whether we've seen a sleep event (to avoid wake on startup)
-static HAS_SLEPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+// State machine: 0 = awake, 1 = sleeping
+// Using compare_exchange ensures only the FIRST event of a type triggers an action
+static POWER_STATE: AtomicU8 = AtomicU8::new(0); // Start awake
+
+/// Attempt to transition from awake (0) to sleeping (1).
+/// Returns true only if this call performed the transition.
+fn try_transition_to_sleep() -> bool {
+    POWER_STATE.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+}
+
+/// Attempt to transition from sleeping (1) to awake (0).
+/// Returns true only if this call performed the transition.
+fn try_transition_to_awake() -> bool {
+    POWER_STATE.compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+}
 
 pub struct PowerEventListener {
     state: Arc<AppState>,
@@ -52,11 +61,7 @@ impl PowerEventListener {
             Self::message_pump(event_tx, stopped_clone);
         });
 
-        // Debounce tracking
-        let mut last_wake_time: Option<std::time::Instant> = None;
-        const WAKE_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(30);
-
-        // Handle events
+        // Handle events (no debouncing needed - state machine handles deduplication)
         loop {
             tokio::select! {
                 _ = shutdown_rx.recv() => {
@@ -69,28 +74,14 @@ impl PowerEventListener {
                         PowerEvent::Sleep => {
                             info!("Power event: SLEEP");
                             self.state.mqtt.publish_sensor_retained("sleep_state", "sleeping").await;
-                            last_wake_time = None; // Reset debounce on sleep
                         }
                         PowerEvent::Wake => {
-                            // Debounce multiple wake events
-                            let should_process = match last_wake_time {
-                                Some(t) if t.elapsed() < WAKE_DEBOUNCE => {
-                                    debug!("Ignoring duplicate wake event (debounce)");
-                                    false
-                                }
-                                _ => true
-                            };
+                            info!("Power event: WAKE");
+                            // Wake display first
+                            wake_display_with_retry(3, std::time::Duration::from_millis(500));
                             
-                            if should_process {
-                                info!("Power event: WAKE");
-                                last_wake_time = Some(std::time::Instant::now());
-                                
-                                // Wake display first
-                                wake_display_with_retry(3, std::time::Duration::from_millis(500));
-                                
-                                // Try to publish wake state with retries (network may take time)
-                                self.publish_wake_with_retry().await;
-                            }
+                            // Publish wake state with retries (network may take time)
+                            self.publish_wake_with_retry().await;
                         }
                     }
                 }
@@ -115,7 +106,6 @@ impl PowerEventListener {
 
     fn message_pump(event_tx: mpsc::Sender<PowerEvent>, stopped: Arc<AtomicBool>) {
         unsafe {
-            // Register window class
             let class_name = windows::core::w!("PCAgentPowerMonitor");
             
             let wc = WNDCLASSEXW {
@@ -127,15 +117,14 @@ impl PowerEventListener {
 
             RegisterClassExW(&wc);
 
-            // Create a real window (not HWND_MESSAGE) to receive power broadcasts
-            // HWND_MESSAGE windows don't receive broadcast messages!
+            // Create a real window to receive power broadcasts
             let hwnd = match CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 class_name,
                 windows::core::w!("PC Agent Power Monitor"),
                 WINDOW_STYLE::default(),
                 0, 0, 0, 0,
-                None,  // No parent - creates top-level window that can receive broadcasts
+                None,
                 None,
                 None,
                 None,
@@ -147,17 +136,10 @@ impl PowerEventListener {
                 }
             };
 
-            // Store event_tx in window's user data using Box to ensure stable address
+            // Store event_tx in window's user data
             let event_tx_box = Box::new(event_tx);
             let event_tx_ptr = Box::into_raw(event_tx_box);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, event_tx_ptr as isize);
-
-            // Register for power setting notifications (modern API, more reliable)
-            let _power_notify = RegisterPowerSettingNotification(
-                hwnd,
-                &GUID_CONSOLE_DISPLAY_STATE,
-                DEVICE_NOTIFY_WINDOW_HANDLE,
-            );
             
             info!("Power event listener started (hwnd: {:?})", hwnd);
 
@@ -168,7 +150,6 @@ impl PowerEventListener {
                     break;
                 }
                 
-                // Use PeekMessage with timeout to allow checking stopped flag
                 let ret = PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE);
                 if ret.as_bool() {
                     if msg.message == WM_QUIT {
@@ -177,13 +158,12 @@ impl PowerEventListener {
                     let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 } else {
-                    // No message, sleep briefly
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
 
             // Cleanup
-            let _ = Box::from_raw(event_tx_ptr); // Reclaim the Box to drop it
+            let _ = Box::from_raw(event_tx_ptr);
             let _ = DestroyWindow(hwnd);
         }
     }
@@ -200,34 +180,25 @@ impl PowerEventListener {
             if !event_tx_ptr.is_null() {
                 let event_tx = &*event_tx_ptr;
                 
-                debug!("WM_POWERBROADCAST: wparam={}", wparam.0);
-                
                 match wparam.0 {
                     PBT_APMSUSPEND => {
-                        info!("Received PBT_APMSUSPEND");
-                        HAS_SLEPT.store(true, Ordering::SeqCst);
-                        let _ = event_tx.blocking_send(PowerEvent::Sleep);
+                        debug!("Received PBT_APMSUSPEND");
+                        // Only fire if transitioning from awake to sleeping
+                        if try_transition_to_sleep() {
+                            info!("State transition: awake -> sleeping");
+                            let _ = event_tx.blocking_send(PowerEvent::Sleep);
+                        } else {
+                            debug!("Ignoring duplicate sleep event");
+                        }
                     }
                     PBT_APMRESUMEAUTO | PBT_APMRESUMESUSPEND => {
-                        info!("Received PBT_APMRESUME*");
-                        // These are real system resume events, always trigger wake
-                        HAS_SLEPT.store(true, Ordering::SeqCst); // Ensure future display-on events work
-                        let _ = event_tx.blocking_send(PowerEvent::Wake);
-                    }
-                    PBT_POWERSETTINGCHANGE => {
-                        // Handle power setting change (from RegisterPowerSettingNotification)
-                        let setting = &*(lparam.0 as *const POWERBROADCAST_SETTING);
-                        if setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE {
-                            let state = setting.Data[0];
-                            debug!("Display state change: {}", state);
-                            // 0 = off (sleep), 1 = on, 2 = dimmed
-                            if state == 0 {
-                                HAS_SLEPT.store(true, Ordering::SeqCst);
-                                let _ = event_tx.blocking_send(PowerEvent::Sleep);
-                            } else if state == 1 && HAS_SLEPT.load(Ordering::SeqCst) {
-                                // Only trigger wake if we've previously slept
-                                let _ = event_tx.blocking_send(PowerEvent::Wake);
-                            }
+                        debug!("Received PBT_APMRESUME* (wparam={})", wparam.0);
+                        // Only fire if transitioning from sleeping to awake
+                        if try_transition_to_awake() {
+                            info!("State transition: sleeping -> awake");
+                            let _ = event_tx.blocking_send(PowerEvent::Wake);
+                        } else {
+                            debug!("Ignoring duplicate wake event");
                         }
                     }
                     _ => {}
