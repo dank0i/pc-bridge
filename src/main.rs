@@ -1,4 +1,4 @@
-//! PC Agent - Home Assistant integration for Windows
+//! PC Bridge - Home Assistant integration for Windows
 //!
 //! Provides:
 //! - Game detection via process monitoring
@@ -6,6 +6,8 @@
 //! - Power event handling (sleep/wake)
 //! - Remote command execution
 //! - MQTT-based communication with Home Assistant
+
+#![windows_subsystem = "windows"]
 
 mod config;
 mod mqtt;

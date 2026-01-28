@@ -1,9 +1,12 @@
 [package]
-name = "pc-agent"
+name = "pc-bridge"
 version = "0.1.0"
 edition = "2021"
 authors = ["dank0i"]
-description = "Home Assistant PC Agent - Windows service for game detection and remote control"
+description = "Home Assistant PC Bridge - Windows app for game detection and remote control"
+
+[build-dependencies]
+winresource = "0.1"
 
 [dependencies]
 # Async runtime
