@@ -140,7 +140,8 @@ pub async fn watch_config(state: Arc<AppState>) {
     let (tx, mut rx) = tokio::sync::mpsc::channel(10);
 
     // Create watcher in a blocking task since notify isn't async
-    let watch_handle = tokio::task::spawn_blocking(move || {
+    let filename_clone = filename.clone();
+    let _watch_handle = tokio::task::spawn_blocking(move || {
         let tx = tx;
         let mut watcher = notify::recommended_watcher(move |res: Result<Event, _>| {
             if let Ok(event) = res {
@@ -151,7 +152,7 @@ pub async fn watch_config(state: Arc<AppState>) {
         watcher.watch(&dir, RecursiveMode::NonRecursive)
             .expect("Failed to watch directory");
 
-        info!("Watching for changes to {:?}", dir.join(&filename));
+        info!("Watching for changes to {:?}", dir.join(&filename_clone));
 
         // Keep watcher alive
         loop {

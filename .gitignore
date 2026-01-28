@@ -29,3 +29,6 @@ Thumbs.db
 
 # Build artifacts
 rsrc_windows_*.syso
+
+/target/
+Cargo.lock

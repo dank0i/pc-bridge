@@ -20,7 +20,7 @@ use tracing::{info, error, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use crate::config::Config;
-use crate::mqtt::MqttClient;
+use crate::mqtt::{MqttClient, CommandReceiver};
 use crate::sensors::{GameSensor, IdleSensor};
 use crate::power::PowerEventListener;
 use crate::commands::CommandExecutor;
@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
     // Create MQTT client
-    let mqtt = MqttClient::new(&config).await?;
+    let (mqtt, command_rx) = MqttClient::new(&config).await?;
 
     // Create shared state
     let state = Arc::new(AppState {
@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
     let game_sensor = GameSensor::new(Arc::clone(&state));
     let idle_sensor = IdleSensor::new(Arc::clone(&state));
     let power_listener = PowerEventListener::new(Arc::clone(&state));
-    let command_executor = CommandExecutor::new(Arc::clone(&state));
+    let command_executor = CommandExecutor::new(Arc::clone(&state), command_rx);
 
     // Spawn sensor tasks
     let game_handle = tokio::spawn(game_sensor.run());

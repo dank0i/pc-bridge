@@ -4,8 +4,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc, Duration as ChronoDuration};
 use tokio::time::{interval, Duration};
 use tracing::debug;
-use windows::Win32::UI::Input::KeyboardAndMouse::GetLastInputInfo;
-use windows::Win32::UI::Input::KeyboardAndMouse::LASTINPUTINFO;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::System::SystemInformation::GetTickCount64;
 
 use crate::AppState;
@@ -52,7 +51,7 @@ impl IdleSensor {
                 dwTime: 0,
             };
 
-            if GetLastInputInfo(&mut lii).is_ok() {
+            if GetLastInputInfo(&mut lii).as_bool() {
                 let current_tick = GetTickCount64();
                 // dwTime is 32-bit, handle wrap correctly
                 let current_tick_32 = current_tick as u32;

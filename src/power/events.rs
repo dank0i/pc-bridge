@@ -101,7 +101,7 @@ impl PowerEventListener {
             RegisterClassExW(&wc);
 
             // Create message-only window
-            let hwnd = CreateWindowExW(
+            let hwnd = match CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 class_name,
                 windows::core::w!(""),
@@ -110,13 +110,14 @@ impl PowerEventListener {
                 HWND_MESSAGE,
                 None,
                 None,
-                Some(&event_tx as *const _ as *const _),
-            );
-
-            if hwnd == HWND::default() {
-                error!("Failed to create power monitor window");
-                return;
-            }
+                Some(&event_tx as *const _ as *const std::ffi::c_void),
+            ) {
+                Ok(h) => h,
+                Err(e) => {
+                    error!("Failed to create power monitor window: {:?}", e);
+                    return;
+                }
+            };
 
             // Store event_tx in window's user data
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, &event_tx as *const _ as isize);

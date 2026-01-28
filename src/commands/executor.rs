@@ -7,6 +7,7 @@ use tokio::sync::Semaphore;
 use tracing::{info, warn, error, debug};
 
 use crate::AppState;
+use crate::mqtt::CommandReceiver;
 use crate::power::wake_display;
 use super::launcher::expand_launcher_shortcut;
 
@@ -26,13 +27,15 @@ fn get_predefined_command(name: &str) -> Option<&'static str> {
 
 pub struct CommandExecutor {
     state: Arc<AppState>,
+    command_rx: CommandReceiver,
     semaphore: Arc<Semaphore>,
 }
 
 impl CommandExecutor {
-    pub fn new(state: Arc<AppState>) -> Self {
+    pub fn new(state: Arc<AppState>, command_rx: CommandReceiver) -> Self {
         Self {
             state,
+            command_rx,
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_COMMANDS)),
         }
     }
@@ -46,7 +49,7 @@ impl CommandExecutor {
                     debug!("Command executor shutting down");
                     break;
                 }
-                Some(cmd) = self.state.mqtt.recv_command() => {
+                Some(cmd) = self.command_rx.recv() => {
                     // Rate limit with semaphore
                     let permit = match self.semaphore.clone().try_acquire_owned() {
                         Ok(p) => p,

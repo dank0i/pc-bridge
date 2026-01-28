@@ -22,7 +22,11 @@ pub struct MqttClient {
     client: AsyncClient,
     device_name: String,
     device_id: String,
-    command_rx: mpsc::Receiver<Command>,
+}
+
+/// Receiver for commands from MQTT
+pub struct CommandReceiver {
+    rx: mpsc::Receiver<Command>,
 }
 
 /// Home Assistant MQTT Discovery payload
@@ -54,7 +58,7 @@ struct HADevice {
 }
 
 impl MqttClient {
-    pub async fn new(config: &Config) -> anyhow::Result<Self> {
+    pub async fn new(config: &Config) -> anyhow::Result<(Self, CommandReceiver)> {
         // Parse broker URL
         let broker = &config.mqtt.broker;
         let (host, port) = Self::parse_broker_url(broker)?;
@@ -123,14 +127,15 @@ impl MqttClient {
             client,
             device_name,
             device_id,
-            command_rx,
         };
+
+        let cmd_rx = CommandReceiver { rx: command_rx };
 
         // Register discovery and subscribe
         mqtt.register_discovery().await;
         mqtt.subscribe_commands().await;
 
-        Ok(mqtt)
+        Ok((mqtt, cmd_rx))
     }
 
     fn parse_broker_url(url: &str) -> anyhow::Result<(String, u16)> {
@@ -280,11 +285,6 @@ impl MqttClient {
         let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, value).await;
     }
 
-    /// Receive next command (async)
-    pub async fn recv_command(&mut self) -> Option<Command> {
-        self.command_rx.recv().await
-    }
-
     // Topic helpers
     fn availability_topic(&self) -> String {
         Self::availability_topic_static(&self.device_name)
@@ -300,5 +300,12 @@ impl MqttClient {
 
     fn command_topic(&self, name: &str) -> String {
         format!("{}/button/{}/{}/action", DISCOVERY_PREFIX, self.device_name, name)
+    }
+}
+
+impl CommandReceiver {
+    /// Receive next command (async)
+    pub async fn recv(&mut self) -> Option<Command> {
+        self.rx.recv().await
     }
 }

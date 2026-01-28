@@ -3,13 +3,14 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::info;
+use windows::Win32::Foundation::{WPARAM, LPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const WM_SYSCOMMAND: u32 = 0x0112;
 const SC_MONITORPOWER: usize = 0xF170;
 const MONITOR_ON: isize = -1;
-const VK_F15: u8 = 0x7E;
+const VK_F15: u16 = 0x7E;
 
 static SLEEP_PREVENTION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -65,10 +66,10 @@ fn turn_on_monitor() {
 fn send_benign_keypress() {
     unsafe {
         // Key down F15
-        keybd_event(VK_F15, 0, KEYBD_EVENT_FLAGS(0), 0);
+        keybd_event(VK_F15 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
         std::thread::sleep(Duration::from_millis(10));
         // Key up F15
-        keybd_event(VK_F15, 0, KEYEVENTF_KEYUP, 0);
+        keybd_event(VK_F15 as u8, 0, KEYEVENTF_KEYUP, 0);
     }
 }
 
