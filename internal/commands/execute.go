@@ -332,7 +332,7 @@ func expandLauncherShortcut(cmd string) string {
 		log.Printf("Launching Epic game: %s", arg)
 		return `Start-Process "com.epicgames.launcher://apps/` + arg + `?action=launch&silent=true"`
 
-	case "exe", "lnk", "run", "path":
+	case "exe", "lnk":
 		// Executable or shortcut paths - allow file path characters but reject shell metacharacters
 		if !isSafePath(arg) {
 			log.Printf("Invalid path (contains shell metacharacters): %s", arg)
