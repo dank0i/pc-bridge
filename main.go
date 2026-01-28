@@ -1,9 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -282,12 +284,15 @@ func (s *pcAgentService) pollSensors() {
 
 	gameTicker := time.NewTicker(time.Duration(config.GameSensorInterval) * time.Second)
 	lastActiveTicker := time.NewTicker(time.Duration(config.LastActiveInterval) * time.Second)
+	memoryTicker := time.NewTicker(30 * time.Second) // Memory stats every 30s
 	defer gameTicker.Stop()
 	defer lastActiveTicker.Stop()
+	defer memoryTicker.Stop()
 
 	// Initial publish
 	s.publishGameSensor()
 	s.publishLastActive()
+	s.publishMemory()
 
 	for {
 		select {
@@ -297,6 +302,8 @@ func (s *pcAgentService) pollSensors() {
 			s.publishGameSensor()
 		case <-lastActiveTicker.C:
 			s.publishLastActive()
+		case <-memoryTicker.C:
+			s.publishMemory()
 		}
 	}
 }
@@ -324,5 +331,21 @@ func (s *pcAgentService) publishLastActive() {
 	
 	if client != nil && client.IsConnected() {
 		client.PublishSensor("lastactive", lastActive.Format(time.RFC3339))
+	}
+}
+
+func (s *pcAgentService) publishMemory() {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	
+	// Alloc is the current heap allocation in bytes, convert to MB
+	allocMB := float64(m.Alloc) / 1024 / 1024
+	
+	s.mu.Lock()
+	client := s.mqttClient
+	s.mu.Unlock()
+	
+	if client != nil && client.IsConnected() {
+		client.PublishSensor("agent_memory", fmt.Sprintf("%.2f", allocMB))
 	}
 }

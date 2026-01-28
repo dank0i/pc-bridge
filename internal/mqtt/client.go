@@ -128,6 +128,17 @@ func (c *Client) registerDiscovery() {
 		Icon:       "mdi:power-sleep",
 	})
 
+	// Agent Memory Sensor - monitors Go heap allocation
+	c.publishDiscovery("sensor", "agent_memory", HADiscoveryPayload{
+		Name:              "Agent Memory",
+		UniqueID:          config.DeviceID + "_agent_memory",
+		StateTopic:        sensorTopic("agent_memory"),
+		AvailabilityTopic: availabilityTopic(),
+		Device:            device,
+		Icon:              "mdi:memory",
+		UnitOfMeasurement: "MB",
+	})
+
 	// Command buttons
 	commands := []struct {
 		name string
