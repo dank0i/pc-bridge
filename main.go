@@ -3,7 +3,6 @@ package main
 import (
 	"log"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -23,17 +22,25 @@ import (
 const serviceName = "PCAgentService"
 
 var (
-	kernel32                  = syscall.NewLazyDLL("kernel32.dll")
+	kernel32                     = syscall.NewLazyDLL("kernel32.dll")
 	procCreateToolhelp32Snapshot = kernel32.NewProc("CreateToolhelp32Snapshot")
-	procProcess32FirstW       = kernel32.NewProc("Process32FirstW")
-	procProcess32NextW        = kernel32.NewProc("Process32NextW")
-	procOpenProcess           = kernel32.NewProc("OpenProcess")
-	procTerminateProcess      = kernel32.NewProc("TerminateProcess")
+	procProcess32FirstW          = kernel32.NewProc("Process32FirstW")
+	procProcess32NextW           = kernel32.NewProc("Process32NextW")
+	procOpenProcess              = kernel32.NewProc("OpenProcess")
+	procTerminateProcess         = kernel32.NewProc("TerminateProcess")
+	procSetConsoleCtrlHandler    = kernel32.NewProc("SetConsoleCtrlHandler")
 )
 
 const (
 	TH32CS_SNAPPROCESS = 0x00000002
 	PROCESS_TERMINATE  = 0x0001
+
+	// Console control events for graceful shutdown
+	CTRL_C_EVENT        = 0
+	CTRL_BREAK_EVENT    = 1
+	CTRL_CLOSE_EVENT    = 2
+	CTRL_LOGOFF_EVENT   = 5
+	CTRL_SHUTDOWN_EVENT = 6
 )
 
 type processEntry32 struct {
@@ -124,15 +131,32 @@ func main() {
 		log.Println("  sc create PCAgentService binPath= \"C:\\path\\to\\pc-agent.exe\"")
 		log.Println("  sc start PCAgentService")
 		log.Println("")
-		
+
 		agent := &pcAgentService{stopChan: make(chan struct{})}
 		agent.run()
-		
-		// Wait for Ctrl+C
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-		<-sigChan
-		
+
+		// Set up graceful shutdown via Windows console control handler
+		// This catches: Ctrl+C, Ctrl+Break, console close, logoff, shutdown
+		shutdownChan := make(chan struct{})
+		handlerCallback := syscall.NewCallback(func(ctrlType uint32) uintptr {
+			switch ctrlType {
+			case CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT:
+				log.Printf("Received shutdown signal (type %d)", ctrlType)
+				select {
+				case <-shutdownChan:
+					// Already shutting down
+				default:
+					close(shutdownChan)
+				}
+				return 1 // Handled
+			}
+			return 0 // Not handled
+		})
+		procSetConsoleCtrlHandler.Call(handlerCallback, 1)
+
+		// Wait for shutdown signal
+		<-shutdownChan
+
 		log.Println("Shutting down...")
 		agent.stop()
 	}
