@@ -15,6 +15,7 @@ mod sensors;
 mod commands;
 mod power;
 mod updater;
+mod tray;
 
 #[cfg(windows)]
 mod winapi;
@@ -58,6 +59,8 @@ async fn main() -> anyhow::Result<()> {
     // Load configuration
     let config = Config::load()?;
     info!("Loaded config for device: {}", config.device_name);
+    let show_tray = config.show_tray_icon;
+    let config_path = Config::config_path()?;
 
     // Create shutdown channel
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
@@ -90,6 +93,15 @@ async fn main() -> anyhow::Result<()> {
 
     // Start config file watcher for hot-reload
     let config_watcher_handle = tokio::spawn(config::watch_config(Arc::clone(&state)));
+
+    // Start tray icon (Windows only, runs on separate thread)
+    if show_tray {
+        let tray_shutdown = shutdown_tx.clone();
+        let tray_config_path = config_path.clone();
+        std::thread::spawn(move || {
+            tray::run_tray(tray_shutdown, tray_config_path);
+        });
+    }
 
     // Publish initial state and register custom entities
     {

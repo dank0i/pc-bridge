@@ -1,6 +1,6 @@
 [package]
 name = "pc-bridge"
-version = "1.0.5"
+version = "1.5.0"
 edition = "2021"
 authors = ["dank0i"]
 description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
@@ -40,6 +40,19 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Process/command execution
 which = "6"
+
+# System tray (Windows)
+[target.'cfg(windows)'.dependencies.tray-icon]
+version = "0.19"
+
+[target.'cfg(windows)'.dependencies.muda]
+version = "0.15"
+
+[target.'cfg(windows)'.dependencies.png]
+version = "0.17"
+
+[target.'cfg(windows)'.dependencies.winreg]
+version = "0.55"
 
 # Windows-specific dependencies
 [target.'cfg(windows)'.dependencies]

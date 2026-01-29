@@ -78,6 +78,7 @@ Edit `userConfig.json` next to the executable:
     "FortniteClient-Win64-Shipping": "fortnite",
     "MarvelRivals_Shipping": "marvel_rivals"
   },
+  "show_tray_icon": true,
   "custom_sensors_enabled": false,
   "custom_commands_enabled": false,
   "custom_command_privileges_allowed": false,
@@ -87,6 +88,14 @@ Edit `userConfig.json` next to the executable:
 ```
 
 > **Note:** Missing fields are automatically added when upgrading from older versions.
+
+### Tray Icon
+
+A system tray icon is shown by default (Windows only). Right-click for:
+- **Open Config** - Opens `userConfig.json` in your default editor
+- **Exit** - Gracefully shuts down PC Bridge
+
+Set `"show_tray_icon": false` to disable.
 
 ### Games Configuration
 

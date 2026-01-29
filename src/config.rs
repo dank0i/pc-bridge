@@ -26,6 +26,7 @@ const DEFAULT_CONFIG: &str = r#"{
     "games": {
         "example_game": "ExampleGame.exe"
     },
+    "show_tray_icon": true,
     "custom_sensors_enabled": false,
     "custom_commands_enabled": false,
     "custom_command_privileges_allowed": false,
@@ -43,6 +44,10 @@ pub struct Config {
     #[serde(default)]
     pub games: HashMap<String, String>,
     
+    // Tray icon - enabled by default
+    #[serde(default = "default_true")]
+    pub show_tray_icon: bool,
+    
     // Custom sensors/commands - disabled by default for security
     #[serde(default)]
     pub custom_sensors_enabled: bool,
@@ -55,6 +60,8 @@ pub struct Config {
     #[serde(default)]
     pub custom_commands: Vec<CustomCommand>,
 }
+
+fn default_true() -> bool { true }
 
 /// Custom sensor definition
 #[derive(Debug, Clone, Deserialize)]
@@ -194,6 +201,12 @@ impl Config {
         
         let mut migrated = false;
         
+        // Add show_tray_icon if missing (default true)
+        if !obj.contains_key("show_tray_icon") {
+            obj.insert("show_tray_icon".to_string(), serde_json::Value::Bool(true));
+            migrated = true;
+        }
+        
         // Add custom sensor/command fields if missing
         if !obj.contains_key("custom_sensors_enabled") {
             obj.insert("custom_sensors_enabled".to_string(), serde_json::Value::Bool(false));
@@ -221,7 +234,7 @@ impl Config {
             let new_content = serde_json::to_string_pretty(&json)?;
             std::fs::write(config_path, &new_content)
                 .with_context(|| format!("Failed to write migrated config to {:?}", config_path))?;
-            info!("Migrated userConfig.json - added custom sensors/commands fields");
+            info!("Migrated userConfig.json - added new fields");
             Ok(new_content)
         } else {
             Ok(content.to_string())
