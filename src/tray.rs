@@ -246,13 +246,26 @@ fn decode_bmp_dib(data: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
 
 #[cfg(windows)]
 fn open_config_file(path: &std::path::PathBuf) {
-    use std::process::Command;
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     
-    if let Err(e) = Command::new("cmd")
-        .args(["/C", "start", "", path.to_str().unwrap_or("")])
-        .spawn()
-    {
-        error!("Failed to open config: {}", e);
+    let path_wide: Vec<u16> = path.to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    
+    let operation: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+    
+    unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(operation.as_ptr()),
+            PCWSTR(path_wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
     }
 }
 
