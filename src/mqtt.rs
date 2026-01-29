@@ -49,7 +49,7 @@ struct HADiscoveryPayload {
     unit_of_measurement: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct HADevice {
     identifiers: Vec<String>,
     name: String,
@@ -174,7 +174,7 @@ impl MqttClient {
     }
 
     async fn register_discovery(&self) {
-        let _device = HADevice {
+        let device = HADevice {
             identifiers: vec![self.device_id.clone()],
             name: self.device_name.clone(),
             model: "PC Bridge".to_string(),
@@ -196,12 +196,7 @@ impl MqttClient {
                 state_topic: Some(self.sensor_topic(name)),
                 command_topic: None,
                 availability_topic: if name == "sleep_state" { None } else { Some(self.availability_topic()) },
-                device: HADevice {
-                    identifiers: vec![self.device_id.clone()],
-                    name: self.device_name.clone(),
-                    model: "PC Agent Rust".to_string(),
-                    manufacturer: "Custom".to_string(),
-                },
+                device: device.clone(),
                 icon: Some(icon.to_string()),
                 device_class: device_class.map(|s| s.to_string()),
                 unit_of_measurement: unit.map(|s| s.to_string()),
@@ -230,12 +225,7 @@ impl MqttClient {
                 state_topic: None,
                 command_topic: Some(self.command_topic(name)),
                 availability_topic: Some(self.availability_topic()),
-                device: HADevice {
-                    identifiers: vec![self.device_id.clone()],
-                    name: self.device_name.clone(),
-                    model: "PC Agent Rust".to_string(),
-                    manufacturer: "Custom".to_string(),
-                },
+                device: device.clone(),
                 icon: Some(icon.to_string()),
                 device_class: None,
                 unit_of_measurement: None,
@@ -265,8 +255,8 @@ impl MqttClient {
                 device: HADevice {
                     identifiers: vec![self.device_id.clone()],
                     name: self.device_name.clone(),
-                    model: "PC Agent Rust".to_string(),
-                    manufacturer: "Custom".to_string(),
+                    model: "PC Bridge".to_string(),
+                    manufacturer: "dank0i".to_string(),
                 },
                 icon: Some(icon),
                 device_class: None,
@@ -300,8 +290,8 @@ impl MqttClient {
                 device: HADevice {
                     identifiers: vec![self.device_id.clone()],
                     name: self.device_name.clone(),
-                    model: "PC Agent Rust".to_string(),
-                    manufacturer: "Custom".to_string(),
+                    model: "PC Bridge".to_string(),
+                    manufacturer: "dank0i".to_string(),
                 },
                 icon: Some(icon),
                 device_class: None,
