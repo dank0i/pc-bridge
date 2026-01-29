@@ -6,7 +6,7 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use tracing::{info, warn, error, debug};
 
-use crate::config::Config;
+use crate::config::{Config, CustomSensor, CustomCommand};
 
 const DISCOVERY_PREFIX: &str = "homeassistant";
 
@@ -247,6 +247,83 @@ impl MqttClient {
         }
 
         info!("Registered HA discovery");
+    }
+
+    /// Register custom sensors for MQTT discovery
+    pub async fn register_custom_sensors(&self, sensors: &[CustomSensor]) {
+        for sensor in sensors {
+            let topic_name = format!("custom_{}", sensor.name);
+            let display_name = format!("Custom: {}", sensor.name);
+            let icon = sensor.icon.clone().unwrap_or_else(|| "mdi:gauge".to_string());
+            
+            let payload = HADiscoveryPayload {
+                name: display_name,
+                unique_id: format!("{}_{}", self.device_id, topic_name),
+                state_topic: Some(self.sensor_topic(&topic_name)),
+                command_topic: None,
+                availability_topic: Some(self.availability_topic()),
+                device: HADevice {
+                    identifiers: vec![self.device_id.clone()],
+                    name: self.device_name.clone(),
+                    model: "PC Agent Rust".to_string(),
+                    manufacturer: "Custom".to_string(),
+                },
+                icon: Some(icon),
+                device_class: None,
+                unit_of_measurement: sensor.unit.clone(),
+            };
+
+            let topic = format!("{}/sensor/{}/{}/config", DISCOVERY_PREFIX, self.device_name, topic_name);
+            let json = serde_json::to_string(&payload).unwrap();
+            let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
+            
+            debug!("Registered custom sensor: {}", sensor.name);
+        }
+        
+        if !sensors.is_empty() {
+            info!("Registered {} custom sensor(s) for HA discovery", sensors.len());
+        }
+    }
+
+    /// Register custom commands for MQTT discovery and subscribe to their topics
+    pub async fn register_custom_commands(&self, commands: &[CustomCommand]) {
+        for cmd in commands {
+            let icon = cmd.icon.clone().unwrap_or_else(|| "mdi:console".to_string());
+            let display_name = format!("Custom: {}", cmd.name);
+            
+            let payload = HADiscoveryPayload {
+                name: display_name,
+                unique_id: format!("{}_custom_{}", self.device_id, cmd.name),
+                state_topic: None,
+                command_topic: Some(self.command_topic(&cmd.name)),
+                availability_topic: Some(self.availability_topic()),
+                device: HADevice {
+                    identifiers: vec![self.device_id.clone()],
+                    name: self.device_name.clone(),
+                    model: "PC Agent Rust".to_string(),
+                    manufacturer: "Custom".to_string(),
+                },
+                icon: Some(icon),
+                device_class: None,
+                unit_of_measurement: None,
+            };
+
+            let topic = format!("{}/button/{}/{}/config", DISCOVERY_PREFIX, self.device_name, cmd.name);
+            let json = serde_json::to_string(&payload).unwrap();
+            let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
+            
+            // Subscribe to command topic
+            let cmd_topic = self.command_topic(&cmd.name);
+            if let Err(e) = self.client.subscribe(&cmd_topic, QoS::AtLeastOnce).await {
+                error!("Failed to subscribe to custom command {}: {:?}", cmd.name, e);
+            }
+            
+            debug!("Registered custom command: {}", cmd.name);
+        }
+        
+        if !commands.is_empty() {
+            info!("Registered {} custom command(s) for HA discovery", commands.len());
+        }
     }
 
     async fn subscribe_commands(&self) {

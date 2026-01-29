@@ -25,7 +25,12 @@ const DEFAULT_CONFIG: &str = r#"{
     },
     "games": {
         "example_game": "ExampleGame.exe"
-    }
+    },
+    "custom_sensors_enabled": false,
+    "custom_commands_enabled": false,
+    "custom_command_privileges_allowed": false,
+    "custom_sensors": [],
+    "custom_commands": []
 }"#;
 
 /// User configuration structure (matches userConfig.json)
@@ -37,6 +42,85 @@ pub struct Config {
     pub intervals: IntervalConfig,
     #[serde(default)]
     pub games: HashMap<String, String>,
+    
+    // Custom sensors/commands - disabled by default for security
+    #[serde(default)]
+    pub custom_sensors_enabled: bool,
+    #[serde(default)]
+    pub custom_commands_enabled: bool,
+    #[serde(default)]
+    pub custom_command_privileges_allowed: bool,
+    #[serde(default)]
+    pub custom_sensors: Vec<CustomSensor>,
+    #[serde(default)]
+    pub custom_commands: Vec<CustomCommand>,
+}
+
+/// Custom sensor definition
+#[derive(Debug, Clone, Deserialize)]
+pub struct CustomSensor {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub sensor_type: CustomSensorType,
+    #[serde(default = "default_sensor_interval")]
+    pub interval_seconds: u64,
+    #[serde(default)]
+    pub unit: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    // Type-specific fields
+    #[serde(default)]
+    pub script: Option<String>,
+    #[serde(default)]
+    pub process: Option<String>,
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub registry_key: Option<String>,
+    #[serde(default)]
+    pub registry_value: Option<String>,
+}
+
+/// Custom sensor types
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomSensorType {
+    Powershell,
+    ProcessExists,
+    FileContents,
+    Registry,
+}
+
+fn default_sensor_interval() -> u64 { 30 }
+
+/// Custom command definition
+#[derive(Debug, Clone, Deserialize)]
+pub struct CustomCommand {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub command_type: CustomCommandType,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub admin: bool,
+    // Type-specific fields
+    #[serde(default)]
+    pub script: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub command: Option<String>,
+}
+
+/// Custom command types
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomCommandType {
+    Powershell,
+    Executable,
+    Shell,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -89,12 +173,59 @@ impl Config {
         let content = std::fs::read_to_string(&config_path)
             .with_context(|| format!("Failed to read {:?}", config_path))?;
 
+        // Migrate config if needed (adds missing fields)
+        let content = Self::migrate_config(&config_path, &content)?;
+
         let config: Config = serde_json::from_str(&content)
             .with_context(|| "Failed to parse userConfig.json")?;
 
         config.validate()?;
 
         Ok(config)
+    }
+
+    /// Migrate config by adding missing fields with defaults
+    fn migrate_config(config_path: &PathBuf, content: &str) -> Result<String> {
+        let mut json: serde_json::Value = serde_json::from_str(content)
+            .with_context(|| "Failed to parse config as JSON")?;
+        
+        let obj = json.as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("Config must be a JSON object"))?;
+        
+        let mut migrated = false;
+        
+        // Add custom sensor/command fields if missing
+        if !obj.contains_key("custom_sensors_enabled") {
+            obj.insert("custom_sensors_enabled".to_string(), serde_json::Value::Bool(false));
+            migrated = true;
+        }
+        if !obj.contains_key("custom_commands_enabled") {
+            obj.insert("custom_commands_enabled".to_string(), serde_json::Value::Bool(false));
+            migrated = true;
+        }
+        if !obj.contains_key("custom_command_privileges_allowed") {
+            obj.insert("custom_command_privileges_allowed".to_string(), serde_json::Value::Bool(false));
+            migrated = true;
+        }
+        if !obj.contains_key("custom_sensors") {
+            obj.insert("custom_sensors".to_string(), serde_json::Value::Array(vec![]));
+            migrated = true;
+        }
+        if !obj.contains_key("custom_commands") {
+            obj.insert("custom_commands".to_string(), serde_json::Value::Array(vec![]));
+            migrated = true;
+        }
+        
+        if migrated {
+            // Write back the migrated config
+            let new_content = serde_json::to_string_pretty(&json)?;
+            std::fs::write(config_path, &new_content)
+                .with_context(|| format!("Failed to write migrated config to {:?}", config_path))?;
+            info!("Migrated userConfig.json - added custom sensors/commands fields");
+            Ok(new_content)
+        } else {
+            Ok(content.to_string())
+        }
     }
 
     /// Get the path to userConfig.json
@@ -126,6 +257,92 @@ impl Config {
             bail!("mqtt.broker must start with tcp://, ssl://, ws://, or wss://");
         }
 
+        // Validate custom sensors
+        for sensor in &self.custom_sensors {
+            Self::validate_custom_sensor(sensor)?;
+        }
+
+        // Validate custom commands
+        for cmd in &self.custom_commands {
+            Self::validate_custom_command(cmd, self.custom_command_privileges_allowed)?;
+        }
+
+        Ok(())
+    }
+
+    /// Validate a custom sensor definition
+    fn validate_custom_sensor(sensor: &CustomSensor) -> Result<()> {
+        if sensor.name.is_empty() {
+            bail!("Custom sensor name cannot be empty");
+        }
+        if sensor.name.contains(char::is_whitespace) {
+            bail!("Custom sensor name '{}' cannot contain whitespace", sensor.name);
+        }
+        
+        match sensor.sensor_type {
+            CustomSensorType::Powershell => {
+                if sensor.script.is_none() || sensor.script.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                    bail!("Custom sensor '{}' (powershell) requires 'script' field", sensor.name);
+                }
+            }
+            CustomSensorType::ProcessExists => {
+                if sensor.process.is_none() || sensor.process.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                    bail!("Custom sensor '{}' (process_exists) requires 'process' field", sensor.name);
+                }
+            }
+            CustomSensorType::FileContents => {
+                if sensor.file_path.is_none() || sensor.file_path.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                    bail!("Custom sensor '{}' (file_contents) requires 'file_path' field", sensor.name);
+                }
+            }
+            CustomSensorType::Registry => {
+                if sensor.registry_key.is_none() || sensor.registry_key.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                    bail!("Custom sensor '{}' (registry) requires 'registry_key' field", sensor.name);
+                }
+                if sensor.registry_value.is_none() || sensor.registry_value.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                    bail!("Custom sensor '{}' (registry) requires 'registry_value' field", sensor.name);
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Validate a custom command definition
+    fn validate_custom_command(cmd: &CustomCommand, privileges_allowed: bool) -> Result<()> {
+        if cmd.name.is_empty() {
+            bail!("Custom command name cannot be empty");
+        }
+        if cmd.name.contains(char::is_whitespace) {
+            bail!("Custom command name '{}' cannot contain whitespace", cmd.name);
+        }
+        
+        if cmd.admin && !privileges_allowed {
+            bail!(
+                "Custom command '{}' has admin=true but custom_command_privileges_allowed=false. \
+                 Set custom_command_privileges_allowed=true if you understand the security implications.",
+                cmd.name
+            );
+        }
+        
+        match cmd.command_type {
+            CustomCommandType::Powershell => {
+                if cmd.script.is_none() || cmd.script.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                    bail!("Custom command '{}' (powershell) requires 'script' field", cmd.name);
+                }
+            }
+            CustomCommandType::Executable => {
+                if cmd.path.is_none() || cmd.path.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                    bail!("Custom command '{}' (executable) requires 'path' field", cmd.name);
+                }
+            }
+            CustomCommandType::Shell => {
+                if cmd.command.is_none() || cmd.command.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                    bail!("Custom command '{}' (shell) requires 'command' field", cmd.name);
+                }
+            }
+        }
+        
         Ok(())
     }
 
@@ -264,7 +481,37 @@ async fn reload_games(state: &AppState) {
             let mut config = state.config.write().await;
             let old_count = config.games.len();
             config.games = new_config.games;
+            
+            // Also reload custom sensors/commands config
+            let old_sensors_enabled = config.custom_sensors_enabled;
+            let old_commands_enabled = config.custom_commands_enabled;
+            
+            config.custom_sensors_enabled = new_config.custom_sensors_enabled;
+            config.custom_commands_enabled = new_config.custom_commands_enabled;
+            config.custom_command_privileges_allowed = new_config.custom_command_privileges_allowed;
+            config.custom_sensors = new_config.custom_sensors;
+            config.custom_commands = new_config.custom_commands;
+            
             info!("Reloaded games: {} (was {})", config.games.len(), old_count);
+            
+            // Log security-relevant changes
+            if config.custom_sensors_enabled != old_sensors_enabled {
+                if config.custom_sensors_enabled {
+                    warn!("⚠️  custom_sensors_enabled is now TRUE");
+                } else {
+                    info!("custom_sensors_enabled is now false");
+                }
+            }
+            if config.custom_commands_enabled != old_commands_enabled {
+                if config.custom_commands_enabled {
+                    warn!("⚠️  custom_commands_enabled is now TRUE - arbitrary code execution possible via MQTT");
+                } else {
+                    info!("custom_commands_enabled is now false");
+                }
+            }
+            if config.custom_command_privileges_allowed {
+                warn!("⚠️  custom_command_privileges_allowed is TRUE - commands can run with ADMIN privileges");
+            }
         }
         Err(e) => {
             warn!("Failed to reload config: {}", e);

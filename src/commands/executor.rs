@@ -10,6 +10,7 @@ use crate::AppState;
 use crate::mqtt::CommandReceiver;
 use crate::power::wake_display;
 use super::launcher::expand_launcher_shortcut;
+use super::custom::execute_custom_command;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const MAX_CONCURRENT_COMMANDS: usize = 5;
@@ -59,10 +60,10 @@ impl CommandExecutor {
                         }
                     };
 
-                    let _state = Arc::clone(&self.state);
+                    let state = Arc::clone(&self.state);
                     tokio::spawn(async move {
                         let _permit = permit; // Keep permit alive until done
-                        if let Err(e) = Self::execute_command(&cmd.name, &cmd.payload).await {
+                        if let Err(e) = Self::execute_command(&cmd.name, &cmd.payload, &state).await {
                             error!("Command error: {}", e);
                         }
                     });
@@ -71,7 +72,7 @@ impl CommandExecutor {
         }
     }
 
-    async fn execute_command(name: &str, payload: &str) -> anyhow::Result<()> {
+    async fn execute_command(name: &str, payload: &str, state: &Arc<AppState>) -> anyhow::Result<()> {
         // Normalize payload
         let payload = payload.trim();
         let payload = if payload.eq_ignore_ascii_case("PRESS") { "" } else { payload };
@@ -94,6 +95,11 @@ impl CommandExecutor {
                 return Ok(());
             }
             _ => {}
+        }
+
+        // Check for custom command first
+        if execute_custom_command(state, name).await? {
+            return Ok(());
         }
 
         // Get command string

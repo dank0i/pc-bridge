@@ -1,5 +1,7 @@
 //! Command execution module
 
+pub mod custom;
+
 #[cfg(windows)]
 mod executor;
 #[cfg(windows)]

@@ -77,15 +77,130 @@ Edit `userConfig.json` next to the executable:
     "bf6": "battlefield_6",
     "FortniteClient-Win64-Shipping": "fortnite",
     "MarvelRivals_Shipping": "marvel_rivals"
-  }
+  },
+  "custom_sensors_enabled": false,
+  "custom_commands_enabled": false,
+  "custom_command_privileges_allowed": false,
+  "custom_sensors": [],
+  "custom_commands": []
 }
 ```
+
+> **Note:** Missing fields are automatically added when upgrading from older versions.
 
 ### Games Configuration
 
 The `games` object maps process names to game IDs:
 - **Key**: Part of the process name to match (case-insensitive)
 - **Value**: The game ID reported to Home Assistant
+
+## Custom Sensors & Commands
+
+You can define custom sensors and commands for PC-specific monitoring and control.
+
+### Security Model
+
+Custom features are **disabled by default** and require explicit opt-in:
+
+| Setting | Purpose |
+|---------|---------|
+| `custom_sensors_enabled` | Enable custom sensor polling |
+| `custom_commands_enabled` | Enable custom command execution |
+| `custom_command_privileges_allowed` | Allow commands marked `admin: true` |
+
+### Custom Sensors
+
+Monitor anything - GPU temperature, service status, disk space:
+
+```json
+{
+  "custom_sensors_enabled": true,
+  "custom_sensors": [
+    {
+      "name": "gpu_temp",
+      "type": "powershell",
+      "script": "(Get-CimInstance -Namespace root/cimv2 -ClassName Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine | Where-Object Name -like '*engtype_3D*' | Select-Object -First 1).UtilizationPercentage",
+      "unit": "°C",
+      "icon": "mdi:thermometer",
+      "interval_seconds": 30
+    },
+    {
+      "name": "disk_free_c",
+      "type": "powershell",
+      "script": "[math]::Round((Get-PSDrive C).Free / 1GB, 1)",
+      "unit": "GB",
+      "icon": "mdi:harddisk",
+      "interval_seconds": 300
+    },
+    {
+      "name": "is_vpn_connected",
+      "type": "process_exists",
+      "process_name": "openvpn"
+    },
+    {
+      "name": "hostname",
+      "type": "registry",
+      "registry_path": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\ComputerName\\ComputerName",
+      "registry_value": "ComputerName"
+    }
+  ]
+}
+```
+
+**Sensor Types:**
+
+| Type | Description | Required Fields |
+|------|-------------|-----------------|
+| `powershell` | Run PowerShell, use stdout as value | `script` |
+| `process_exists` | Returns "true"/"false" | `process_name` |
+| `file_contents` | Read file contents | `file_path` |
+| `registry` | Read registry value (Windows) | `registry_path`, `registry_value` |
+
+### Custom Commands
+
+Execute custom actions from Home Assistant:
+
+```json
+{
+  "custom_commands_enabled": true,
+  "custom_command_privileges_allowed": true,
+  "custom_commands": [
+    {
+      "name": "flush_dns",
+      "type": "powershell",
+      "script": "ipconfig /flushdns",
+      "icon": "mdi:dns",
+      "admin": true
+    },
+    {
+      "name": "clear_temp",
+      "type": "powershell",
+      "script": "Remove-Item $env:TEMP\\* -Recurse -Force -ErrorAction SilentlyContinue",
+      "icon": "mdi:broom"
+    },
+    {
+      "name": "open_calculator",
+      "type": "executable",
+      "executable": "calc.exe"
+    }
+  ]
+}
+```
+
+**Command Types:**
+
+| Type | Description | Required Fields |
+|------|-------------|-----------------|
+| `powershell` | Run PowerShell script | `script` |
+| `executable` | Run an executable | `executable`, optional `args` |
+| `shell` | Run via cmd.exe | `shell_command` |
+
+> **Running script files:** To run `.ps1` files, use the `powershell` type with `"script": "& 'C:\\path\\script.ps1'"`. The `executable` type works for `.bat`/`.cmd` files directly, but `.ps1` files require PowerShell's execution policy handling.
+
+**Security:**
+- Commands with `admin: true` require `custom_command_privileges_allowed: true`
+- Admin commands run via `Start-Process -Verb RunAs` (UAC prompt may appear)
+- Non-admin commands run in current user context
 
 ## MQTT Commands
 
@@ -110,6 +225,8 @@ The `Launch` button accepts special payloads:
 | `lnk:C:\path\to.lnk` | Run shortcut file |
 | `close:processname` | Close process gracefully |
 
+> **Note:** The `Launch` button requires you to define actions in Home Assistant that send the appropriate payload. Unlike custom commands (which are self-contained), Launch is a generic endpoint that executes whatever payload you send it.
+
 ## Home Assistant Integration
 
 PC Bridge auto-discovers via MQTT. After connecting, you'll get:
@@ -118,6 +235,7 @@ PC Bridge auto-discovers via MQTT. After connecting, you'll get:
 - `sensor.<device>_runninggames` - Current game (or "none")
 - `sensor.<device>_sleep_state` - "awake" or "sleeping"
 - `sensor.<device>_lastactive` - ISO timestamp of last input
+- `sensor.<device>_<custom>` - Any custom sensors you define
 
 **Buttons:**
 - `button.<device>_screensaver`
@@ -125,6 +243,7 @@ PC Bridge auto-discovers via MQTT. After connecting, you'll get:
 - `button.<device>_shutdown`
 - `button.<device>_sleep`
 - `button.<device>_launch`
+- `button.<device>_<custom>` - Any custom commands you define
 
 Where `<device>` is your configured `device_name` with dashes replaced by underscores.
 
@@ -194,8 +313,15 @@ sudo systemctl start pc-bridge
 | Metric | Value |
 |--------|-------|
 | Binary size | ~3 MB |
-| Memory usage | ~5 MB |
+| Memory usage | ~5 MB base |
 | CPU usage | < 1% |
+
+**Custom Sensors Impact:**
+- Each PowerShell sensor: ~10-50ms execution per poll
+- Process check sensor: ~1ms (native API)
+- Registry read: ~0.1ms (native API)
+- Memory: +~100 bytes per sensor for state tracking
+- Recommended: Keep intervals ≥30s for PowerShell sensors
 
 ## License
 

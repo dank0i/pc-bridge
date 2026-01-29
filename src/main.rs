@@ -26,7 +26,7 @@ use tracing_subscriber::FmtSubscriber;
 
 use crate::config::Config;
 use crate::mqtt::MqttClient;
-use crate::sensors::{GameSensor, IdleSensor, MemorySensor};
+use crate::sensors::{GameSensor, IdleSensor, MemorySensor, CustomSensorManager};
 use crate::power::PowerEventListener;
 use crate::commands::CommandExecutor;
 
@@ -78,6 +78,7 @@ async fn main() -> anyhow::Result<()> {
     let memory_sensor = MemorySensor::new(Arc::clone(&state));
     let power_listener = PowerEventListener::new(Arc::clone(&state));
     let command_executor = CommandExecutor::new(Arc::clone(&state), command_rx);
+    let custom_sensor_manager = CustomSensorManager::new(Arc::clone(&state));
 
     // Spawn sensor tasks
     let game_handle = tokio::spawn(game_sensor.run());
@@ -85,15 +86,26 @@ async fn main() -> anyhow::Result<()> {
     let memory_handle = tokio::spawn(memory_sensor.run());
     let power_handle = tokio::spawn(power_listener.run());
     let command_handle = tokio::spawn(command_executor.run());
+    let custom_sensor_handle = tokio::spawn(custom_sensor_manager.run());
 
     // Start config file watcher for hot-reload
     let config_watcher_handle = tokio::spawn(config::watch_config(Arc::clone(&state)));
 
-    // Publish initial state
+    // Publish initial state and register custom entities
     {
-        let _config = state.config.read().await;
+        let config = state.config.read().await;
         state.mqtt.publish_availability(true).await;
         state.mqtt.publish_sensor_retained("sleep_state", "awake").await;
+        
+        // Register custom sensors if enabled
+        if config.custom_sensors_enabled && !config.custom_sensors.is_empty() {
+            state.mqtt.register_custom_sensors(&config.custom_sensors).await;
+        }
+        
+        // Register custom commands if enabled
+        if config.custom_commands_enabled && !config.custom_commands.is_empty() {
+            state.mqtt.register_custom_commands(&config.custom_commands).await;
+        }
     }
 
     // Wait for shutdown signal (Ctrl+C)
@@ -112,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
             let _ = memory_handle.await;
             let _ = power_handle.await;
             let _ = command_handle.await;
+            let _ = custom_sensor_handle.await;
             let _ = config_watcher_handle.await;
         }
     ).await;
