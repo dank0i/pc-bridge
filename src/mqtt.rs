@@ -177,8 +177,8 @@ impl MqttClient {
         let _device = HADevice {
             identifiers: vec![self.device_id.clone()],
             name: self.device_name.clone(),
-            model: "PC Agent Rust".to_string(),
-            manufacturer: "Custom".to_string(),
+            model: "PC Bridge".to_string(),
+            manufacturer: "dank0i".to_string(),
         };
 
         // Sensors
