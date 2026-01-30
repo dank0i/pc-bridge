@@ -99,7 +99,7 @@ pub fn extract_library_paths(content: &str) -> Vec<String> {
 /// }
 /// ```
 pub fn extract_library_info(content: &str) -> Vec<(String, Vec<u32>)> {
-    use log::debug;
+    use tracing::debug;
     
     let mut libraries = Vec::new();
     let mut current_path: Option<String> = None;
