@@ -76,26 +76,86 @@ pub fn extract_appmanifest_fields(content: &str) -> Option<(u32, String, String)
 
 /// Extract library paths from libraryfolders.vdf
 pub fn extract_library_paths(content: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    let mut in_block = false;
-    let mut current_path = None;
+    extract_library_info(content).into_iter().map(|(path, _)| path).collect()
+}
+
+/// Extract library paths AND app_ids from libraryfolders.vdf
+/// 
+/// Returns: Vec<(library_path, Vec<app_id>)>
+/// 
+/// libraryfolders.vdf format:
+/// ```
+/// "libraryfolders"
+/// {
+///     "0"
+///     {
+///         "path"    "C:\\Program Files (x86)\\Steam"
+///         "apps"
+///         {
+///             "228980"    "123456789"  // app_id -> install size
+///             "730"       "23456789"
+///         }
+///     }
+/// }
+/// ```
+pub fn extract_library_info(content: &str) -> Vec<(String, Vec<u32>)> {
+    let mut libraries = Vec::new();
+    let mut current_path: Option<String> = None;
+    let mut current_apps: Vec<u32> = Vec::new();
+    let mut in_library_block = false;
+    let mut in_apps_block = false;
+    let mut brace_depth = 0;
     
     for line in content.lines() {
         let line = line.trim();
         
         if line == "{" {
-            in_block = true;
+            brace_depth += 1;
+            continue;
         } else if line == "}" {
-            if let Some(path) = current_path.take() {
-                paths.push(path);
+            brace_depth -= 1;
+            
+            if in_apps_block && brace_depth == 2 {
+                // End of apps block
+                in_apps_block = false;
+            } else if in_library_block && brace_depth == 1 {
+                // End of library block - save it
+                if let Some(path) = current_path.take() {
+                    libraries.push((path, std::mem::take(&mut current_apps)));
+                }
+                in_library_block = false;
             }
-            in_block = false;
-        } else if in_block && line.starts_with("\"path\"") {
-            current_path = extract_quoted_string(line);
+            continue;
+        }
+        
+        // Check for numbered library blocks ("0", "1", etc.)
+        if brace_depth == 1 && line.starts_with('"') && line.ends_with('"') {
+            let key = &line[1..line.len()-1];
+            if key.chars().all(|c| c.is_ascii_digit()) {
+                in_library_block = true;
+            }
+        }
+        
+        if in_library_block && brace_depth == 2 {
+            if line.starts_with("\"path\"") {
+                current_path = extract_quoted_string(line);
+            } else if line.starts_with("\"apps\"") {
+                in_apps_block = true;
+            }
+        }
+        
+        // Inside apps block - extract app_ids
+        if in_apps_block && brace_depth == 3 {
+            // Lines look like: "730"  "23456789"
+            if let Some(app_id_str) = extract_quoted_value(line) {
+                if let Ok(app_id) = app_id_str.parse::<u32>() {
+                    current_apps.push(app_id);
+                }
+            }
         }
     }
     
-    paths
+    libraries
 }
 
 #[inline]

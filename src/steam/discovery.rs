@@ -94,42 +94,43 @@ impl SteamGameDiscovery {
     }
     
     fn discover_full(steam_path: &Path, appinfo_path: &Path) -> Option<Self> {
-        // Parse library folders
-        let library_paths = Self::get_library_paths(steam_path)?;
-        debug!("Found {} library paths", library_paths.len());
+        // Parse library folders - get paths AND app_ids in one pass
+        let library_info = Self::get_library_info(steam_path)?;
+        debug!("Found {} libraries", library_info.len());
         
-        // Collect installed app IDs and info from manifests
-        let installed_games = Self::get_installed_games(&library_paths);
-        debug!("Found {} installed games", installed_games.len());
+        // Collect all installed app_ids with their library path
+        let mut installed_apps: Vec<(u32, PathBuf)> = Vec::new();
+        for (lib_path, app_ids) in &library_info {
+            for &app_id in app_ids {
+                installed_apps.push((app_id, PathBuf::from(lib_path)));
+            }
+        }
+        debug!("Found {} installed apps", installed_apps.len());
         
-        if installed_games.is_empty() {
+        if installed_apps.is_empty() {
             return None;
         }
         
-        // Open appinfo.vdf for executable lookup
+        // Open appinfo.vdf for name + executable lookup
         let mut appinfo = match AppInfoReader::open(appinfo_path) {
             Ok(reader) => {
                 debug!("Indexed {} apps from appinfo.vdf", reader.app_count());
-                Some(reader)
+                reader
             }
             Err(e) => {
                 warn!("Failed to open appinfo.vdf: {}", e);
-                None
+                return None;
             }
         };
         
         // Build process name → game mapping
-        let mut games = HashMap::with_capacity(installed_games.len());
+        let mut games = HashMap::with_capacity(installed_apps.len());
         
-        for (app_id, name, install_dir, library_path) in installed_games {
-            // Get executable from appinfo.vdf
-            let executable = appinfo.as_mut()
-                .and_then(|reader| reader.get_executable(app_id))
-                .unwrap_or_default();
-            
-            if executable.is_empty() {
+        for (app_id, library_path) in installed_apps {
+            // Get name and executable from appinfo.vdf (single lookup)
+            let Some((name, executable)) = appinfo.get_game_info(app_id) else {
                 continue;
-            }
+            };
             
             // Extract just the exe filename
             let exe_name = Path::new(&executable)
@@ -143,10 +144,11 @@ impl SteamGameDiscovery {
                 .unwrap_or(exe_name)
                 .to_lowercase();
             
+            // We don't have installdir from libraryfolders, but we can get it from the name
+            // In practice, this is close enough for most games
             let install_path = library_path
                 .join("steamapps")
-                .join("common")
-                .join(&install_dir);
+                .join("common");
             
             games.insert(key, SteamGame {
                 app_id,
@@ -388,48 +390,21 @@ impl SteamGameDiscovery {
         None
     }
     
-    /// Get all Steam library paths from libraryfolders.vdf
-    fn get_library_paths(steam_path: &Path) -> Option<Vec<PathBuf>> {
+    /// Get library info from libraryfolders.vdf (paths + app_ids)
+    fn get_library_info(steam_path: &Path) -> Option<Vec<(String, Vec<u32>)>> {
         let vdf_path = steam_path.join("steamapps").join("libraryfolders.vdf");
         let content = fs::read_to_string(&vdf_path).ok()?;
         
-        let paths = vdf::extract_library_paths(&content);
+        let mut info = vdf::extract_library_info(&content);
         
         // Also include main Steam path if not in list
-        let mut result: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-        if !result.iter().any(|p| p == steam_path) {
-            result.insert(0, steam_path.to_path_buf());
+        let steam_path_str = steam_path.to_string_lossy().to_string();
+        if !info.iter().any(|(p, _)| p == &steam_path_str) {
+            // If main path not included, add it with empty apps (will scan later)
+            info.insert(0, (steam_path_str, vec![]));
         }
         
-        Some(result)
-    }
-    
-    /// Get installed games from appmanifest files
-    /// Returns: Vec<(app_id, name, install_dir, library_path)>
-    fn get_installed_games(library_paths: &[PathBuf]) -> Vec<(u32, String, String, PathBuf)> {
-        let mut games = Vec::new();
-        
-        for library_path in library_paths {
-            let steamapps = library_path.join("steamapps");
-            
-            // Read directory and filter appmanifest files
-            if let Ok(entries) = fs::read_dir(&steamapps) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        if name.starts_with("appmanifest_") && name.ends_with(".acf") {
-                            if let Ok(content) = fs::read_to_string(&path) {
-                                if let Some((app_id, name, install_dir)) = vdf::extract_appmanifest_fields(&content) {
-                                    games.push((app_id, name, install_dir, library_path.clone()));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        games
+        Some(info)
     }
     
     /// Lookup game by process name

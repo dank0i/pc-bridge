@@ -26,7 +26,7 @@ mod winapi;
 
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{info, error, Level};
+use tracing::{info, warn, error, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use crate::config::Config;
@@ -34,6 +34,7 @@ use crate::mqtt::MqttClient;
 use crate::sensors::{GameSensor, IdleSensor, CustomSensorManager, SystemSensor};
 use crate::power::PowerEventListener;
 use crate::commands::CommandExecutor;
+use crate::steam::SteamGameDiscovery;
 
 /// Application state shared across tasks
 pub struct AppState {
@@ -104,6 +105,34 @@ async fn main() -> anyhow::Result<()> {
 
     // Create MQTT client (conditionally registers discovery based on features)
     let (mqtt, command_rx) = MqttClient::new(&config).await?;
+
+    // Discover Steam games and merge into config if game detection is enabled
+    let mut config = config;
+    if config.features.game_detection {
+        info!("Discovering Steam games...");
+        if let Some(discovery) = SteamGameDiscovery::discover_async().await {
+            info!("  ✓ Found {} Steam games in {}ms{}", 
+                discovery.game_count, 
+                discovery.build_time_ms,
+                if discovery.from_cache { " (cached)" } else { "" }
+            );
+            
+            // Merge into config and save
+            match config.merge_steam_games(&discovery) {
+                Ok(added) if added > 0 => {
+                    info!("  ✓ Added {} new games to userConfig.json", added);
+                }
+                Ok(_) => {
+                    // No new games to add
+                }
+                Err(e) => {
+                    warn!("  ⚠ Failed to save discovered games: {}", e);
+                }
+            }
+        } else {
+            info!("  ⚠ Steam not found or no games installed");
+        }
+    }
 
     // Create shared state
     let state = Arc::new(AppState {

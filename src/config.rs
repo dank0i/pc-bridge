@@ -47,8 +47,10 @@ pub struct Config {
     pub intervals: IntervalConfig,
     #[serde(default)]
     pub features: FeatureConfig,
+    /// Games map: process_pattern → GameConfig
+    /// Can be simple string (game_id) or object with app_id
     #[serde(default)]
-    pub games: HashMap<String, String>,
+    pub games: HashMap<String, GameConfig>,
     
     // Tray icon - enabled by default
     #[serde(default = "default_true")]
@@ -68,6 +70,53 @@ pub struct Config {
 }
 
 fn default_true() -> bool { true }
+
+/// Game configuration - supports both simple string and object with app_id
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum GameConfig {
+    /// Simple: just the game ID string
+    Simple(String),
+    /// Full: game ID with optional Steam app_id
+    Full {
+        game_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        app_id: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// Whether this was auto-discovered from Steam
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        auto_discovered: bool,
+    },
+}
+
+impl GameConfig {
+    /// Get the game_id regardless of variant
+    pub fn game_id(&self) -> &str {
+        match self {
+            GameConfig::Simple(id) => id,
+            GameConfig::Full { game_id, .. } => game_id,
+        }
+    }
+    
+    /// Get app_id if available
+    pub fn app_id(&self) -> Option<u32> {
+        match self {
+            GameConfig::Simple(_) => None,
+            GameConfig::Full { app_id, .. } => *app_id,
+        }
+    }
+    
+    /// Create from Steam discovery
+    pub fn from_steam(game_id: String, app_id: u32, name: String) -> Self {
+        GameConfig::Full {
+            game_id,
+            app_id: Some(app_id),
+            name: Some(name),
+            auto_discovered: true,
+        }
+    }
+}
 
 /// Feature toggles - all disabled by default (opt-in philosophy)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -277,6 +326,53 @@ impl Config {
         let exe = std::env::current_exe()?;
         let dir = exe.parent().context("No parent directory")?;
         Ok(dir.join("userConfig.json"))
+    }
+    
+    /// Merge Steam-discovered games into the config and save
+    /// 
+    /// Only adds games that don't already exist (by process pattern).
+    /// Returns the number of new games added.
+    pub fn merge_steam_games(&mut self, steam_games: &crate::steam::SteamGameDiscovery) -> Result<usize> {
+        let mut added = 0;
+        
+        for (exe_key, game) in &steam_games.games {
+            // exe_key is already lowercase, no extension (e.g., "cs2")
+            // Check if this pattern already exists
+            if self.games.contains_key(exe_key) {
+                continue;
+            }
+            
+            // Generate game_id from name
+            let game_id = game.name
+                .to_lowercase()
+                .replace(' ', "_")
+                .replace('-', "_")
+                .replace(':', "")
+                .replace("'", "");
+            
+            // Add to games map
+            self.games.insert(
+                exe_key.clone(),
+                GameConfig::from_steam(game_id, game.app_id, game.name.clone()),
+            );
+            added += 1;
+        }
+        
+        if added > 0 {
+            // Save updated config
+            self.save()?;
+        }
+        
+        Ok(added)
+    }
+    
+    /// Save current config to userConfig.json
+    pub fn save(&self) -> Result<()> {
+        let config_path = Self::config_path()?;
+        let content = serde_json::to_string_pretty(self)?;
+        std::fs::write(&config_path, content)
+            .with_context(|| format!("Failed to write config to {:?}", config_path))?;
+        Ok(())
     }
 
     /// Validate configuration values

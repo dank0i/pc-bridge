@@ -108,6 +108,14 @@ impl AppInfoReader {
     /// 
     /// Performance: ~0.05-0.1ms per lookup (seek + small read + parse)
     pub fn get_executable(&mut self, app_id: u32) -> Option<String> {
+        self.get_game_info(app_id).map(|(_, exe)| exe)
+    }
+    
+    /// Get game name and executable for an app ID
+    /// 
+    /// Returns: (name, executable)
+    /// Performance: ~0.05-0.1ms per lookup
+    pub fn get_game_info(&mut self, app_id: u32) -> Option<(String, String)> {
         let entry = self.index.get(&app_id)?;
         
         // Seek to data section
@@ -118,29 +126,50 @@ impl AppInfoReader {
         let mut data = vec![0u8; entry.size as usize];
         self.file.read_exact(&mut data).ok()?;
         
-        // Parse binary VDF to find launch executable
-        Self::parse_executable(&data)
+        // Parse binary VDF to find name and executable
+        Self::parse_game_info(&data)
     }
     
     /// Parse binary VDF data to extract Windows launch executable
     /// 
     /// We're looking for: common -> launch -> 0 -> executable (with type=default, oslist containing windows)
     fn parse_executable(data: &[u8]) -> Option<String> {
+        Self::parse_game_info(data).map(|(_, exe)| exe)
+    }
+    
+    /// Parse binary VDF data to extract game name and Windows launch executable
+    fn parse_game_info(data: &[u8]) -> Option<(String, String)> {
         let mut reader = BinaryVdfReader::new(data);
         
-        // Navigate to "common" block
-        if !reader.find_block("common") {
-            return None;
+        // Get name from "common" block
+        let mut name = None;
+        if reader.find_block("common") {
+            while let Some((key, value)) = reader.next_kv() {
+                match value {
+                    BinaryVdfValue::String(s) if key == "name" => {
+                        name = Some(s);
+                        break;
+                    }
+                    BinaryVdfValue::BlockEnd => break,
+                    _ => {}
+                }
+            }
         }
         
-        // Navigate to "launch" block within common (or at root in some formats)
+        // Navigate to "launch" block for executable
         reader.reset();
-        if !reader.find_block("launch") && !reader.find_nested_block(&["config", "launch"]) {
-            return None;
-        }
+        let exe = if reader.find_block("launch") {
+            Self::find_windows_executable(&mut reader)
+        } else {
+            reader.reset();
+            if reader.find_nested_block(&["config", "launch"]) {
+                Self::find_windows_executable(&mut reader)
+            } else {
+                None
+            }
+        };
         
-        // Find default Windows launch config
-        Self::find_windows_executable(&mut reader)
+        Some((name?, exe?))
     }
     
     fn find_windows_executable(reader: &mut BinaryVdfReader) -> Option<String> {
