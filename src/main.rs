@@ -1,7 +1,7 @@
 //! PC Bridge - Home Assistant integration for Windows and Linux
 //!
 //! Provides:
-//! - Game detection via process monitoring
+//! - Game detection via process monitoring (auto-discovers Steam games)
 //! - Idle time tracking
 //! - Power event handling (sleep/wake)
 //! - Remote command execution
@@ -19,6 +19,7 @@ mod tray;
 mod notification;
 mod setup;
 mod audio;
+mod steam;
 
 #[cfg(windows)]
 mod winapi;
