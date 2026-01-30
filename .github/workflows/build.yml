@@ -69,9 +69,11 @@ jobs:
 
       - name: Rename artifacts
         run: |
-          mv windows/pc-bridge.exe pc-bridge-windows.exe
-          mv linux/pc-bridge pc-bridge-linux
+          mv windows/pc-bridge.exe ./pc-bridge-windows.exe
+          mv linux/pc-bridge ./pc-bridge-linux
           chmod +x pc-bridge-linux
+          # Clean up download directories to avoid duplicates
+          rm -rf windows linux
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
