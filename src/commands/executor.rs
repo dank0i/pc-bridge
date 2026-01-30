@@ -9,6 +9,7 @@ use tracing::{info, warn, error, debug};
 use crate::AppState;
 use crate::mqtt::CommandReceiver;
 use crate::power::wake_display;
+use crate::notification;
 use super::launcher::expand_launcher_shortcut;
 use super::custom::execute_custom_command;
 
@@ -90,7 +91,7 @@ impl CommandExecutor {
             }
             "notification" => {
                 if !payload.is_empty() {
-                    show_notification(payload)?;
+                    notification::show_toast(payload)?;
                 }
                 return Ok(());
             }
@@ -205,71 +206,4 @@ fn send_ctrl_f6() {
         // Key up Ctrl
         keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
     }
-}
-
-/// Show Windows toast notification
-fn show_notification(payload: &str) -> anyhow::Result<()> {
-    #[derive(serde::Deserialize, Default)]
-    struct Notification {
-        #[serde(default)]
-        title: String,
-        #[serde(default)]
-        message: String,
-    }
-
-    let notif: Notification = serde_json::from_str(payload).unwrap_or_else(|_| {
-        Notification {
-            title: String::new(),
-            message: payload.to_string(),
-        }
-    });
-
-    let title = if notif.title.is_empty() { "Home Assistant" } else { &notif.title };
-    let message = if notif.message.is_empty() { payload } else { &notif.message };
-
-    // Escape XML special characters
-    let title = escape_xml(title);
-    let message = escape_xml(message);
-
-    let ps_cmd = format!(r#"
-$app = '{{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}}\WindowsPowerShell\v1.0\powershell.exe'
-[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
-[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
-$template = @"
-<toast>
-    <visual>
-        <binding template="ToastText02">
-            <text id="1">{}</text>
-            <text id="2">{}</text>
-        </binding>
-    </visual>
-</toast>
-"@
-$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-$xml.LoadXml($template)
-$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
-[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show($toast)
-"#, title, message);
-
-    Command::new("powershell")
-        .args(["-NoProfile", "-Command", &ps_cmd])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()?;
-
-    Ok(())
-}
-
-/// Escape XML special characters and strip control chars
-fn escape_xml(s: &str) -> String {
-    s.chars()
-        .filter(|&c| c >= '\x20' || c == '\t' || c == '\n' || c == '\r')
-        .map(|c| match c {
-            '&' => "&amp;".to_string(),
-            '<' => "&lt;".to_string(),
-            '>' => "&gt;".to_string(),
-            '\'' => "&apos;".to_string(),
-            '"' => "&quot;".to_string(),
-            _ => c.to_string(),
-        })
-        .collect()
 }

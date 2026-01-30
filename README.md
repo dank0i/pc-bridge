@@ -9,6 +9,7 @@ A lightweight cross-platform agent that bridges your PC with Home Assistant via 
 - **Power Events** - Detects sleep/wake and publishes state
 - **Display Wake** - Wakes display after WoL, dismisses screensaver
 - **Remote Commands** - Launch games, activate screensaver, shutdown, sleep
+- **Notifications** - Native Windows toast notifications from Home Assistant
 - **Hot-Reload** - Updates game mappings without restart
 
 ## Supported Platforms
@@ -211,6 +212,97 @@ Execute custom actions from Home Assistant:
 - Admin commands run via `Start-Process -Verb RunAs` (UAC prompt may appear)
 - Non-admin commands run in current user context
 
+## Notifications
+
+PC Bridge can display Windows toast notifications sent from Home Assistant. Uses native WinRT APIs for ~10ms latency (no PowerShell overhead).
+
+### Using the Notify Service
+
+After PC Bridge connects, a `notify.send_message` entity is auto-discovered:
+
+```yaml
+# In HA automations, scripts, etc.
+action: notify.send_message
+metadata: {}
+data:
+  message: Motion detected at front door!
+  title: Security Alert
+target:
+  entity_id: notify.my_pc_notification
+```
+
+### Payload Format
+
+Send JSON to the notify topic for full control:
+
+```json
+{"title": "Alert Title", "message": "Notification body text"}
+```
+
+Or just plain text (uses "Home Assistant" as default title):
+
+```
+Your plain text message here
+```
+
+### Direct MQTT Topic
+
+You can also publish directly to the MQTT topic:
+
+```
+Topic: hass.agent/notifications/{device_name}
+Payload: {"title": "My Title", "message": "My message"}
+```
+
+### Example Automations
+
+**Doorbell notification:**
+```yaml
+automation:
+  - alias: "Doorbell: Notify PC"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.doorbell
+        to: "on"
+    action:
+      - action: notify.send_message
+        data:
+          title: "🔔 Doorbell"
+          message: "Someone is at the door"
+        target:
+          entity_id: notify.my_pc_notification
+```
+
+**Washer done notification:**
+```yaml
+automation:
+  - alias: "Laundry: Notify when done"
+    trigger:
+      - platform: state
+        entity_id: sensor.washer_status
+        to: "complete"
+    action:
+      - action: notify.send_message
+        data:
+          title: "🧺 Laundry"
+          message: "Washer cycle complete!"
+        target:
+          entity_id: notify.my_pc_notification
+```
+
+**Game suggestion notification:**
+```yaml
+script:
+  suggest_game:
+    sequence:
+      - action: notify.send_message
+        data:
+          title: "🎮 Game Time?"
+          message: "How about playing {{ states('sensor.suggested_game') }}?"
+        target:
+          entity_id: notify.my_pc_notification
+```
+
 ## MQTT Commands
 
 Send commands via MQTT button topics:
@@ -253,6 +345,9 @@ PC Bridge auto-discovers via MQTT. After connecting, you'll get:
 - `button.<device>_sleep`
 - `button.<device>_launch`
 - `button.<device>_<custom>` - Any custom commands you define
+
+**Notifications:**
+- `notify.<device>_notification` - Send toast notifications to your PC
 
 Where `<device>` is your configured `device_name` with dashes replaced by underscores.
 

@@ -16,6 +16,7 @@ mod commands;
 mod power;
 mod updater;
 mod tray;
+mod notification;
 
 #[cfg(windows)]
 mod winapi;

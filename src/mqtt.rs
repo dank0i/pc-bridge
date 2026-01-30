@@ -236,7 +236,39 @@ impl MqttClient {
             let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
         }
 
+        // Register notify service
+        self.register_notify_service(&device).await;
+
         info!("Registered HA discovery");
+    }
+
+    /// Register notify service for MQTT discovery
+    async fn register_notify_service(&self, device: &HADevice) {
+        // The notify platform expects command_topic to receive messages
+        // Topic: hass.agent/notifications/{device_name} (for HASS.Agent compatibility)
+        // Also register via standard MQTT discovery
+        let notify_topic = format!("hass.agent/notifications/{}", self.device_name);
+        
+        let payload = serde_json::json!({
+            "name": "Notification",
+            "unique_id": format!("{}_notify", self.device_id),
+            "command_topic": notify_topic,
+            "availability_topic": self.availability_topic(),
+            "device": {
+                "identifiers": device.identifiers,
+                "name": device.name,
+                "model": device.model,
+                "manufacturer": device.manufacturer
+            },
+            "icon": "mdi:message-badge",
+            "qos": 1
+        });
+
+        let topic = format!("{}/notify/{}/config", DISCOVERY_PREFIX, self.device_name);
+        let json = serde_json::to_string(&payload).unwrap();
+        let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
+        
+        debug!("Registered notify service");
     }
 
     /// Register custom sensors for MQTT discovery
