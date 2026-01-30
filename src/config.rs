@@ -23,9 +23,13 @@ const DEFAULT_CONFIG: &str = r#"{
         "last_active": 10,
         "availability": 30
     },
-    "games": {
-        "example_game": "ExampleGame.exe"
+    "features": {
+        "game_detection": false,
+        "idle_tracking": false,
+        "power_events": false,
+        "notifications": false
     },
+    "games": {},
     "show_tray_icon": true,
     "custom_sensors_enabled": false,
     "custom_commands_enabled": false,
@@ -41,6 +45,8 @@ pub struct Config {
     pub mqtt: MqttConfig,
     #[serde(default)]
     pub intervals: IntervalConfig,
+    #[serde(default)]
+    pub features: FeatureConfig,
     #[serde(default)]
     pub games: HashMap<String, String>,
     
@@ -62,6 +68,19 @@ pub struct Config {
 }
 
 fn default_true() -> bool { true }
+
+/// Feature toggles - all disabled by default (opt-in philosophy)
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct FeatureConfig {
+    #[serde(default)]
+    pub game_detection: bool,
+    #[serde(default)]
+    pub idle_tracking: bool,
+    #[serde(default)]
+    pub power_events: bool,
+    #[serde(default)]
+    pub notifications: bool,
+}
 
 /// Custom sensor definition
 #[derive(Debug, Clone, Deserialize)]
@@ -204,6 +223,17 @@ impl Config {
         // Add show_tray_icon if missing (default true)
         if !obj.contains_key("show_tray_icon") {
             obj.insert("show_tray_icon".to_string(), serde_json::Value::Bool(true));
+            migrated = true;
+        }
+        
+        // Add features section if missing (all disabled by default)
+        if !obj.contains_key("features") {
+            obj.insert("features".to_string(), serde_json::json!({
+                "game_detection": false,
+                "idle_tracking": false,
+                "power_events": false,
+                "notifications": false
+            }));
             migrated = true;
         }
         

@@ -28,7 +28,7 @@ use tracing_subscriber::FmtSubscriber;
 
 use crate::config::Config;
 use crate::mqtt::MqttClient;
-use crate::sensors::{GameSensor, IdleSensor, MemorySensor, CustomSensorManager};
+use crate::sensors::{GameSensor, IdleSensor, CustomSensorManager};
 use crate::power::PowerEventListener;
 use crate::commands::CommandExecutor;
 
@@ -38,6 +38,9 @@ pub struct AppState {
     pub mqtt: MqttClient,
     pub shutdown_tx: broadcast::Sender<()>,
 }
+
+/// Handle for optional tasks
+type TaskHandle = tokio::task::JoinHandle<()>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -49,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
         .compact()
         .init();
 
-    info!("PC Agent starting...");
+    info!("PC Bridge starting...");
 
     // Kill any existing instances
     kill_existing_instances();
@@ -60,40 +63,68 @@ async fn main() -> anyhow::Result<()> {
     // Load configuration
     let config = Config::load()?;
     info!("Loaded config for device: {}", config.device_name);
+    
+    // Log enabled features
+    log_enabled_features(&config);
+    
     let show_tray = config.show_tray_icon;
     let config_path = Config::config_path()?;
 
     // Create shutdown channel
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
-    // Create MQTT client
+    // Create MQTT client (conditionally registers discovery based on features)
     let (mqtt, command_rx) = MqttClient::new(&config).await?;
 
     // Create shared state
     let state = Arc::new(AppState {
-        config: RwLock::new(config),
+        config: RwLock::new(config.clone()),
         mqtt,
         shutdown_tx: shutdown_tx.clone(),
     });
 
-    // Start subsystems
-    let game_sensor = GameSensor::new(Arc::clone(&state));
-    let idle_sensor = IdleSensor::new(Arc::clone(&state));
-    let memory_sensor = MemorySensor::new(Arc::clone(&state));
-    let power_listener = PowerEventListener::new(Arc::clone(&state));
+    // Collect task handles for cleanup
+    let mut handles: Vec<TaskHandle> = Vec::new();
+
+    // Command executor always runs (needed for any remote control)
     let command_executor = CommandExecutor::new(Arc::clone(&state), command_rx);
-    let custom_sensor_manager = CustomSensorManager::new(Arc::clone(&state));
+    handles.push(tokio::spawn(command_executor.run()));
 
-    // Spawn sensor tasks
-    let game_handle = tokio::spawn(game_sensor.run());
-    let idle_handle = tokio::spawn(idle_sensor.run());
-    let memory_handle = tokio::spawn(memory_sensor.run());
-    let power_handle = tokio::spawn(power_listener.run());
-    let command_handle = tokio::spawn(command_executor.run());
-    let custom_sensor_handle = tokio::spawn(custom_sensor_manager.run());
+    // Conditionally start sensors based on features
+    if config.features.game_detection {
+        let sensor = GameSensor::new(Arc::clone(&state));
+        handles.push(tokio::spawn(sensor.run()));
+        info!("  ✓ Game detection enabled");
+    }
 
-    // Start config file watcher for hot-reload
-    let config_watcher_handle = tokio::spawn(config::watch_config(Arc::clone(&state)));
+    if config.features.idle_tracking {
+        let sensor = IdleSensor::new(Arc::clone(&state));
+        handles.push(tokio::spawn(sensor.run()));
+        info!("  ✓ Idle tracking enabled");
+    }
+
+    if config.features.power_events {
+        let listener = PowerEventListener::new(Arc::clone(&state));
+        handles.push(tokio::spawn(listener.run()));
+        info!("  ✓ Power events enabled");
+    }
+
+    // Custom sensors (if enabled and defined)
+    if config.custom_sensors_enabled && !config.custom_sensors.is_empty() {
+        let manager = CustomSensorManager::new(Arc::clone(&state));
+        handles.push(tokio::spawn(manager.run()));
+        state.mqtt.register_custom_sensors(&config.custom_sensors).await;
+        info!("  ✓ Custom sensors enabled ({} defined)", config.custom_sensors.len());
+    }
+
+    // Custom commands (just register discovery, executor handles them)
+    if config.custom_commands_enabled && !config.custom_commands.is_empty() {
+        state.mqtt.register_custom_commands(&config.custom_commands).await;
+        info!("  ✓ Custom commands enabled ({} defined)", config.custom_commands.len());
+    }
+
+    // Config file watcher for hot-reload
+    handles.push(tokio::spawn(config::watch_config(Arc::clone(&state))));
 
     // Start tray icon (Windows only, runs on separate thread)
     if show_tray {
@@ -104,25 +135,16 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Publish initial state and register custom entities
-    {
-        let config = state.config.read().await;
-        state.mqtt.publish_availability(true).await;
+    // Publish initial availability
+    state.mqtt.publish_availability(true).await;
+    
+    // Only publish sleep_state if power_events enabled
+    if config.features.power_events {
         state.mqtt.publish_sensor_retained("sleep_state", "awake").await;
-        
-        // Register custom sensors if enabled
-        if config.custom_sensors_enabled && !config.custom_sensors.is_empty() {
-            state.mqtt.register_custom_sensors(&config.custom_sensors).await;
-        }
-        
-        // Register custom commands if enabled
-        if config.custom_commands_enabled && !config.custom_commands.is_empty() {
-            state.mqtt.register_custom_commands(&config.custom_commands).await;
-        }
     }
 
     // Wait for shutdown signal (Ctrl+C)
-    info!("PC Agent running. Press Ctrl+C to stop.");
+    info!("PC Bridge running. Press Ctrl+C to stop.");
     tokio::signal::ctrl_c().await?;
 
     info!("Shutting down...");
@@ -132,21 +154,36 @@ async fn main() -> anyhow::Result<()> {
     let _ = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         async {
-            let _ = game_handle.await;
-            let _ = idle_handle.await;
-            let _ = memory_handle.await;
-            let _ = power_handle.await;
-            let _ = command_handle.await;
-            let _ = custom_sensor_handle.await;
-            let _ = config_watcher_handle.await;
+            for handle in handles {
+                let _ = handle.await;
+            }
         }
     ).await;
 
     // Publish offline status
     state.mqtt.publish_availability(false).await;
 
-    info!("PC Agent stopped");
+    info!("PC Bridge stopped");
     Ok(())
+}
+
+/// Log which features are enabled
+fn log_enabled_features(config: &Config) {
+    let features = &config.features;
+    let count = [
+        features.game_detection,
+        features.idle_tracking,
+        features.power_events,
+        features.notifications,
+        config.custom_sensors_enabled,
+        config.custom_commands_enabled,
+    ].iter().filter(|&&x| x).count();
+    
+    if count == 0 {
+        info!("No features enabled - running in minimal mode");
+    } else {
+        info!("Features enabled: {}", count);
+    }
 }
 
 /// Kill any other running instances (platform-specific)

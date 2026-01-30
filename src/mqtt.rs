@@ -131,9 +131,9 @@ impl MqttClient {
 
         let cmd_rx = CommandReceiver { rx: command_rx };
 
-        // Register discovery and subscribe
-        mqtt.register_discovery().await;
-        mqtt.subscribe_commands().await;
+        // Register discovery and subscribe based on enabled features
+        mqtt.register_discovery(config).await;
+        mqtt.subscribe_commands(config).await;
 
         Ok((mqtt, cmd_rx))
     }
@@ -173,7 +173,7 @@ impl MqttClient {
         None
     }
 
-    async fn register_discovery(&self) {
+    async fn register_discovery(&self, config: &Config) {
         let device = HADevice {
             identifiers: vec![self.device_id.clone()],
             name: self.device_name.clone(),
@@ -181,33 +181,34 @@ impl MqttClient {
             manufacturer: "dank0i".to_string(),
         };
 
-        // Sensors
-        let sensors = vec![
-            ("runninggames", "Runninggames", "mdi:gamepad-variant", None, None),
-            ("lastactive", "Last Active", "mdi:clock-outline", Some("timestamp"), None),
-            ("sleep_state", "Sleep State", "mdi:power-sleep", None, None),
-            ("agent_memory", "Agent Memory", "mdi:memory", None, Some("MB")),
-        ];
-
-        for (name, display_name, icon, device_class, unit) in sensors {
+        // Conditionally register sensors based on features
+        if config.features.game_detection {
+            self.register_sensor(&device, "runninggames", "Runninggames", "mdi:gamepad-variant", None, None).await;
+        }
+        
+        if config.features.idle_tracking {
+            self.register_sensor(&device, "lastactive", "Last Active", "mdi:clock-outline", Some("timestamp"), None).await;
+        }
+        
+        if config.features.power_events {
+            // sleep_state has no availability (always published)
             let payload = HADiscoveryPayload {
-                name: display_name.to_string(),
-                unique_id: format!("{}_{}", self.device_id, name),
-                state_topic: Some(self.sensor_topic(name)),
+                name: "Sleep State".to_string(),
+                unique_id: format!("{}_sleep_state", self.device_id),
+                state_topic: Some(self.sensor_topic("sleep_state")),
                 command_topic: None,
-                availability_topic: if name == "sleep_state" { None } else { Some(self.availability_topic()) },
+                availability_topic: None,
                 device: device.clone(),
-                icon: Some(icon.to_string()),
-                device_class: device_class.map(|s| s.to_string()),
-                unit_of_measurement: unit.map(|s| s.to_string()),
+                icon: Some("mdi:power-sleep".to_string()),
+                device_class: None,
+                unit_of_measurement: None,
             };
-
-            let topic = format!("{}/sensor/{}/{}/config", DISCOVERY_PREFIX, self.device_name, name);
+            let topic = format!("{}/sensor/{}/sleep_state/config", DISCOVERY_PREFIX, self.device_name);
             let json = serde_json::to_string(&payload).unwrap();
             let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
         }
 
-        // Command buttons
+        // Command buttons (always register - they're the core control interface)
         let commands = vec![
             ("Launch", "mdi:rocket-launch"),
             ("Screensaver", "mdi:monitor"),
@@ -236,10 +237,31 @@ impl MqttClient {
             let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
         }
 
-        // Register notify service
-        self.register_notify_service(&device).await;
+        // Register notify service only if notifications enabled
+        if config.features.notifications {
+            self.register_notify_service(&device).await;
+        }
 
         info!("Registered HA discovery");
+    }
+    
+    /// Helper to register a single sensor
+    async fn register_sensor(&self, device: &HADevice, name: &str, display_name: &str, icon: &str, device_class: Option<&str>, unit: Option<&str>) {
+        let payload = HADiscoveryPayload {
+            name: display_name.to_string(),
+            unique_id: format!("{}_{}", self.device_id, name),
+            state_topic: Some(self.sensor_topic(name)),
+            command_topic: None,
+            availability_topic: Some(self.availability_topic()),
+            device: device.clone(),
+            icon: Some(icon.to_string()),
+            device_class: device_class.map(|s| s.to_string()),
+            unit_of_measurement: unit.map(|s| s.to_string()),
+        };
+
+        let topic = format!("{}/sensor/{}/{}/config", DISCOVERY_PREFIX, self.device_name, name);
+        let json = serde_json::to_string(&payload).unwrap();
+        let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
     }
 
     /// Register notify service for MQTT discovery
@@ -348,7 +370,8 @@ impl MqttClient {
         }
     }
 
-    async fn subscribe_commands(&self) {
+    async fn subscribe_commands(&self, config: &Config) {
+        // Always subscribe to core commands
         let commands = ["Launch", "Screensaver", "Wake", "Shutdown", "sleep", "discord_join", "discord_leave_channel"];
         
         for cmd in commands {
@@ -358,9 +381,11 @@ impl MqttClient {
             }
         }
 
-        // Notification topic
-        let notify_topic = format!("hass.agent/notifications/{}", self.device_name);
-        let _ = self.client.subscribe(&notify_topic, QoS::AtLeastOnce).await;
+        // Notification topic only if enabled
+        if config.features.notifications {
+            let notify_topic = format!("hass.agent/notifications/{}", self.device_name);
+            let _ = self.client.subscribe(&notify_topic, QoS::AtLeastOnce).await;
+        }
 
         info!("Subscribed to command topics");
     }
