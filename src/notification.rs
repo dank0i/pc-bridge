@@ -76,16 +76,62 @@ pub fn show_toast(payload: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Fallback for non-Windows platforms (no-op)
+/// Show notification on Linux using notify-send
 #[cfg(not(windows))]
 pub fn show_toast(payload: &str) -> anyhow::Result<()> {
+    use std::process::Command;
+    
     let notif = NotificationPayload::from_payload(payload);
     let title = if notif.title.is_empty() { "Home Assistant" } else { &notif.title };
     let message = if notif.message.is_empty() { payload } else { &notif.message };
     
-    // On Linux, could use notify-send or libnotify in the future
-    tracing::info!("Notification (not shown on this platform): {} - {}", title, message);
-    Ok(())
+    // Try notify-send (available on most Linux desktops)
+    let result = Command::new("notify-send")
+        .args([
+            "--app-name=PC Bridge",
+            "--icon=dialog-information",
+            title,
+            message,
+        ])
+        .spawn();
+    
+    match result {
+        Ok(_) => {
+            tracing::debug!("Notification sent via notify-send: {} - {}", title, message);
+            Ok(())
+        }
+        Err(e) => {
+            // Fallback: try gdbus for GNOME
+            let gdbus_result = Command::new("gdbus")
+                .args([
+                    "call",
+                    "--session",
+                    "--dest=org.freedesktop.Notifications",
+                    "--object-path=/org/freedesktop/Notifications",
+                    "--method=org.freedesktop.Notifications.Notify",
+                    "PC Bridge",  // app_name
+                    "0",          // replaces_id
+                    "dialog-information", // icon
+                    title,
+                    message,
+                    "[]",         // actions
+                    "{}",         // hints
+                    "-1",         // timeout (-1 = default)
+                ])
+                .spawn();
+            
+            match gdbus_result {
+                Ok(_) => {
+                    tracing::debug!("Notification sent via gdbus: {} - {}", title, message);
+                    Ok(())
+                }
+                Err(_) => {
+                    tracing::warn!("Could not send notification (install notify-send): {} - {}", title, message);
+                    Err(anyhow::anyhow!("notify-send not available: {}", e))
+                }
+            }
+        }
+    }
 }
 
 /// Escape XML special characters and strip control chars

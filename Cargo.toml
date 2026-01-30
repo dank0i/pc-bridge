@@ -44,16 +44,12 @@ hostname = "0.3"
 # Process/command execution
 which = "6"
 
-# System tray (Windows)
-[target.'cfg(windows)'.dependencies.tray-icon]
-version = "0.19"
+# System tray (cross-platform)
+tray-icon = "0.19"
+muda = "0.15"
+png = "0.17"
 
-[target.'cfg(windows)'.dependencies.muda]
-version = "0.15"
-
-[target.'cfg(windows)'.dependencies.png]
-version = "0.17"
-
+# Windows registry
 [target.'cfg(windows)'.dependencies.winreg]
 version = "0.55"
 

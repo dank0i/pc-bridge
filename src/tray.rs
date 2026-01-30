@@ -1,27 +1,17 @@
-//! System tray icon with menu
+//! Cross-platform system tray icon with menu
 
-#[cfg(windows)]
-use std::sync::Arc;
-#[cfg(windows)]
+use std::path::PathBuf;
 use tokio::sync::broadcast;
-#[cfg(windows)]
 use tracing::{info, error, debug};
 
-#[cfg(windows)]
 use tray_icon::{TrayIconBuilder, Icon};
-#[cfg(windows)]
 use muda::{Menu, MenuItem, MenuEvent, PredefinedMenuItem};
 
-#[cfg(windows)]
+// Icon embedded in binary (ICO for Windows, will decode PNG from it)
 const ICON_BYTES: &[u8] = include_bytes!("../assets/icon.ico");
 
-/// Run the tray icon on a dedicated thread (blocking, uses Windows message loop)
-#[cfg(windows)]
-pub fn run_tray(shutdown_tx: broadcast::Sender<()>, config_path: std::path::PathBuf) {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetMessageW, TranslateMessage, DispatchMessageW, MSG,
-    };
-
+/// Run the tray icon on a dedicated thread (blocking, uses platform message loop)
+pub fn run_tray(shutdown_tx: broadcast::Sender<()>, config_path: PathBuf) {
     info!("Starting system tray");
 
     // Build menu
@@ -79,7 +69,19 @@ pub fn run_tray(shutdown_tx: broadcast::Sender<()>, config_path: std::path::Path
         }
     });
 
-    // Windows message loop (keeps tray alive)
+    // Platform-specific message loop
+    run_message_loop(&shutdown_tx);
+
+    debug!("Tray message loop ended");
+}
+
+/// Windows message loop
+#[cfg(windows)]
+fn run_message_loop(shutdown_tx: &broadcast::Sender<()>) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetMessageW, TranslateMessage, DispatchMessageW, MSG,
+    };
+
     unsafe {
         let mut msg: MSG = std::mem::zeroed();
         loop {
@@ -96,18 +98,29 @@ pub fn run_tray(shutdown_tx: broadcast::Sender<()>, config_path: std::path::Path
             }
         }
     }
-
-    debug!("Tray message loop ended");
 }
 
-#[cfg(windows)]
+/// Linux/Unix message loop (GTK-based via tray-icon)
+#[cfg(unix)]
+fn run_message_loop(shutdown_tx: &broadcast::Sender<()>) {
+    // On Linux, tray-icon uses GTK which requires a main loop
+    // For now, just sleep and check for shutdown
+    use std::time::Duration;
+    
+    loop {
+        std::thread::sleep(Duration::from_millis(100));
+        if shutdown_tx.receiver_count() == 0 {
+            break;
+        }
+    }
+}
+
 fn load_icon() -> anyhow::Result<Icon> {
     let (icon_rgba, icon_width, icon_height) = decode_ico(ICON_BYTES)?;
     Icon::from_rgba(icon_rgba, icon_width, icon_height)
         .map_err(|e| anyhow::anyhow!("Failed to create icon: {}", e))
 }
 
-#[cfg(windows)]
 fn decode_ico(data: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     // Simple ICO parser - get the largest image
     if data.len() < 6 {
@@ -161,19 +174,13 @@ fn decode_ico(data: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
 
     // Check if it's PNG (modern ICO) or BMP
     if img_data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-        // PNG - decode it
         decode_png(img_data)
     } else {
-        // BMP - parse DIB header
         decode_bmp_dib(img_data)
     }
 }
 
-#[cfg(windows)]
 fn decode_png(data: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
-    // Minimal PNG decoder for RGBA icons
-    use std::io::Read;
-    
     let decoder = png::Decoder::new(std::io::Cursor::new(data));
     let mut reader = decoder.read_info()
         .map_err(|e| anyhow::anyhow!("PNG decode error: {}", e))?;
@@ -201,15 +208,13 @@ fn decode_png(data: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     Ok((rgba, info.width, info.height))
 }
 
-#[cfg(windows)]
 fn decode_bmp_dib(data: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
-    // DIB header in ICO
     if data.len() < 40 {
         anyhow::bail!("DIB header too small");
     }
 
     let width = i32::from_le_bytes([data[4], data[5], data[6], data[7]]) as u32;
-    let height = i32::from_le_bytes([data[8], data[9], data[10], data[11]]).abs() as u32 / 2; // ICO stores double height
+    let height = i32::from_le_bytes([data[8], data[9], data[10], data[11]]).abs() as u32 / 2;
     let bpp = u16::from_le_bytes([data[14], data[15]]);
 
     if bpp != 32 {
@@ -244,8 +249,9 @@ fn decode_bmp_dib(data: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     Ok((rgba, width, height))
 }
 
+/// Open config file with default editor
 #[cfg(windows)]
-fn open_config_file(path: &std::path::PathBuf) {
+fn open_config_file(path: &PathBuf) {
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -269,8 +275,19 @@ fn open_config_file(path: &std::path::PathBuf) {
     }
 }
 
-// Stub for non-Windows
-#[cfg(not(windows))]
-pub fn run_tray(_shutdown_tx: tokio::sync::broadcast::Sender<()>, _config_path: std::path::PathBuf) {
-    tracing::debug!("Tray icon not supported on this platform");
+/// Open config file with default editor (Linux/macOS)
+#[cfg(unix)]
+fn open_config_file(path: &PathBuf) {
+    use std::process::Command;
+    
+    // Try xdg-open (Linux) then open (macOS)
+    let result = Command::new("xdg-open")
+        .arg(path)
+        .spawn();
+    
+    if result.is_err() {
+        let _ = Command::new("open")
+            .arg(path)
+            .spawn();
+    }
 }
