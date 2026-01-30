@@ -7,10 +7,13 @@ A lightweight cross-platform agent that bridges your PC with Home Assistant via 
 - **Game Detection** - Monitors running processes and reports current game
 - **Idle Tracking** - Reports last user input time
 - **Power Events** - Detects sleep/wake and publishes state
+- **System Sensors** - CPU usage, memory usage, battery level, active window (native APIs)
+- **Audio Control** - Volume, mute, media keys via Home Assistant
 - **Display Wake** - Wakes display after WoL, dismisses screensaver
-- **Remote Commands** - Launch games, activate screensaver, shutdown, sleep
+- **Remote Commands** - Lock, hibernate, restart, shutdown, sleep, screensaver
 - **Notifications** - Native Windows toast notifications from Home Assistant
 - **Hot-Reload** - Updates game mappings without restart
+- **First-Run Wizard** - Interactive setup for MQTT and feature selection
 
 ## Supported Platforms
 
@@ -19,43 +22,24 @@ A lightweight cross-platform agent that bridges your PC with Home Assistant via 
 | Windows 10/11 | Full support |
 | Linux (X11) | Full support |
 | Linux (Wayland) | Partial (idle tracking requires qdbus) |
-| macOS | Not supported |
+| macOS | Build supported, limited features |
 
 ## Quick Start
 
 ### Download
 
-Download the latest release from [GitHub Releases](https://github.com/dank0i/pc-bridge/releases).
+Download the latest release from [GitHub Releases](https://github.com/dank0i/pc-bridge/releases):
+- `pc-bridge-windows.exe` - Windows binary
+- `pc-bridge-linux` - Linux binary
 
-### Build from Source
+### First Run
 
-```bash
-# Install Rust (https://rustup.rs)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# Clone and build
-git clone https://github.com/dank0i/pc-bridge.git
-cd pc-bridge
-
-# Windows (native)
-cargo build --release
-# Output: target/release/pc-bridge.exe
-
-# Linux (native)
-cargo build --release
-# Output: target/release/pc-bridge
-
-# Cross-compile Windows from Linux/macOS
-rustup target add x86_64-pc-windows-gnu
-cargo build --release --target x86_64-pc-windows-gnu
-```
-
-### Setup
-
-1. Copy the binary to your desired location
-2. Run once - it creates a default `userConfig.json`
-3. Edit the config with your MQTT settings
-4. Run again
+1. Run the binary - the **setup wizard** will guide you through:
+   - MQTT broker connection
+   - Device name
+   - Feature selection (all opt-in)
+2. Configuration saved to `userConfig.json`
+3. PC Bridge connects and registers with Home Assistant
 
 ## Configuration
 
@@ -68,6 +52,14 @@ Edit `userConfig.json` next to the executable:
     "broker": "tcp://homeassistant.local:1883",
     "user": "mqtt_user",
     "pass": "mqtt_pass"
+  },
+  "features": {
+    "game_detection": true,
+    "idle_tracking": true,
+    "power_events": true,
+    "notifications": true,
+    "system_sensors": true,
+    "audio_control": true
   },
   "intervals": {
     "game_sensor": 5,
@@ -88,11 +80,24 @@ Edit `userConfig.json` next to the executable:
 }
 ```
 
+### Feature Flags
+
+All features are opt-in via the `features` object:
+
+| Feature | Description |
+|---------|-------------|
+| `game_detection` | Monitor running games |
+| `idle_tracking` | Report last user input time |
+| `power_events` | Detect sleep/wake state |
+| `notifications` | Receive toast notifications |
+| `system_sensors` | CPU, memory, battery, active window |
+| `audio_control` | Volume, mute, media key commands |
+
 > **Note:** Missing fields are automatically added when upgrading from older versions.
 
 ### Tray Icon
 
-A system tray icon is shown by default (Windows only). Right-click for:
+A system tray icon is shown by default (Windows and Linux). Right-click for:
 - **Open Config** - Opens `userConfig.json` in your default editor
 - **Exit** - Gracefully shuts down PC Bridge
 
@@ -311,8 +316,22 @@ Send commands via MQTT button topics:
 |--------|-------------|
 | `Screensaver` | Activate screensaver |
 | `Wake` | Wake display, dismiss screensaver |
+| `Lock` | Lock workstation |
 | `Shutdown` | Power off the PC |
 | `sleep` | Put PC to sleep |
+| `Hibernate` | Hibernate the PC |
+| `Restart` | Restart the PC |
+
+### Audio Commands (requires `audio_control: true`)
+
+| Button | Description |
+|--------|-------------|
+| `media_play_pause` | Play/pause media |
+| `media_next` | Next track |
+| `media_previous` | Previous track |
+| `media_stop` | Stop media |
+| `volume_mute` | Toggle mute |
+| `volume_set` | Set volume (payload: 0-100) |
 
 ### Launch Payloads
 
@@ -336,14 +355,28 @@ PC Bridge auto-discovers via MQTT. After connecting, you'll get:
 - `sensor.<device>_runninggames` - Current game (or "none")
 - `sensor.<device>_sleep_state` - "awake" or "sleeping"
 - `sensor.<device>_lastactive` - ISO timestamp of last input
+- `sensor.<device>_cpu_usage` - CPU usage percentage
+- `sensor.<device>_memory_usage` - Memory usage percentage
+- `sensor.<device>_battery_level` - Battery percentage (if available)
+- `sensor.<device>_battery_charging` - "true" or "false"
+- `sensor.<device>_active_window` - Current foreground window title
+- `sensor.<device>_volume_level` - System volume percentage
 - `sensor.<device>_<custom>` - Any custom sensors you define
 
 **Buttons:**
 - `button.<device>_screensaver`
 - `button.<device>_wake`
+- `button.<device>_lock`
 - `button.<device>_shutdown`
 - `button.<device>_sleep`
+- `button.<device>_hibernate`
+- `button.<device>_restart`
 - `button.<device>_launch`
+- `button.<device>_media_play_pause`
+- `button.<device>_media_next`
+- `button.<device>_media_previous`
+- `button.<device>_media_stop`
+- `button.<device>_volume_mute`
 - `button.<device>_<custom>` - Any custom commands you define
 
 **Notifications:**
@@ -357,20 +390,21 @@ For full functionality on Linux, install these optional dependencies:
 
 ```bash
 # Debian/Ubuntu
-sudo apt install xdotool xprintidle xdg-utils
+sudo apt install xdotool xprintidle xdg-utils libxdo-dev libgtk-3-dev libayatana-appindicator3-dev
 
 # Fedora
-sudo dnf install xdotool xprintidle xdg-utils
+sudo dnf install xdotool xprintidle xdg-utils libxdo-devel gtk3-devel libappindicator-gtk3-devel
 
 # Arch
-sudo pacman -S xdotool xprintidle xdg-utils
+sudo pacman -S xdotool xprintidle xdg-utils libxdo gtk3 libappindicator-gtk3
 ```
 
 | Package | Purpose |
 |---------|---------|
-| `xdotool` | Screensaver/display wake |
+| `xdotool` | Screensaver/display wake, media keys |
 | `xprintidle` | Idle time tracking (X11) |
 | `xdg-utils` | Screensaver activation |
+| `pactl` | Audio control (usually pre-installed with PulseAudio/PipeWire) |
 
 ## Run as Service
 
@@ -414,11 +448,20 @@ sudo systemctl start pc-bridge
 
 ## Performance
 
+All system sensors use native APIs for minimal overhead:
+
 | Metric | Value |
 |--------|-------|
 | Binary size | ~3 MB |
 | Memory usage | ~5 MB base |
 | CPU usage | < 1% |
+
+**Native API Performance (Windows):**
+- `GetSystemTimes` (CPU): ~1μs
+- `GlobalMemoryStatusEx` (memory): ~1μs
+- `GetSystemPowerStatus` (battery): ~1μs
+- `GetForegroundWindow` (active window): ~1μs
+- `IAudioEndpointVolume` (volume): ~50μs
 
 **Custom Sensors Impact:**
 - Each PowerShell sensor: ~10-50ms execution per poll
@@ -426,6 +469,27 @@ sudo systemctl start pc-bridge
 - Registry read: ~0.1ms (native API)
 - Memory: +~100 bytes per sensor for state tracking
 - Recommended: Keep intervals ≥30s for PowerShell sensors
+
+## Building from Source
+
+```bash
+# Install Rust (https://rustup.rs)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Clone and build
+git clone https://github.com/dank0i/pc-bridge.git
+cd pc-bridge
+
+# Windows (native)
+cargo build --release
+
+# Linux (native)
+cargo build --release
+
+# Cross-compile Windows from Linux/macOS
+rustup target add x86_64-pc-windows-gnu
+cargo build --release --target x86_64-pc-windows-gnu
+```
 
 ## License
 
