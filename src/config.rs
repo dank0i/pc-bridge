@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use notify::{Watcher, RecursiveMode, Event, EventKind};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn, error};
 
 use crate::AppState;
@@ -39,7 +39,7 @@ const DEFAULT_CONFIG: &str = r#"{
 }"#;
 
 /// User configuration structure (matches userConfig.json)
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub device_name: String,
     pub mqtt: MqttConfig,
@@ -70,7 +70,7 @@ pub struct Config {
 fn default_true() -> bool { true }
 
 /// Feature toggles - all disabled by default (opt-in philosophy)
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FeatureConfig {
     #[serde(default)]
     pub game_detection: bool,
@@ -83,7 +83,7 @@ pub struct FeatureConfig {
 }
 
 /// Custom sensor definition
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomSensor {
     pub name: String,
     #[serde(rename = "type")]
@@ -108,7 +108,7 @@ pub struct CustomSensor {
 }
 
 /// Custom sensor types
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum CustomSensorType {
     Powershell,
@@ -120,7 +120,7 @@ pub enum CustomSensorType {
 fn default_sensor_interval() -> u64 { 30 }
 
 /// Custom command definition
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomCommand {
     pub name: String,
     #[serde(rename = "type")]
@@ -141,7 +141,7 @@ pub struct CustomCommand {
 }
 
 /// Custom command types
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum CustomCommandType {
     Powershell,
@@ -149,7 +149,7 @@ pub enum CustomCommandType {
     Shell,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MqttConfig {
     pub broker: String,
     #[serde(default)]
@@ -160,7 +160,7 @@ pub struct MqttConfig {
     pub client_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IntervalConfig {
     #[serde(default = "default_game_sensor")]
     pub game_sensor: u64,
@@ -175,23 +175,20 @@ fn default_last_active() -> u64 { 10 }
 fn default_availability() -> u64 { 30 }
 
 impl Config {
+    /// Check if this is a first run (no config file exists)
+    pub fn is_first_run() -> Result<bool> {
+        let config_path = Self::config_path()?;
+        Ok(!config_path.exists())
+    }
+    
     /// Load configuration from userConfig.json next to the executable
     pub fn load() -> Result<Self> {
         let config_path = Self::config_path()?;
 
         if !config_path.exists() {
-            // Create default config file
-            std::fs::write(&config_path, DEFAULT_CONFIG)
-                .with_context(|| format!("Failed to create {:?}", config_path))?;
-            
-            info!("Created default userConfig.json at {:?}", config_path);
-            
-            // Show alert to user
-            Self::show_config_alert(&config_path);
-            
             bail!(
-                "userConfig.json created at {:?}\n\
-                 Please edit it with your settings and restart.",
+                "Configuration file not found at {:?}\n\
+                 Run the setup wizard first.",
                 config_path
             );
         }

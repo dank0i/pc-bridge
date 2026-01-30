@@ -17,13 +17,14 @@ mod power;
 mod updater;
 mod tray;
 mod notification;
+mod setup;
 
 #[cfg(windows)]
 mod winapi;
 
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{info, Level};
+use tracing::{info, error, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use crate::config::Config;
@@ -56,6 +57,32 @@ async fn main() -> anyhow::Result<()> {
 
     // Kill any existing instances
     kill_existing_instances();
+    
+    // Check for first run - show setup wizard if no config exists
+    if Config::is_first_run()? {
+        info!("First run detected - launching setup wizard");
+        
+        if let Some(setup_config) = setup::run_setup_wizard() {
+            setup::save_setup_config(&setup_config)?;
+            info!("Setup complete! Configuration saved.");
+        } else {
+            error!("Setup cancelled by user");
+            #[cfg(windows)]
+            {
+                use windows::core::w;
+                use windows::Win32::UI::WindowsAndMessaging::*;
+                unsafe {
+                    MessageBoxW(
+                        None,
+                        w!("Setup was cancelled.\n\nPC Bridge will now exit."),
+                        w!("PC Bridge"),
+                        MB_OK | MB_ICONWARNING
+                    );
+                }
+            }
+            return Ok(());
+        }
+    }
 
     // Check for updates (non-blocking, continues after check)
     tokio::spawn(updater::check_for_updates());
