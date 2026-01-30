@@ -1,7 +1,7 @@
 //! Custom command execution - user-defined commands from config
 
 use std::sync::Arc;
-use tracing::{info, warn, error, debug};
+use tracing::{info, error, debug};
 
 use crate::AppState;
 use crate::config::{CustomCommand, CustomCommandType};

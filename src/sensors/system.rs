@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
-use tracing::{debug, error};
+use tracing::debug;
 
 use crate::AppState;
 

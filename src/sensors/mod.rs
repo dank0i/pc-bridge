@@ -14,7 +14,6 @@ mod games_linux;
 #[cfg(unix)]
 mod idle_linux;
 
-pub use memory::MemorySensor;
 pub use custom::CustomSensorManager;
 pub use system::SystemSensor;
 

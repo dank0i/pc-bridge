@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::collections::HashMap;
 use tokio::time::interval;
-use tracing::{info, warn, error, debug};
+use tracing::{info, warn, debug};
 
 use crate::AppState;
 use crate::config::{CustomSensor, CustomSensorType};

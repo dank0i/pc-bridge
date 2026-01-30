@@ -93,7 +93,6 @@ fn read_input(prompt: &str) -> String {
 pub fn run_setup_wizard() -> Option<SetupConfig> {
     use windows::core::w;
     use windows::Win32::System::Console::*;
-    use windows::Win32::UI::WindowsAndMessaging::*;
 
     // Allocate console for input (we're a GUI app)
     unsafe {

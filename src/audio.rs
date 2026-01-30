@@ -5,12 +5,11 @@
 
 #[cfg(windows)]
 use windows::{
-    core::*,
     Win32::Media::Audio::*,
     Win32::Media::Audio::Endpoints::*,
     Win32::System::Com::*,
 };
-use tracing::{debug, error};
+#[cfg(windows)]
 use std::sync::OnceLock;
 
 #[cfg(windows)]
