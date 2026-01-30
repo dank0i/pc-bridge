@@ -117,8 +117,14 @@ impl CommandExecutor {
                 return Ok(());
             }
             "volume_mute" => {
-                let mute = payload.eq_ignore_ascii_case("true") || payload == "1";
-                audio::set_mute(mute);
+                // Button sends "PRESS" - toggle mute
+                // Service call can send "true"/"false" to set specific state
+                if payload.eq_ignore_ascii_case("press") || payload.is_empty() {
+                    audio::toggle_mute();
+                } else {
+                    let mute = payload.eq_ignore_ascii_case("true") || payload == "1";
+                    audio::set_mute(mute);
+                }
                 return Ok(());
             }
             "volume_toggle_mute" => {

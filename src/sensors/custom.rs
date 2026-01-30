@@ -50,7 +50,17 @@ impl CustomSensorManager {
 
         // Track last poll time per sensor
         let mut last_poll: HashMap<String, tokio::time::Instant> = HashMap::new();
-        let mut tick = interval(Duration::from_secs(1)); // Check every second
+        
+        // Use minimum sensor interval for tick (avoids waking every 1s)
+        let min_interval = {
+            let config = self.state.config.read().await;
+            config.custom_sensors.iter()
+                .map(|s| s.interval_seconds)
+                .min()
+                .unwrap_or(30)
+                .max(1) // At least 1 second
+        };
+        let mut tick = interval(Duration::from_secs(min_interval));
 
         loop {
             tokio::select! {

@@ -61,43 +61,64 @@ impl AppInfoReader {
     /// This is the hot path. We read sequentially (cache-friendly) and only
     /// store app_id -> offset mapping. No parsing of actual content yet.
     fn build_index(file: &mut File, version: u32) -> io::Result<HashMap<u32, AppInfoEntry>> {
-        let mut index = HashMap::with_capacity(60000); // Pre-allocate for typical Steam catalog
-        let mut buf = [0u8; 4];
+        use tracing::info;
+        
+        let file_size = file.seek(SeekFrom::End(0))?;
+        file.seek(SeekFrom::Start(8))?; // Back to after header
+        info!("Steam: appinfo.vdf size={} bytes, version={}", file_size, version);
+        
+        let mut index = HashMap::with_capacity(60000);
+        let mut buf4 = [0u8; 4];
+        let mut buf8 = [0u8; 8];
+        
+        // v29 entry format:
+        // - app_id: u32
+        // - size: u32 (total size of remaining entry data)
+        // - info_state: u32
+        // - last_updated: u32  
+        // - access_token: u64
+        // - sha1: [u8; 20]
+        // - change_number: u32
+        // - binary_vdf_data: [u8; ...]
         
         loop {
-            let offset = file.stream_position()?;
+            let entry_start = file.stream_position()?;
             
             // Read app ID (4 bytes)
-            if file.read_exact(&mut buf).is_err() {
+            if file.read_exact(&mut buf4).is_err() {
                 break;
             }
-            let app_id = u32::from_le_bytes(buf);
+            let app_id = u32::from_le_bytes(buf4);
             
             // app_id 0 marks end of entries
             if app_id == 0 {
                 break;
             }
             
-            // Read entry size (4 bytes)
-            file.read_exact(&mut buf)?;
-            let size = u32::from_le_bytes(buf);
+            // Read size (4 bytes) - this is the size of everything after this field
+            file.read_exact(&mut buf4)?;
+            let size = u32::from_le_bytes(buf4);
             
-            // Skip the rest of the header based on version
-            let header_skip = if version >= 29 { 40 } else { 36 }; // info_state, last_updated, tokens, sha1, change_number
-            file.seek(SeekFrom::Current(header_skip))?;
+            // Validate size
+            if size as u64 > file_size {
+                info!("  Invalid size {} at offset {}, stopping", size, entry_start);
+                break;
+            }
             
-            // Read data size (4 bytes)
-            file.read_exact(&mut buf)?;
-            let data_size = u32::from_le_bytes(buf);
-            
-            // Store index entry
+            // Store index entry - offset is start of entry, size is data section size
+            let data_offset = entry_start + 8; // After app_id and size fields
             index.insert(app_id, AppInfoEntry {
-                offset,
-                size: data_size,
+                offset: data_offset,
+                size,
             });
             
-            // Skip data section
-            file.seek(SeekFrom::Current(data_size as i64))?;
+            // Log first few entries for debugging
+            if index.len() <= 5 {
+                info!("  app_id={} offset={} size={}", app_id, entry_start, size);
+            }
+            
+            // Skip to next entry (size bytes after the size field)
+            file.seek(SeekFrom::Start(entry_start + 8 + size as u64))?;
         }
         
         index.shrink_to_fit(); // Release excess capacity

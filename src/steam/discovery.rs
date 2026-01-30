@@ -100,7 +100,10 @@ impl SteamGameDiscovery {
     fn discover_full(steam_path: &Path, appinfo_path: &Path) -> Option<Self> {
         // Parse library folders - get paths AND app_ids in one pass
         let library_info = Self::get_library_info(steam_path)?;
-        debug!("Found {} libraries", library_info.len());
+        info!("Steam: found {} library folders", library_info.len());
+        for (path, apps) in &library_info {
+            info!("  Library: {} ({} apps)", path, apps.len());
+        }
         
         // Collect all installed app_ids with their library path
         let mut installed_apps: Vec<(u32, PathBuf)> = Vec::new();
@@ -109,16 +112,17 @@ impl SteamGameDiscovery {
                 installed_apps.push((app_id, PathBuf::from(lib_path)));
             }
         }
-        debug!("Found {} installed apps", installed_apps.len());
+        info!("Steam: {} total installed app_ids", installed_apps.len());
         
         if installed_apps.is_empty() {
+            info!("Steam: no installed apps found, skipping discovery");
             return None;
         }
         
         // Open appinfo.vdf for name + executable lookup
         let mut appinfo = match AppInfoReader::open(appinfo_path) {
             Ok(reader) => {
-                debug!("Indexed {} apps from appinfo.vdf", reader.app_count());
+                info!("Steam: appinfo.vdf indexed {} apps", reader.app_count());
                 reader
             }
             Err(e) => {
@@ -127,42 +131,57 @@ impl SteamGameDiscovery {
             }
         };
         
+        // Log installed app_ids for debugging
+        info!("Steam: looking up {} app_ids", installed_apps.len());
+        
         // Build process name → game mapping
         let mut games = HashMap::with_capacity(installed_apps.len());
+        let mut from_appinfo = 0;
+        let mut from_manifest = 0;
+        
+        // Skip non-game app_ids (tools, redistributables, etc.)
+        let skip_app_ids: &[u32] = &[
+            228980,  // Steamworks Common Redistributables
+        ];
         
         for (app_id, library_path) in installed_apps {
-            // Get name and executable from appinfo.vdf (single lookup)
-            let Some((name, executable)) = appinfo.get_game_info(app_id) else {
+            if skip_app_ids.contains(&app_id) {
                 continue;
-            };
+            }
             
-            // Extract just the exe filename
-            let exe_name = Path::new(&executable)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(&executable);
+            // Try appinfo.vdf first (fast)
+            if let Some((name, executable)) = appinfo.get_game_info(app_id) {
+                if let Some(key) = Self::add_game(&mut games, app_id, name, executable, &library_path) {
+                    from_appinfo += 1;
+                    continue;
+                }
+            }
             
-            // Key: lowercase exe name without extension
-            let key = exe_name
-                .strip_suffix(".exe")
-                .unwrap_or(exe_name)
-                .to_lowercase();
-            
-            // We don't have installdir from libraryfolders, but we can get it from the name
-            // In practice, this is close enough for most games
-            let install_path = library_path
+            // Fallback: read appmanifest_<appid>.acf directly
+            let manifest_path = library_path
                 .join("steamapps")
-                .join("common");
+                .join(format!("appmanifest_{}.acf", app_id));
             
-            games.insert(key, SteamGame {
-                app_id,
-                name,
-                executable: exe_name.to_string(),
-                install_path,
-            });
+            if let Ok(content) = fs::read_to_string(&manifest_path) {
+                if let Some((_, name, installdir)) = vdf::extract_appmanifest_fields(&content) {
+                    // Try to find executable in game folder
+                    let game_path = library_path
+                        .join("steamapps")
+                        .join("common")
+                        .join(&installdir);
+                    
+                    if let Some(exe) = Self::find_game_executable(&game_path) {
+                        if Self::add_game(&mut games, app_id, name, exe, &library_path).is_some() {
+                            from_manifest += 1;
+                        }
+                    }
+                }
+            }
         }
         
+        info!("Steam: {} from appinfo, {} from manifests", from_appinfo, from_manifest);
         let game_count = games.len();
+        info!("Steam: {} unique games total", game_count);
         
         Some(Self {
             games,
@@ -170,6 +189,224 @@ impl SteamGameDiscovery {
             game_count,
             from_cache: false,
         })
+    }
+    
+    /// Add a game to the map, returns the key if successful
+    fn add_game(
+        games: &mut HashMap<String, SteamGame>,
+        app_id: u32,
+        name: String,
+        executable: String,
+        library_path: &Path,
+    ) -> Option<String> {
+        let exe_name = Path::new(&executable)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&executable);
+        
+        // Key: lowercase exe name without extension
+        let key = exe_name
+            .strip_suffix(".exe")
+            .unwrap_or(exe_name)
+            .to_lowercase();
+        
+        // Skip if empty key
+        if key.is_empty() {
+            return None;
+        }
+        
+        let install_path = library_path
+            .join("steamapps")
+            .join("common");
+        
+        games.insert(key.clone(), SteamGame {
+            app_id,
+            name,
+            executable: exe_name.to_string(),
+            install_path,
+        });
+        
+        Some(key)
+    }
+    
+    /// Find the main executable in a game folder
+    /// 
+    /// Strategy: find exe that matches folder name, or largest exe that looks like a game
+    fn find_game_executable(game_path: &Path) -> Option<String> {
+        if !game_path.is_dir() {
+            return None;
+        }
+        
+        let folder_name = game_path.file_name()?.to_str()?.to_lowercase();
+        let mut candidates: Vec<(String, u64, bool)> = Vec::new(); // (name, size, matches_folder)
+        
+        // Search root and common subdirectories
+        Self::scan_for_executables(game_path, &folder_name, &mut candidates);
+        
+        // Common game exe locations
+        let subdirs = [
+            "bin", "Binaries", "Binaries/Win64", "Binaries/Win64/Shipping",
+            "game/bin/win64", "x64", "game", "Win64", "Win64/Shipping",
+            "Engine/Binaries/Win64",  // Unreal games
+        ];
+        
+        for subdir in subdirs {
+            let sub_path = game_path.join(subdir);
+            if sub_path.is_dir() {
+                Self::scan_for_executables(&sub_path, &folder_name, &mut candidates);
+            }
+        }
+        
+        // Also scan immediate subdirectories (one level deep)
+        if let Ok(entries) = fs::read_dir(game_path) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    Self::scan_for_executables(&path, &folder_name, &mut candidates);
+                }
+            }
+        }
+        
+        // Sort: prefer exact/short matches, avoid trial/demo, then by size
+        candidates.sort_by(|a, b| {
+            let a_lower = a.0.to_lowercase();
+            let b_lower = b.0.to_lowercase();
+            
+            // Penalize trial/demo/test versions
+            let a_trial = a_lower.contains("trial") || a_lower.contains("demo") || a_lower.contains("test") || a_lower.contains("benchmark");
+            let b_trial = b_lower.contains("trial") || b_lower.contains("demo") || b_lower.contains("test") || b_lower.contains("benchmark");
+            if a_trial != b_trial {
+                return if a_trial { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Less };
+            }
+            
+            // Prefer folder name matches
+            match (a.2, b.2) {
+                (true, false) => return std::cmp::Ordering::Less,
+                (false, true) => return std::cmp::Ordering::Greater,
+                _ => {}
+            }
+            
+            // Among matches, prefer shorter names (closer to exact match)
+            if a.2 && b.2 {
+                let len_cmp = a.0.len().cmp(&b.0.len());
+                if len_cmp != std::cmp::Ordering::Equal {
+                    return len_cmp;
+                }
+            }
+            
+            // Finally, prefer larger files
+            b.1.cmp(&a.1)
+        });
+        
+        // Return best candidate if one was found
+        if let Some((name, _, _)) = candidates.first() {
+            return Some(name.clone());
+        }
+        
+        // Fallback: use folder name as exe name (e.g., "3DMark" -> "3DMark.exe")
+        // This works even if the exe is deeply nested or not found
+        let folder_name = game_path.file_name()?.to_str()?;
+        Some(format!("{}.exe", folder_name))
+    }
+    
+    /// Scan a directory for game executables
+    fn scan_for_executables(dir: &Path, folder_name: &str, candidates: &mut Vec<(String, u64, bool)>) {
+        let Ok(entries) = fs::read_dir(dir) else { return };
+        
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            
+            let Some(ext) = path.extension() else { continue };
+            if !ext.eq_ignore_ascii_case("exe") {
+                continue;
+            }
+            
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            let lower = name.to_lowercase();
+            let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
+            
+            // Skip common non-game executables
+            if lower.contains("unins")
+                || lower.contains("crash")
+                || lower.contains("report")
+                || lower.contains("redis")
+                || lower.contains("launcher")
+                || lower.contains("setup")
+                || lower.contains("install")
+                || lower.contains("update")
+                || lower.contains("helper")
+                || lower.contains("anticheat")
+                || lower.contains("easyanticheat")
+                || lower.contains("battleye")
+                || lower.contains("capture")
+                || lower.contains("message")
+                || lower.contains("systeminfo")
+                || lower.contains("console")
+                || lower.contains("vconsole")
+                || lower.contains("diagnos")
+                || lower.contains("upload")
+                || lower.contains("profile")
+                || lower.contains("protected")
+                || lower.contains("server")
+                || lower.contains("dedicated")
+                || lower.starts_with("vc_")
+                || lower.starts_with("vcredist")
+                || lower.starts_with("dotnet")
+                || lower.starts_with("directx")
+                || lower.starts_with("dxsetup")
+                || lower.starts_with("physx")
+                || lower.starts_with("uplay")
+                || lower.starts_with("ubi")
+                || lower.starts_with("client_")
+                || lower.starts_with("start_")
+            {
+                continue;
+            }
+            
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            
+            // Check if exe name matches folder name (fuzzy)
+            // bf6 matches "Battlefield 6", cs2 matches "Counter-Strike 2", etc.
+            let folder_clean = folder_name.replace(['-', '_', ' ', '.'], "").to_lowercase();
+            let exe_clean = stem.replace(['-', '_', ' ', '.'], "").to_lowercase();
+            
+            // Match if: folder contains exe OR exe contains folder OR they share significant overlap
+            // Also match common abbreviation patterns (bf6 = battlefield6, cs2 = counterstrike2)
+            let matches = folder_clean.contains(&exe_clean) 
+                || exe_clean.contains(&folder_clean)
+                || folder_clean.starts_with(&exe_clean)
+                || exe_clean.starts_with(&folder_clean)
+                || Self::abbreviation_matches(&exe_clean, &folder_clean);
+            
+            candidates.push((name.to_string(), size, matches));
+        }
+    }
+    
+    /// Check if exe name is an abbreviation of the folder name
+    /// e.g., "bf6" matches "battlefield6", "cs2" matches "counterstrike2"
+    fn abbreviation_matches(exe: &str, folder: &str) -> bool {
+        // Skip if exe is too long to be an abbreviation
+        if exe.len() > 8 || exe.len() >= folder.len() {
+            return false;
+        }
+        
+        // Check if exe letters appear in order in folder
+        // bf6 -> b...f...6 in "battlefield6"
+        let mut folder_chars = folder.chars().peekable();
+        for exe_char in exe.chars() {
+            // Find this char in remaining folder
+            loop {
+                match folder_chars.next() {
+                    Some(fc) if fc == exe_char => break, // Found match
+                    Some(_) => continue, // Keep looking
+                    None => return false, // Not found
+                }
+            }
+        }
+        true
     }
     
     // =========================================================================

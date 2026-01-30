@@ -1,12 +1,13 @@
 //! MQTT client for Home Assistant communication
 
 use std::time::Duration;
+use std::path::PathBuf;
 use rumqttc::{AsyncClient, MqttOptions, QoS, Event, Packet};
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use tokio::sync::mpsc;
 use tracing::{info, warn, error, debug};
 
-use crate::config::{Config, CustomSensor, CustomCommand};
+use crate::config::{Config, CustomSensor, CustomCommand, FeatureConfig};
 
 const DISCOVERY_PREFIX: &str = "homeassistant";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -95,6 +96,10 @@ impl MqttClient {
         let device_id = config.device_id();
         let (command_tx, command_rx) = mpsc::channel(50);
 
+        // Clone client for event loop to publish availability on reconnect
+        let client_for_eventloop = client.clone();
+        let availability_topic_for_eventloop = availability_topic.clone();
+
         // Spawn event loop handler
         let device_name_clone = device_name.clone();
         tokio::spawn(async move {
@@ -114,7 +119,14 @@ impl MqttClient {
                         }
                     }
                     Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                        info!("MQTT connected");
+                        info!("MQTT connected - publishing availability");
+                        // Republish availability on every connect/reconnect
+                        let _ = client_for_eventloop.publish(
+                            &availability_topic_for_eventloop, 
+                            QoS::AtLeastOnce, 
+                            true, 
+                            "online"
+                        ).await;
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -166,8 +178,8 @@ impl MqttClient {
             return Some(rest.to_string());
         }
 
-        // Check notification topic: hass.agent/notifications/{device_name}
-        let notify_prefix = format!("hass.agent/notifications/{}", device_name);
+        // Check notification topic: pc-bridge/notifications/{device_name}
+        let notify_prefix = format!("pc-bridge/notifications/{}", device_name);
         if topic == notify_prefix {
             return Some("notification".to_string());
         }
@@ -289,9 +301,99 @@ impl MqttClient {
             self.register_notify_service(&device).await;
         }
 
+        // Unregister entities for features that changed from enabled → disabled
+        self.unregister_changed_features(config).await;
+
         info!("Registered HA discovery");
     }
     
+    /// Unregister discovery only for features that changed from enabled to disabled
+    async fn unregister_changed_features(&self, config: &Config) {
+        let state_path = Self::feature_state_path();
+        let previous = Self::load_feature_state(&state_path);
+        
+        // Only unregister if feature was previously enabled and is now disabled
+        if previous.game_detection && !config.features.game_detection {
+            info!("Feature disabled: game_detection - removing entity");
+            self.unregister_entity("sensor", "runninggames").await;
+        }
+        
+        if previous.idle_tracking && !config.features.idle_tracking {
+            info!("Feature disabled: idle_tracking - removing entity");
+            self.unregister_entity("sensor", "lastactive").await;
+        }
+        
+        if previous.power_events && !config.features.power_events {
+            info!("Feature disabled: power_events - removing entity");
+            self.unregister_entity("sensor", "sleep_state").await;
+        }
+        
+        if previous.system_sensors && !config.features.system_sensors {
+            info!("Feature disabled: system_sensors - removing entities");
+            for name in ["cpu_usage", "memory_usage", "battery_level", "battery_charging", "active_window"] {
+                self.unregister_entity("sensor", name).await;
+            }
+        }
+        
+        if previous.audio_control && !config.features.audio_control {
+            info!("Feature disabled: audio_control - removing entities");
+            for name in ["media_play_pause", "media_next", "media_previous", "media_stop", "volume_mute"] {
+                self.unregister_entity("button", name).await;
+            }
+            self.unregister_entity("number", "volume_set").await;
+        }
+        
+        if previous.notifications && !config.features.notifications {
+            info!("Feature disabled: notifications - removing entity");
+            self.unregister_entity("notify", &self.device_name).await;
+        }
+        
+        // Save current feature state for next comparison
+        Self::save_feature_state(&state_path, &config.features);
+    }
+    
+    /// Get path to feature state file (in app data dir, next to steam_cache.bin)
+    fn feature_state_path() -> PathBuf {
+        #[cfg(windows)]
+        {
+            std::env::var("LOCALAPPDATA")
+                .map(|p| PathBuf::from(p).join("pc-bridge").join("feature_state.json"))
+                .unwrap_or_else(|_| PathBuf::from("feature_state.json"))
+        }
+        #[cfg(unix)]
+        {
+            std::env::var("HOME")
+                .map(|p| PathBuf::from(p).join(".cache").join("pc-bridge").join("feature_state.json"))
+                .unwrap_or_else(|_| PathBuf::from("feature_state.json"))
+        }
+    }
+    
+    /// Load previous feature state (defaults to all false if not found)
+    fn load_feature_state(path: &PathBuf) -> FeatureConfig {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+    
+    /// Save current feature state
+    fn save_feature_state(path: &PathBuf, features: &FeatureConfig) {
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string(features) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+    
+    /// Unregister a single entity by publishing empty payload to its config topic
+    async fn unregister_entity(&self, entity_type: &str, name: &str) {
+        let topic = format!("{}/{}/{}/{}/config", DISCOVERY_PREFIX, entity_type, self.device_name, name);
+        // Empty payload removes the entity from HA
+        let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, "").await;
+    }
+
     /// Helper to register a single sensor
     async fn register_sensor(&self, device: &HADevice, name: &str, display_name: &str, icon: &str, device_class: Option<&str>, unit: Option<&str>) {
         let payload = HADiscoveryPayload {
@@ -314,9 +416,7 @@ impl MqttClient {
     /// Register notify service for MQTT discovery
     async fn register_notify_service(&self, device: &HADevice) {
         // The notify platform expects command_topic to receive messages
-        // Topic: hass.agent/notifications/{device_name} (for HASS.Agent compatibility)
-        // Also register via standard MQTT discovery
-        let notify_topic = format!("hass.agent/notifications/{}", self.device_name);
+        let notify_topic = format!("pc-bridge/notifications/{}", self.device_name);
         
         let payload = serde_json::json!({
             "name": "Notification",
@@ -451,7 +551,7 @@ impl MqttClient {
 
         // Notification topic only if enabled
         if config.features.notifications {
-            let notify_topic = format!("hass.agent/notifications/{}", self.device_name);
+            let notify_topic = format!("pc-bridge/notifications/{}", self.device_name);
             let _ = self.client.subscribe(&notify_topic, QoS::AtLeastOnce).await;
         }
 

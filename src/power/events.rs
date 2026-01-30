@@ -90,17 +90,14 @@ impl PowerEventListener {
     }
 
     async fn publish_wake_with_retry(&self) {
-        let delays = [
-            std::time::Duration::from_secs(2),
-            std::time::Duration::from_secs(5),
-            std::time::Duration::from_secs(10),
-        ];
-
-        for delay in delays {
-            tokio::time::sleep(delay).await;
+        // Publish immediately
+        self.state.mqtt.publish_sensor_retained("sleep_state", "awake").await;
+        info!("Published awake state");
+        
+        // Also publish after delays in case network was slow to reconnect
+        for delay_secs in [2, 5, 10] {
+            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
             self.state.mqtt.publish_sensor_retained("sleep_state", "awake").await;
-            info!("Published awake state");
-            return;
         }
     }
 

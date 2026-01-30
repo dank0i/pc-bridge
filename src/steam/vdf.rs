@@ -152,10 +152,11 @@ pub fn extract_library_info(content: &str) -> Vec<(String, Vec<u32>)> {
             }
         }
         
-        // Inside apps block - extract app_ids
+        // Inside apps block - extract app_ids (the KEY, not the value)
         if in_apps_block && brace_depth == 3 {
-            // Lines look like: "730"  "23456789"
-            if let Some(app_id_str) = extract_quoted_value(line) {
+            // Lines look like: "730"  "62017550958" (app_id, size_on_disk)
+            // We want the first quoted string (the key/app_id)
+            if let Some(app_id_str) = extract_first_quoted(line) {
                 if let Ok(app_id) = app_id_str.parse::<u32>() {
                     current_apps.push(app_id);
                 }
@@ -167,6 +168,15 @@ pub fn extract_library_info(content: &str) -> Vec<(String, Vec<u32>)> {
     libraries
 }
 
+/// Extract the first quoted string from a line (the key)
+#[inline]
+fn extract_first_quoted(line: &str) -> Option<&str> {
+    let start = line.find('"')? + 1;
+    let end = start + line[start..].find('"')?;
+    Some(&line[start..end])
+}
+
+/// Extract the second quoted string from a line (the value)
 #[inline]
 fn extract_quoted_value(line: &str) -> Option<&str> {
     let mut parts = line.split('"');

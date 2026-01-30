@@ -255,7 +255,7 @@ Your plain text message here
 You can also publish directly to the MQTT topic:
 
 ```
-Topic: hass.agent/notifications/{device_name}
+Topic: pc-bridge/notifications/{device_name}
 Payload: {"title": "My Title", "message": "My message"}
 ```
 

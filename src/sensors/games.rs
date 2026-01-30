@@ -58,15 +58,14 @@ impl GameSensor {
         };
 
         // Check config games (includes Steam auto-discovered games)
+        // Hold read lock while checking - faster than cloning
         let config = self.state.config.read().await;
-        let games = config.games.clone();
-        drop(config);
 
         for proc_name in &processes {
             let proc_lower = proc_name.to_lowercase();
             let base_name = proc_lower.trim_end_matches(".exe");
 
-            for (pattern, game_config) in &games {
+            for (pattern, game_config) in &config.games {
                 let pattern_lower = pattern.to_lowercase();
                 if proc_lower.starts_with(&pattern_lower) || base_name == pattern_lower {
                     return game_config.game_id().to_string();

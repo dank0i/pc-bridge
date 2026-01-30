@@ -52,10 +52,12 @@ async fn main() -> anyhow::Result<()> {
     // This allows seeing output when run from cmd/powershell
     #[cfg(windows)]
     {
-        use windows::Win32::System::Console::AttachConsole;
+        use windows::Win32::System::Console::{AttachConsole, SetConsoleCtrlHandler};
         unsafe {
-            // ATTACH_PARENT_PROCESS = -1
+            // ATTACH_PARENT_PROCESS = -1 (0xFFFFFFFF)
             let _ = AttachConsole(u32::MAX);
+            // Enable Ctrl+C handling - required when attached to parent console
+            let _ = SetConsoleCtrlHandler(None, false);
         }
     }
     
@@ -239,6 +241,10 @@ async fn main() -> anyhow::Result<()> {
     state.mqtt.publish_availability(false).await;
 
     info!("PC Bridge stopped");
+    
+    // Print newline to ensure terminal prompt is on its own line
+    println!();
+    
     Ok(())
 }
 
