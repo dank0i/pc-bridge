@@ -1,7 +1,8 @@
-//! Sensor modules for game detection and idle tracking
+//! Sensor modules for game detection, idle tracking, and system monitoring
 
 mod memory;
 mod custom;
+mod system;
 
 #[cfg(windows)]
 mod games;
@@ -15,6 +16,7 @@ mod idle_linux;
 
 pub use memory::MemorySensor;
 pub use custom::CustomSensorManager;
+pub use system::SystemSensor;
 
 #[cfg(windows)]
 pub use games::GameSensor;

@@ -1,6 +1,6 @@
 [package]
 name = "pc-bridge"
-version = "1.7.0"
+version = "1.8.0"
 edition = "2021"
 authors = ["dank0i"]
 description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
@@ -63,12 +63,19 @@ windows = { version = "0.58", features = [
     "Win32_System_Power",
     "Win32_System_Console",
     "Win32_System_SystemInformation",
+    "Win32_System_Shutdown",
+    "Win32_System_Com",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
     "Win32_UI_Controls",
     "Win32_Graphics_Gdi",
     "Win32_Security",
+    # Audio (Core Audio API)
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    # TTS (SAPI)
+    "Win32_Media_Speech",
     # WinRT for toast notifications
     "Data_Xml_Dom",
     "UI_Notifications",

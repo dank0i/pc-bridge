@@ -10,6 +10,7 @@ use crate::AppState;
 use crate::mqtt::CommandReceiver;
 use crate::power::wake_display;
 use crate::notification;
+use crate::audio::{self, MediaKey};
 use super::launcher::expand_launcher_shortcut;
 use super::custom::execute_custom_command;
 
@@ -20,7 +21,9 @@ const MAX_CONCURRENT_COMMANDS: usize = 5;
 fn get_predefined_command(name: &str) -> Option<&'static str> {
     match name {
         "Screensaver" => Some(r#"%windir%\System32\scrnsave.scr /s"#),
-        "Wake" => None, // Handled specially
+        // These are handled natively in execute_command
+        "Wake" | "Lock" | "Hibernate" | "Restart" | "volume_set" | "volume_mute" 
+        | "media_play_pause" | "media_next" | "media_previous" | "media_stop" | "tts" => None,
         "Shutdown" => Some("shutdown -s -t 0"),
         "sleep" => Some("Rundll32.exe powrprof.dll,SetSuspendState 0,1,0"),
         _ => None,
@@ -92,6 +95,55 @@ impl CommandExecutor {
             "notification" => {
                 if !payload.is_empty() {
                     notification::show_toast(payload)?;
+                }
+                return Ok(());
+            }
+            "Lock" => {
+                lock_workstation();
+                return Ok(());
+            }
+            "Hibernate" => {
+                hibernate();
+                return Ok(());
+            }
+            "Restart" => {
+                restart();
+                return Ok(());
+            }
+            "volume_set" => {
+                if let Ok(level) = payload.parse::<f32>() {
+                    audio::set_volume(level);
+                }
+                return Ok(());
+            }
+            "volume_mute" => {
+                let mute = payload.eq_ignore_ascii_case("true") || payload == "1";
+                audio::set_mute(mute);
+                return Ok(());
+            }
+            "volume_toggle_mute" => {
+                audio::toggle_mute();
+                return Ok(());
+            }
+            "media_play_pause" => {
+                audio::send_media_key(MediaKey::PlayPause);
+                return Ok(());
+            }
+            "media_next" => {
+                audio::send_media_key(MediaKey::Next);
+                return Ok(());
+            }
+            "media_previous" => {
+                audio::send_media_key(MediaKey::Previous);
+                return Ok(());
+            }
+            "media_stop" => {
+                audio::send_media_key(MediaKey::Stop);
+                return Ok(());
+            }
+            "tts" => {
+                if !payload.is_empty() {
+                    audio::speak(payload);
                 }
                 return Ok(());
             }
@@ -205,5 +257,57 @@ fn send_ctrl_f6() {
         
         // Key up Ctrl
         keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+    }
+}
+
+/// Lock workstation (native, no PowerShell)
+fn lock_workstation() {
+    use windows::Win32::System::Shutdown::LockWorkStation;
+    unsafe {
+        let _ = LockWorkStation();
+    }
+}
+
+/// Hibernate (native, no PowerShell)
+fn hibernate() {
+    use windows::Win32::System::Power::SetSuspendState;
+    unsafe {
+        // SetSuspendState(hibernate=true, force=false, wakeupEventsDisabled=false)
+        let _ = SetSuspendState(true, false, false);
+    }
+}
+
+/// Restart system (native, no PowerShell)
+fn restart() {
+    use windows::Win32::System::Shutdown::*;
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    use windows::Win32::Security::{
+        TOKEN_ADJUST_PRIVILEGES, TOKEN_QUERY, SE_PRIVILEGE_ENABLED,
+        TOKEN_PRIVILEGES, LUID_AND_ATTRIBUTES, AdjustTokenPrivileges,
+        LookupPrivilegeValueW,
+    };
+    use windows::Win32::System::Threading::OpenProcessToken;
+    use windows::Win32::Foundation::{HANDLE, LUID};
+    use windows::core::w;
+
+    unsafe {
+        // Get shutdown privilege
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token).is_ok() {
+            let mut luid = LUID::default();
+            if LookupPrivilegeValueW(None, w!("SeShutdownPrivilege"), &mut luid).is_ok() {
+                let tp = TOKEN_PRIVILEGES {
+                    PrivilegeCount: 1,
+                    Privileges: [LUID_AND_ATTRIBUTES {
+                        Luid: luid,
+                        Attributes: SE_PRIVILEGE_ENABLED,
+                    }],
+                };
+                let _ = AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None);
+            }
+        }
+        
+        // Restart
+        let _ = ExitWindowsEx(EWX_REBOOT, SHUTDOWN_REASON(0));
     }
 }

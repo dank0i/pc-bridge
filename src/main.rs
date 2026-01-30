@@ -18,6 +18,7 @@ mod updater;
 mod tray;
 mod notification;
 mod setup;
+mod audio;
 
 #[cfg(windows)]
 mod winapi;
@@ -29,7 +30,7 @@ use tracing_subscriber::FmtSubscriber;
 
 use crate::config::Config;
 use crate::mqtt::MqttClient;
-use crate::sensors::{GameSensor, IdleSensor, CustomSensorManager};
+use crate::sensors::{GameSensor, IdleSensor, CustomSensorManager, SystemSensor};
 use crate::power::PowerEventListener;
 use crate::commands::CommandExecutor;
 
@@ -134,6 +135,12 @@ async fn main() -> anyhow::Result<()> {
         let listener = PowerEventListener::new(Arc::clone(&state));
         handles.push(tokio::spawn(listener.run()));
         info!("  ✓ Power events enabled");
+    }
+
+    if config.features.system_sensors {
+        let sensor = SystemSensor::new(Arc::clone(&state));
+        handles.push(tokio::spawn(sensor.run()));
+        info!("  ✓ System sensors enabled (CPU, memory, battery, active window)");
     }
 
     // Custom sensors (if enabled and defined)

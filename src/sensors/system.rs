@@ -1,0 +1,294 @@
+//! System sensors - CPU, memory, battery, active window
+//! 
+//! All implementations use native Win32 APIs for maximum performance.
+//! No WMI, no PowerShell, no external processes.
+
+use std::sync::Arc;
+use tokio::time::{interval, Duration};
+use tracing::{debug, error};
+
+use crate::AppState;
+
+/// System sensor that reports CPU, memory, battery, and active window
+pub struct SystemSensor {
+    state: Arc<AppState>,
+}
+
+impl SystemSensor {
+    pub fn new(state: Arc<AppState>) -> Self {
+        Self { state }
+    }
+
+    pub async fn run(self) {
+        let mut tick = interval(Duration::from_secs(10));
+        let mut shutdown_rx = self.state.shutdown_tx.subscribe();
+        
+        // CPU calculation needs previous sample
+        let mut prev_cpu = get_cpu_times();
+
+        // Initial publish
+        self.publish_all(&mut prev_cpu).await;
+
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    debug!("System sensor shutting down");
+                    break;
+                }
+                _ = tick.tick() => {
+                    self.publish_all(&mut prev_cpu).await;
+                }
+            }
+        }
+    }
+
+    async fn publish_all(&self, prev_cpu: &mut CpuTimes) {
+        // CPU usage (percentage)
+        let cpu = calculate_cpu_usage(prev_cpu);
+        self.state.mqtt.publish_sensor("cpu_usage", &format!("{:.1}", cpu)).await;
+
+        // Memory usage (percentage)
+        let mem = get_memory_percent();
+        self.state.mqtt.publish_sensor("memory_usage", &format!("{:.1}", mem)).await;
+
+        // Battery (percentage and charging status)
+        if let Some((percent, charging)) = get_battery_status() {
+            self.state.mqtt.publish_sensor("battery_level", &percent.to_string()).await;
+            self.state.mqtt.publish_sensor("battery_charging", if charging { "true" } else { "false" }).await;
+        }
+
+        // Active window title
+        let title = get_active_window_title();
+        self.state.mqtt.publish_sensor("active_window", &title).await;
+    }
+}
+
+// ============================================================================
+// CPU Usage - Native via GetSystemTimes
+// ============================================================================
+
+#[derive(Default, Clone)]
+struct CpuTimes {
+    idle: u64,
+    kernel: u64,
+    user: u64,
+}
+
+#[cfg(windows)]
+fn get_cpu_times() -> CpuTimes {
+    use windows::Win32::System::Threading::GetSystemTimes;
+    use windows::Win32::Foundation::FILETIME;
+
+    unsafe {
+        let mut idle = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+
+        if GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user)).is_ok() {
+            CpuTimes {
+                idle: filetime_to_u64(&idle),
+                kernel: filetime_to_u64(&kernel),
+                user: filetime_to_u64(&user),
+            }
+        } else {
+            CpuTimes::default()
+        }
+    }
+}
+
+#[cfg(windows)]
+fn filetime_to_u64(ft: &windows::Win32::Foundation::FILETIME) -> u64 {
+    ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64)
+}
+
+#[cfg(unix)]
+fn get_cpu_times() -> CpuTimes {
+    // Read /proc/stat
+    if let Ok(stat) = std::fs::read_to_string("/proc/stat") {
+        if let Some(line) = stat.lines().next() {
+            let parts: Vec<u64> = line
+                .split_whitespace()
+                .skip(1) // Skip "cpu"
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            
+            if parts.len() >= 4 {
+                // user, nice, system, idle
+                let user = parts[0] + parts[1]; // user + nice
+                let kernel = parts[2]; // system
+                let idle = parts[3];
+                return CpuTimes { idle, kernel, user };
+            }
+        }
+    }
+    CpuTimes::default()
+}
+
+fn calculate_cpu_usage(prev: &mut CpuTimes) -> f64 {
+    let curr = get_cpu_times();
+    
+    let idle_delta = curr.idle.saturating_sub(prev.idle);
+    let kernel_delta = curr.kernel.saturating_sub(prev.kernel);
+    let user_delta = curr.user.saturating_sub(prev.user);
+    
+    // Total = kernel + user (kernel includes idle on Windows)
+    #[cfg(windows)]
+    let total = kernel_delta + user_delta;
+    #[cfg(unix)]
+    let total = idle_delta + kernel_delta + user_delta;
+    
+    let usage = if total > 0 {
+        #[cfg(windows)]
+        let busy = total - idle_delta;
+        #[cfg(unix)]
+        let busy = kernel_delta + user_delta;
+        
+        (busy as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
+    
+    *prev = curr;
+    usage.clamp(0.0, 100.0)
+}
+
+// ============================================================================
+// Memory Usage - Native via GlobalMemoryStatusEx
+// ============================================================================
+
+#[cfg(windows)]
+fn get_memory_percent() -> f64 {
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    unsafe {
+        let mut mem = MEMORYSTATUSEX {
+            dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+            ..Default::default()
+        };
+
+        if GlobalMemoryStatusEx(&mut mem).is_ok() {
+            mem.dwMemoryLoad as f64
+        } else {
+            0.0
+        }
+    }
+}
+
+#[cfg(unix)]
+fn get_memory_percent() -> f64 {
+    // Read /proc/meminfo
+    if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
+        let mut total: u64 = 0;
+        let mut available: u64 = 0;
+        
+        for line in meminfo.lines() {
+            if line.starts_with("MemTotal:") {
+                total = parse_meminfo_value(line);
+            } else if line.starts_with("MemAvailable:") {
+                available = parse_meminfo_value(line);
+            }
+        }
+        
+        if total > 0 {
+            return ((total - available) as f64 / total as f64) * 100.0;
+        }
+    }
+    0.0
+}
+
+#[cfg(unix)]
+fn parse_meminfo_value(line: &str) -> u64 {
+    line.split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+// ============================================================================
+// Battery Status - Native via GetSystemPowerStatus
+// ============================================================================
+
+#[cfg(windows)]
+fn get_battery_status() -> Option<(u8, bool)> {
+    use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+
+    unsafe {
+        let mut status = SYSTEM_POWER_STATUS::default();
+        if GetSystemPowerStatus(&mut status).is_ok() {
+            // BatteryFlag 128 = no battery
+            if status.BatteryFlag == 128 {
+                return None;
+            }
+            
+            let percent = if status.BatteryLifePercent == 255 {
+                100 // Unknown = assume full
+            } else {
+                status.BatteryLifePercent
+            };
+            
+            // ACLineStatus: 1 = plugged in
+            let charging = status.ACLineStatus == 1;
+            
+            Some((percent, charging))
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(unix)]
+fn get_battery_status() -> Option<(u8, bool)> {
+    // Try /sys/class/power_supply/BAT0
+    let capacity = std::fs::read_to_string("/sys/class/power_supply/BAT0/capacity")
+        .ok()?
+        .trim()
+        .parse::<u8>()
+        .ok()?;
+    
+    let status = std::fs::read_to_string("/sys/class/power_supply/BAT0/status")
+        .ok()
+        .unwrap_or_default();
+    
+    let charging = status.trim() == "Charging";
+    
+    Some((capacity, charging))
+}
+
+// ============================================================================
+// Active Window Title - Native via GetForegroundWindow
+// ============================================================================
+
+#[cfg(windows)]
+fn get_active_window_title() -> String {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW};
+
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0 == std::ptr::null_mut() {
+            return String::new();
+        }
+
+        let mut buffer = [0u16; 512];
+        let len = GetWindowTextW(hwnd, &mut buffer);
+        
+        if len > 0 {
+            String::from_utf16_lossy(&buffer[..len as usize])
+        } else {
+            String::new()
+        }
+    }
+}
+
+#[cfg(unix)]
+fn get_active_window_title() -> String {
+    // Try xdotool for X11
+    if let Ok(output) = std::process::Command::new("xdotool")
+        .args(["getactivewindow", "getwindowname"])
+        .output()
+    {
+        if output.status.success() {
+            return String::from_utf8_lossy(&output.stdout).trim().to_string();
+        }
+    }
+    String::new()
+}

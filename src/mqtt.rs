@@ -207,6 +207,15 @@ impl MqttClient {
             let json = serde_json::to_string(&payload).unwrap();
             let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
         }
+        
+        // System sensors (CPU, memory, battery, active window)
+        if config.features.system_sensors {
+            self.register_sensor(&device, "cpu_usage", "CPU Usage", "mdi:cpu-64-bit", None, Some("%")).await;
+            self.register_sensor(&device, "memory_usage", "Memory Usage", "mdi:memory", None, Some("%")).await;
+            self.register_sensor(&device, "battery_level", "Battery Level", "mdi:battery", Some("battery"), Some("%")).await;
+            self.register_sensor(&device, "battery_charging", "Battery Charging", "mdi:battery-charging", None, None).await;
+            self.register_sensor(&device, "active_window", "Active Window", "mdi:application", None, None).await;
+        }
 
         // Command buttons (always register - they're the core control interface)
         let commands = vec![
@@ -215,6 +224,9 @@ impl MqttClient {
             ("Wake", "mdi:monitor-eye"),
             ("Shutdown", "mdi:power"),
             ("sleep", "mdi:power-sleep"),
+            ("Lock", "mdi:lock"),
+            ("Hibernate", "mdi:power-sleep"),
+            ("Restart", "mdi:restart"),
             ("discord_join", "mdi:discord"),
             ("discord_leave_channel", "mdi:phone-hangup"),
         ];
@@ -235,6 +247,38 @@ impl MqttClient {
             let topic = format!("{}/button/{}/{}/config", DISCOVERY_PREFIX, self.device_name, name);
             let json = serde_json::to_string(&payload).unwrap();
             let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
+        }
+        
+        // Audio control commands (media keys, TTS) if enabled
+        if config.features.audio_control {
+            let audio_commands = vec![
+                ("media_play_pause", "mdi:play-pause"),
+                ("media_next", "mdi:skip-next"),
+                ("media_previous", "mdi:skip-previous"),
+                ("media_stop", "mdi:stop"),
+                ("volume_mute", "mdi:volume-mute"),
+            ];
+            
+            for (name, icon) in audio_commands {
+                let payload = HADiscoveryPayload {
+                    name: name.to_string(),
+                    unique_id: format!("{}_{}", self.device_id, name),
+                    state_topic: None,
+                    command_topic: Some(self.command_topic(name)),
+                    availability_topic: Some(self.availability_topic()),
+                    device: device.clone(),
+                    icon: Some(icon.to_string()),
+                    device_class: None,
+                    unit_of_measurement: None,
+                };
+
+                let topic = format!("{}/button/{}/{}/config", DISCOVERY_PREFIX, self.device_name, name);
+                let json = serde_json::to_string(&payload).unwrap();
+                let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
+            }
+            
+            // Register volume sensor
+            self.register_sensor(&device, "volume_level", "Volume Level", "mdi:volume-high", None, Some("%")).await;
         }
 
         // Register notify service only if notifications enabled
@@ -372,12 +416,30 @@ impl MqttClient {
 
     async fn subscribe_commands(&self, config: &Config) {
         // Always subscribe to core commands
-        let commands = ["Launch", "Screensaver", "Wake", "Shutdown", "sleep", "discord_join", "discord_leave_channel"];
+        let commands = [
+            "Launch", "Screensaver", "Wake", "Shutdown", "sleep", 
+            "Lock", "Hibernate", "Restart",
+            "discord_join", "discord_leave_channel"
+        ];
         
         for cmd in commands {
             let topic = self.command_topic(cmd);
             if let Err(e) = self.client.subscribe(&topic, QoS::AtLeastOnce).await {
                 error!("Failed to subscribe to {}: {:?}", topic, e);
+            }
+        }
+        
+        // Audio commands if enabled
+        if config.features.audio_control {
+            let audio_commands = [
+                "media_play_pause", "media_next", "media_previous", "media_stop",
+                "volume_set", "volume_mute", "tts"
+            ];
+            for cmd in audio_commands {
+                let topic = self.command_topic(cmd);
+                if let Err(e) = self.client.subscribe(&topic, QoS::AtLeastOnce).await {
+                    error!("Failed to subscribe to {}: {:?}", topic, e);
+                }
             }
         }
 

@@ -80,6 +80,10 @@ pub struct FeatureConfig {
     pub power_events: bool,
     #[serde(default)]
     pub notifications: bool,
+    #[serde(default)]
+    pub system_sensors: bool,
+    #[serde(default)]
+    pub audio_control: bool,
 }
 
 /// Custom sensor definition

@@ -17,6 +17,8 @@ pub struct SetupConfig {
     pub idle_tracking: bool,
     pub power_events: bool,
     pub notifications: bool,
+    pub system_sensors: bool,
+    pub audio_control: bool,
 }
 
 impl Default for SetupConfig {
@@ -30,6 +32,8 @@ impl Default for SetupConfig {
             idle_tracking: true,
             power_events: true,
             notifications: true,
+            system_sensors: true,
+            audio_control: true,
         }
     }
 }
@@ -192,14 +196,22 @@ fn run_wizard_flow() -> Option<SetupConfig> {
         println!("  [4] {} Notifications", if config.notifications { "✓" } else { "○" });
         println!("      Receive toast notifications from HA");
         println!();
+        println!("  [5] {} System Sensors", if config.system_sensors { "✓" } else { "○" });
+        println!("      CPU, memory, battery, active window");
+        println!();
+        println!("  [6] {} Audio Control", if config.audio_control { "✓" } else { "○" });
+        println!("      Volume, mute, media keys, TTS");
+        println!();
 
-        let input = read_input("  Toggle (1-4) or Enter to continue: ");
+        let input = read_input("  Toggle (1-6) or Enter to continue: ");
         
         match input.as_str() {
             "1" => config.game_detection = !config.game_detection,
             "2" => config.idle_tracking = !config.idle_tracking,
             "3" => config.power_events = !config.power_events,
             "4" => config.notifications = !config.notifications,
+            "5" => config.system_sensors = !config.system_sensors,
+            "6" => config.audio_control = !config.audio_control,
             "" => break,
             _ => {} // Ignore invalid input
         }
@@ -217,6 +229,8 @@ fn run_wizard_flow() -> Option<SetupConfig> {
     println!("    {} Idle Tracking", if config.idle_tracking { "✓" } else { "✗" });
     println!("    {} Power Events", if config.power_events { "✓" } else { "✗" });
     println!("    {} Notifications", if config.notifications { "✓" } else { "✗" });
+    println!("    {} System Sensors", if config.system_sensors { "✓" } else { "✗" });
+    println!("    {} Audio Control", if config.audio_control { "✓" } else { "✗" });
     println!();
 
     let input = read_input("  Save configuration? [Y/n]: ");
@@ -248,6 +262,8 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
             idle_tracking: config.idle_tracking,
             power_events: config.power_events,
             notifications: config.notifications,
+            system_sensors: config.system_sensors,
+            audio_control: config.audio_control,
         },
         games: HashMap::new(),
         show_tray_icon: true,
