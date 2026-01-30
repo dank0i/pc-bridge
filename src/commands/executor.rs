@@ -23,7 +23,7 @@ fn get_predefined_command(name: &str) -> Option<&'static str> {
         "Screensaver" => Some(r#"%windir%\System32\scrnsave.scr /s"#),
         // These are handled natively in execute_command
         "Wake" | "Lock" | "Hibernate" | "Restart" | "volume_set" | "volume_mute" 
-        | "media_play_pause" | "media_next" | "media_previous" | "media_stop" | "tts" => None,
+        | "media_play_pause" | "media_next" | "media_previous" | "media_stop" => None,
         "Shutdown" => Some("shutdown -s -t 0"),
         "sleep" => Some("Rundll32.exe powrprof.dll,SetSuspendState 0,1,0"),
         _ => None,
@@ -139,12 +139,6 @@ impl CommandExecutor {
             }
             "media_stop" => {
                 audio::send_media_key(MediaKey::Stop);
-                return Ok(());
-            }
-            "tts" => {
-                if !payload.is_empty() {
-                    audio::speak(payload);
-                }
                 return Ok(());
             }
             _ => {}

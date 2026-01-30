@@ -1,7 +1,6 @@
-//! Audio control - Volume, mute, and TTS
+//! Audio control - Volume, mute, media keys
 //!
 //! Uses Windows Core Audio API (IAudioEndpointVolume) for volume control.
-//! Uses Windows Speech API (SAPI) for text-to-speech.
 //! No PowerShell, no external processes.
 
 #[cfg(windows)]
@@ -12,14 +11,26 @@ use windows::{
     Win32::System::Com::*,
 };
 use tracing::{debug, error};
+use std::sync::OnceLock;
+
+#[cfg(windows)]
+static COM_INITIALIZED: OnceLock<()> = OnceLock::new();
+
+/// Initialize COM once for the thread
+#[cfg(windows)]
+fn ensure_com_init() {
+    COM_INITIALIZED.get_or_init(|| {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+    });
+}
 
 /// Get current system volume (0-100)
 #[cfg(windows)]
 pub fn get_volume() -> Option<f32> {
+    ensure_com_init();
     unsafe {
-        // Initialize COM
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        
         let enumerator: IMMDeviceEnumerator = 
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
         
@@ -28,15 +39,15 @@ pub fn get_volume() -> Option<f32> {
         
         let level = volume.GetMasterVolumeLevelScalar().ok()?;
         Some(level * 100.0)
+        // COM objects dropped here via windows crate's Drop impl
     }
 }
 
 /// Set system volume (0-100)
 #[cfg(windows)]
 pub fn set_volume(level: f32) -> bool {
+    ensure_com_init();
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        
         let enumerator: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
             Ok(e) => e,
             Err(_) => return false,
@@ -60,9 +71,8 @@ pub fn set_volume(level: f32) -> bool {
 /// Get mute status
 #[cfg(windows)]
 pub fn get_mute() -> Option<bool> {
+    ensure_com_init();
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        
         let enumerator: IMMDeviceEnumerator = 
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
         
@@ -77,9 +87,8 @@ pub fn get_mute() -> Option<bool> {
 /// Set mute status
 #[cfg(windows)]
 pub fn set_mute(mute: bool) -> bool {
+    ensure_com_init();
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        
         let enumerator: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
             Ok(e) => e,
             Err(_) => return false,
@@ -158,40 +167,8 @@ pub enum MediaKey {
     VolumeMute,
 }
 
-/// Text-to-speech using Windows SAPI
-#[cfg(windows)]
-pub fn speak(text: &str) -> bool {
-    use windows::Win32::Media::Speech::*;
-    
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        
-        let voice: ISpVoice = match CoCreateInstance(&SpVoice, None, CLSCTX_ALL) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Failed to create SpVoice: {}", e);
-                return false;
-            }
-        };
-        
-        let text_wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-        
-        // SPF_ASYNC = 1, SPF_PURGEBEFORESPEAK = 2
-        match voice.Speak(PCWSTR(text_wide.as_ptr()), 1 | 2, None) {
-            Ok(_) => {
-                debug!("TTS: {}", text);
-                true
-            }
-            Err(e) => {
-                error!("TTS failed: {}", e);
-                false
-            }
-        }
-    }
-}
-
 // ============================================================================
-// Linux stubs
+// Linux implementations
 // ============================================================================
 
 #[cfg(unix)]
@@ -264,26 +241,4 @@ pub fn send_media_key(key: MediaKey) {
     let _ = std::process::Command::new("xdotool")
         .args(["key", key_name])
         .spawn();
-}
-
-#[cfg(unix)]
-pub fn speak(text: &str) -> bool {
-    // Try espeak-ng, then espeak, then festival
-    if std::process::Command::new("espeak-ng")
-        .arg(text)
-        .spawn()
-        .is_ok()
-    {
-        return true;
-    }
-    
-    if std::process::Command::new("espeak")
-        .arg(text)
-        .spawn()
-        .is_ok()
-    {
-        return true;
-    }
-    
-    false
 }

@@ -249,7 +249,7 @@ impl MqttClient {
             let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
         }
         
-        // Audio control commands (media keys, TTS) if enabled
+        // Audio control commands (media keys) if enabled
         if config.features.audio_control {
             let audio_commands = vec![
                 ("media_play_pause", "mdi:play-pause"),
@@ -433,7 +433,7 @@ impl MqttClient {
         if config.features.audio_control {
             let audio_commands = [
                 "media_play_pause", "media_next", "media_previous", "media_stop",
-                "volume_set", "volume_mute", "tts"
+                "volume_set", "volume_mute"
             ];
             for cmd in audio_commands {
                 let topic = self.command_topic(cmd);

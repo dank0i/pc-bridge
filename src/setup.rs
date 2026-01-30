@@ -200,7 +200,7 @@ fn run_wizard_flow() -> Option<SetupConfig> {
         println!("      CPU, memory, battery, active window");
         println!();
         println!("  [6] {} Audio Control", if config.audio_control { "✓" } else { "○" });
-        println!("      Volume, mute, media keys, TTS");
+        println!("      Volume, mute, media keys");
         println!();
 
         let input = read_input("  Toggle (1-6) or Enter to continue: ");

@@ -238,20 +238,34 @@ fn get_battery_status() -> Option<(u8, bool)> {
 
 #[cfg(unix)]
 fn get_battery_status() -> Option<(u8, bool)> {
-    // Try /sys/class/power_supply/BAT0
-    let capacity = std::fs::read_to_string("/sys/class/power_supply/BAT0/capacity")
-        .ok()?
-        .trim()
-        .parse::<u8>()
-        .ok()?;
+    // Try common battery names: BAT0, BAT1, CMB0, etc.
+    let power_supply = std::path::Path::new("/sys/class/power_supply");
     
-    let status = std::fs::read_to_string("/sys/class/power_supply/BAT0/status")
-        .ok()
-        .unwrap_or_default();
-    
-    let charging = status.trim() == "Charging";
-    
-    Some((capacity, charging))
+    if let Ok(entries) = std::fs::read_dir(power_supply) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            
+            // Look for battery devices (BAT*, CMB*, etc.)
+            if name_str.starts_with("BAT") || name_str.starts_with("CMB") {
+                let path = entry.path();
+                
+                let capacity = std::fs::read_to_string(path.join("capacity"))
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u8>().ok());
+                
+                if let Some(cap) = capacity {
+                    let status = std::fs::read_to_string(path.join("status"))
+                        .ok()
+                        .unwrap_or_default();
+                    
+                    let charging = status.trim() == "Charging";
+                    return Some((cap, charging));
+                }
+            }
+        }
+    }
+    None
 }
 
 // ============================================================================
