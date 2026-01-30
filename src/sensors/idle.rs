@@ -20,7 +20,7 @@ impl IdleSensor {
 
     pub async fn run(self) {
         let config = self.state.config.read().await;
-        let interval_secs = config.intervals.last_active;
+        let interval_secs = config.intervals.last_active.max(1); // Prevent panic on 0
         drop(config);
 
         let mut tick = interval(Duration::from_secs(interval_secs));

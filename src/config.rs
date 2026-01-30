@@ -286,6 +286,22 @@ impl Config {
             migrated = true;
         }
         
+        // Fix zero intervals (bug from v1.9.0-beta.1/2)
+        if let Some(intervals) = obj.get_mut("intervals").and_then(|v| v.as_object_mut()) {
+            if intervals.get("game_sensor").and_then(|v| v.as_u64()) == Some(0) {
+                intervals.insert("game_sensor".to_string(), serde_json::json!(5));
+                migrated = true;
+            }
+            if intervals.get("last_active").and_then(|v| v.as_u64()) == Some(0) {
+                intervals.insert("last_active".to_string(), serde_json::json!(10));
+                migrated = true;
+            }
+            if intervals.get("availability").and_then(|v| v.as_u64()) == Some(0) {
+                intervals.insert("availability".to_string(), serde_json::json!(30));
+                migrated = true;
+            }
+        }
+        
         // Add features section if missing (all disabled by default)
         if !obj.contains_key("features") {
             obj.insert("features".to_string(), serde_json::json!({

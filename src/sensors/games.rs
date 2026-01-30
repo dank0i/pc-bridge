@@ -23,7 +23,7 @@ impl GameSensor {
 
     pub async fn run(self) {
         let config = self.state.config.read().await;
-        let interval_secs = config.intervals.game_sensor;
+        let interval_secs = config.intervals.game_sensor.max(1); // Prevent panic on 0
         drop(config);
 
         let mut tick = interval(Duration::from_secs(interval_secs));
