@@ -9,6 +9,7 @@ use tracing::{info, warn, error, debug};
 use crate::config::{Config, CustomSensor, CustomCommand};
 
 const DISCOVERY_PREFIX: &str = "homeassistant";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Command received from Home Assistant
 #[derive(Debug, Clone)]
@@ -55,6 +56,7 @@ struct HADevice {
     name: String,
     model: String,
     manufacturer: String,
+    sw_version: String,
 }
 
 impl MqttClient {
@@ -177,8 +179,9 @@ impl MqttClient {
         let device = HADevice {
             identifiers: vec![self.device_id.clone()],
             name: self.device_name.clone(),
-            model: "PC Bridge".to_string(),
+            model: format!("PC Bridge v{}", VERSION),
             manufacturer: "dank0i".to_string(),
+            sw_version: VERSION.to_string(),
         };
 
         // Conditionally register sensors based on features
@@ -324,7 +327,8 @@ impl MqttClient {
                 "identifiers": device.identifiers,
                 "name": device.name,
                 "model": device.model,
-                "manufacturer": device.manufacturer
+                "manufacturer": device.manufacturer,
+                "sw_version": device.sw_version
             },
             "icon": "mdi:message-badge",
             "qos": 1
@@ -353,8 +357,9 @@ impl MqttClient {
                 device: HADevice {
                     identifiers: vec![self.device_id.clone()],
                     name: self.device_name.clone(),
-                    model: "PC Bridge".to_string(),
+                    model: format!("PC Bridge v{}", VERSION),
                     manufacturer: "dank0i".to_string(),
+                    sw_version: VERSION.to_string(),
                 },
                 icon: Some(icon),
                 device_class: None,
@@ -388,8 +393,9 @@ impl MqttClient {
                 device: HADevice {
                     identifiers: vec![self.device_id.clone()],
                     name: self.device_name.clone(),
-                    model: "PC Bridge".to_string(),
+                    model: format!("PC Bridge v{}", VERSION),
                     manufacturer: "dank0i".to_string(),
+                    sw_version: VERSION.to_string(),
                 },
                 icon: Some(icon),
                 device_class: None,

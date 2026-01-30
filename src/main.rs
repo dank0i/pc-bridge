@@ -48,6 +48,17 @@ type TaskHandle = tokio::task::JoinHandle<()>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // On Windows, attach to parent console if launched from terminal
+    // This allows seeing output when run from cmd/powershell
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Console::AttachConsole;
+        unsafe {
+            // ATTACH_PARENT_PROCESS = -1
+            let _ = AttachConsole(u32::MAX);
+        }
+    }
+    
     // Initialize logging
     let _subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)

@@ -213,7 +213,7 @@ pub struct MqttConfig {
     pub client_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntervalConfig {
     #[serde(default = "default_game_sensor")]
     pub game_sensor: u64,
@@ -221,6 +221,16 @@ pub struct IntervalConfig {
     pub last_active: u64,
     #[serde(default = "default_availability")]
     pub availability: u64,
+}
+
+impl Default for IntervalConfig {
+    fn default() -> Self {
+        Self {
+            game_sensor: default_game_sensor(),
+            last_active: default_last_active(),
+            availability: default_availability(),
+        }
+    }
 }
 
 fn default_game_sensor() -> u64 { 5 }
