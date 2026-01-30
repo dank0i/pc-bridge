@@ -98,7 +98,7 @@ All features are opt-in via the `features` object:
 ### Tray Icon
 
 A system tray icon is shown by default (Windows and Linux). Right-click for:
-- **Open Config** - Opens `userConfig.json` in your default editor
+- **Open configuration** - Opens `userConfig.json` in your default editor
 - **Exit** - Gracefully shuts down PC Bridge
 
 Set `"show_tray_icon": false` to disable.

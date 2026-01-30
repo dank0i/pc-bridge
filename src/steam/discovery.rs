@@ -66,15 +66,19 @@ impl SteamGameDiscovery {
         
         let appinfo_path = steam_path.join("appcache").join("appinfo.vdf");
         
-        // Try loading from cache first
+        // Try loading from cache first (but reject empty caches)
         if let Some(cached) = Self::load_cache(&appinfo_path) {
-            let build_time_ms = start.elapsed().as_millis() as u64;
-            info!("Steam discovery: {} games from cache in {}ms", cached.game_count, build_time_ms);
-            return Some(Self {
-                build_time_ms,
-                from_cache: true,
-                ..cached
-            });
+            if cached.game_count > 0 {
+                let build_time_ms = start.elapsed().as_millis() as u64;
+                info!("Steam discovery: {} games from cache in {}ms", cached.game_count, build_time_ms);
+                return Some(Self {
+                    build_time_ms,
+                    from_cache: true,
+                    ..cached
+                });
+            } else {
+                debug!("Ignoring empty cache, doing fresh discovery");
+            }
         }
         
         // Full discovery
@@ -393,14 +397,27 @@ impl SteamGameDiscovery {
     /// Get library info from libraryfolders.vdf (paths + app_ids)
     fn get_library_info(steam_path: &Path) -> Option<Vec<(String, Vec<u32>)>> {
         let vdf_path = steam_path.join("steamapps").join("libraryfolders.vdf");
-        let content = fs::read_to_string(&vdf_path).ok()?;
+        debug!("Reading libraryfolders.vdf from {:?}", vdf_path);
+        
+        let content = match fs::read_to_string(&vdf_path) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to read libraryfolders.vdf: {}", e);
+                return None;
+            }
+        };
         
         let mut info = vdf::extract_library_info(&content);
+        debug!("VDF parser returned {} libraries:", info.len());
+        for (path, apps) in &info {
+            debug!("  {} - {} apps", path, apps.len());
+        }
         
         // Also include main Steam path if not in list
         let steam_path_str = steam_path.to_string_lossy().to_string();
         if !info.iter().any(|(p, _)| p == &steam_path_str) {
             // If main path not included, add it with empty apps (will scan later)
+            debug!("Adding main Steam path: {}", steam_path_str);
             info.insert(0, (steam_path_str, vec![]));
         }
         

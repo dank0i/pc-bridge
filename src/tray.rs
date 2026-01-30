@@ -16,7 +16,7 @@ pub fn run_tray(shutdown_tx: broadcast::Sender<()>, config_path: PathBuf) {
 
     // Build menu
     let menu = Menu::new();
-    let open_config = MenuItem::new("Open Config", true, None);
+    let open_config = MenuItem::new("Open configuration", true, None);
     let separator = PredefinedMenuItem::separator();
     let exit = MenuItem::new("Exit", true, None);
 
@@ -58,7 +58,7 @@ pub fn run_tray(shutdown_tx: broadcast::Sender<()>, config_path: PathBuf) {
         loop {
             if let Ok(event) = MenuEvent::receiver().recv() {
                 if event.id == open_config_id {
-                    debug!("Tray: Open Config clicked");
+                    debug!("Tray: Open configuration clicked");
                     open_config_file(&config_path);
                 } else if event.id == exit_id {
                     info!("Tray: Exit clicked");

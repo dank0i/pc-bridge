@@ -99,12 +99,16 @@ pub fn extract_library_paths(content: &str) -> Vec<String> {
 /// }
 /// ```
 pub fn extract_library_info(content: &str) -> Vec<(String, Vec<u32>)> {
+    use log::debug;
+    
     let mut libraries = Vec::new();
     let mut current_path: Option<String> = None;
     let mut current_apps: Vec<u32> = Vec::new();
     let mut in_library_block = false;
     let mut in_apps_block = false;
-    let mut brace_depth = 0;
+    let mut brace_depth: i32 = 0;
+    
+    debug!("Parsing libraryfolders.vdf ({} bytes)", content.len());
     
     for line in content.lines() {
         let line = line.trim();
@@ -117,10 +121,12 @@ pub fn extract_library_info(content: &str) -> Vec<(String, Vec<u32>)> {
             
             if in_apps_block && brace_depth == 2 {
                 // End of apps block
+                debug!("  End apps block, got {} app_ids", current_apps.len());
                 in_apps_block = false;
             } else if in_library_block && brace_depth == 1 {
                 // End of library block - save it
                 if let Some(path) = current_path.take() {
+                    debug!("  Library block end: path={}, apps={}", path, current_apps.len());
                     libraries.push((path, std::mem::take(&mut current_apps)));
                 }
                 in_library_block = false;
@@ -132,6 +138,7 @@ pub fn extract_library_info(content: &str) -> Vec<(String, Vec<u32>)> {
         if brace_depth == 1 && line.starts_with('"') && line.ends_with('"') {
             let key = &line[1..line.len()-1];
             if key.chars().all(|c| c.is_ascii_digit()) {
+                debug!("  Found library block: {}", key);
                 in_library_block = true;
             }
         }
@@ -139,6 +146,7 @@ pub fn extract_library_info(content: &str) -> Vec<(String, Vec<u32>)> {
         if in_library_block && brace_depth == 2 {
             if line.starts_with("\"path\"") {
                 current_path = extract_quoted_string(line);
+                debug!("    path: {:?}", current_path);
             } else if line.starts_with("\"apps\"") {
                 in_apps_block = true;
             }
@@ -155,6 +163,7 @@ pub fn extract_library_info(content: &str) -> Vec<(String, Vec<u32>)> {
         }
     }
     
+    debug!("Parsed {} library folders", libraries.len());
     libraries
 }
 
