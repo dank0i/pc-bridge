@@ -99,6 +99,37 @@ impl GameConfig {
         }
     }
     
+    /// Get display name (falls back to smart title-cased game_id if no name set)
+    pub fn display_name(&self) -> String {
+        match self {
+            GameConfig::Simple(id) => Self::smart_title(id),
+            GameConfig::Full { name, game_id, .. } => {
+                name.clone().unwrap_or_else(|| Self::smart_title(game_id))
+            }
+        }
+    }
+    
+    /// Convert game_id to display name with smart casing
+    fn smart_title(game_id: &str) -> String {
+        game_id
+            .replace('_', " ")
+            .split_whitespace()
+            .map(|word| {
+                // Keep numbers as-is, capitalize first letter of words
+                if word.chars().next().map(|c| c.is_numeric()).unwrap_or(false) {
+                    word.to_string()
+                } else {
+                    let mut chars = word.chars();
+                    match chars.next() {
+                        None => String::new(),
+                        Some(first) => first.to_uppercase().chain(chars).collect(),
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+    
     /// Get app_id if available
     pub fn app_id(&self) -> Option<u32> {
         match self {

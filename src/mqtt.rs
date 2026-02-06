@@ -42,6 +42,8 @@ struct HADiscoveryPayload {
     command_topic: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     availability_topic: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    json_attributes_topic: Option<String>,
     device: HADevice,
     #[serde(skip_serializing_if = "Option::is_none")]
     icon: Option<String>,
@@ -198,7 +200,7 @@ impl MqttClient {
 
         // Conditionally register sensors based on features
         if config.features.game_detection {
-            self.register_sensor(&device, "runninggames", "Runninggames", "mdi:gamepad-variant", None, None).await;
+            self.register_sensor_with_attributes(&device, "runninggames", "Running Game", "mdi:gamepad-variant", None, None).await;
         }
         
         if config.features.idle_tracking {
@@ -396,12 +398,23 @@ impl MqttClient {
 
     /// Helper to register a single sensor
     async fn register_sensor(&self, device: &HADevice, name: &str, display_name: &str, icon: &str, device_class: Option<&str>, unit: Option<&str>) {
+        self.register_sensor_internal(device, name, display_name, icon, device_class, unit, false).await;
+    }
+    
+    /// Helper to register a sensor with JSON attributes support
+    async fn register_sensor_with_attributes(&self, device: &HADevice, name: &str, display_name: &str, icon: &str, device_class: Option<&str>, unit: Option<&str>) {
+        self.register_sensor_internal(device, name, display_name, icon, device_class, unit, true).await;
+    }
+
+    /// Internal helper to register a sensor
+    async fn register_sensor_internal(&self, device: &HADevice, name: &str, display_name: &str, icon: &str, device_class: Option<&str>, unit: Option<&str>, with_attributes: bool) {
         let payload = HADiscoveryPayload {
             name: display_name.to_string(),
             unique_id: format!("{}_{}", self.device_id, name),
             state_topic: Some(self.sensor_topic(name)),
             command_topic: None,
             availability_topic: Some(self.availability_topic()),
+            json_attributes_topic: if with_attributes { Some(self.sensor_attributes_topic(name)) } else { None },
             device: device.clone(),
             icon: Some(icon.to_string()),
             device_class: device_class.map(|s| s.to_string()),
@@ -577,6 +590,13 @@ impl MqttClient {
         let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, value).await;
     }
 
+    /// Publish sensor attributes as JSON
+    pub async fn publish_sensor_attributes(&self, name: &str, attributes: &serde_json::Value) {
+        let topic = self.sensor_attributes_topic(name);
+        let json = serde_json::to_string(attributes).unwrap_or_default();
+        let _ = self.client.publish(&topic, QoS::AtLeastOnce, false, json).await;
+    }
+
     // Topic helpers
     fn availability_topic(&self) -> String {
         Self::availability_topic_static(&self.device_name)
@@ -588,6 +608,10 @@ impl MqttClient {
 
     fn sensor_topic(&self, name: &str) -> String {
         format!("{}/sensor/{}/{}/state", DISCOVERY_PREFIX, self.device_name, name)
+    }
+
+    fn sensor_attributes_topic(&self, name: &str) -> String {
+        format!("{}/sensor/{}/{}/attributes", DISCOVERY_PREFIX, self.device_name, name)
     }
 
     fn command_topic(&self, name: &str) -> String {
