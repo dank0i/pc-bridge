@@ -219,6 +219,7 @@ impl MqttClient {
                 icon: Some("mdi:power-sleep".to_string()),
                 device_class: None,
                 unit_of_measurement: None,
+                json_attributes_topic: None,
             };
             let topic = format!("{}/sensor/{}/sleep_state/config", DISCOVERY_PREFIX, self.device_name);
             let json = serde_json::to_string(&payload).unwrap();
@@ -259,6 +260,7 @@ impl MqttClient {
                 icon: Some(icon.to_string()),
                 device_class: None,
                 unit_of_measurement: None,
+                json_attributes_topic: None,
             };
 
             let topic = format!("{}/button/{}/{}/config", DISCOVERY_PREFIX, self.device_name, name);
