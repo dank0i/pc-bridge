@@ -1,4 +1,4 @@
-//! Idle time sensor - tracks last user input
+//! Idle time sensor - tracks last user input and screensaver state
 
 use std::sync::Arc;
 use chrono::{DateTime, Utc, Duration as ChronoDuration};
@@ -6,6 +6,7 @@ use tokio::time::{interval, Duration};
 use tracing::debug;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::System::SystemInformation::GetTickCount64;
+use windows::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETSCREENSAVERRUNNING, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS};
 
 use crate::AppState;
 
@@ -29,6 +30,11 @@ impl IdleSensor {
         // Publish initial state
         let last_active = self.get_last_active_time();
         self.state.mqtt.publish_sensor("lastactive", &last_active.to_rfc3339()).await;
+        
+        // Publish initial screensaver state
+        let screensaver_active = self.is_screensaver_running();
+        self.state.mqtt.publish_sensor("screensaver", if screensaver_active { "on" } else { "off" }).await;
+        let mut prev_screensaver_state = screensaver_active;
 
         loop {
             tokio::select! {
@@ -39,6 +45,14 @@ impl IdleSensor {
                 _ = tick.tick() => {
                     let last_active = self.get_last_active_time();
                     self.state.mqtt.publish_sensor("lastactive", &last_active.to_rfc3339()).await;
+                    
+                    // Check screensaver state - only publish on change
+                    let screensaver_active = self.is_screensaver_running();
+                    if screensaver_active != prev_screensaver_state {
+                        self.state.mqtt.publish_sensor("screensaver", if screensaver_active { "on" } else { "off" }).await;
+                        prev_screensaver_state = screensaver_active;
+                        debug!("Screensaver state changed to: {}", if screensaver_active { "on" } else { "off" });
+                    }
                 }
             }
         }
@@ -61,6 +75,19 @@ impl IdleSensor {
             } else {
                 Utc::now()
             }
+        }
+    }
+    
+    fn is_screensaver_running(&self) -> bool {
+        unsafe {
+            let mut running: i32 = 0;
+            let result = SystemParametersInfoW(
+                SPI_GETSCREENSAVERRUNNING,
+                0,
+                Some(&mut running as *mut i32 as *mut _),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            );
+            result.is_ok() && running != 0
         }
     }
 }
