@@ -287,6 +287,7 @@ impl MqttClient {
                     icon: Some(icon.to_string()),
                     device_class: None,
                     unit_of_measurement: None,
+                    json_attributes_topic: None,
                 };
 
                 let topic = format!("{}/button/{}/{}/config", DISCOVERY_PREFIX, self.device_name, name);
@@ -477,6 +478,7 @@ impl MqttClient {
                 icon: Some(icon),
                 device_class: None,
                 unit_of_measurement: sensor.unit.clone(),
+                json_attributes_topic: None,
             };
 
             let topic = format!("{}/sensor/{}/{}/config", DISCOVERY_PREFIX, self.device_name, topic_name);
@@ -513,6 +515,7 @@ impl MqttClient {
                 icon: Some(icon),
                 device_class: None,
                 unit_of_measurement: None,
+                json_attributes_topic: None,
             };
 
             let topic = format!("{}/button/{}/{}/config", DISCOVERY_PREFIX, self.device_name, cmd.name);
