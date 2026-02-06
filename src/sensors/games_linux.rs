@@ -47,10 +47,10 @@ impl GameSensor {
         }
     }
 
-    async fn publish_game(&self, game_id: &str, display_name: &str) {
-        self.state.mqtt.publish_sensor("runninggames", game_id).await;
+    async fn publish_game(&self, game_ids: &str, display_names: &str) {
+        self.state.mqtt.publish_sensor("runninggames", game_ids).await;
         let attrs = serde_json::json!({
-            "display_name": display_name
+            "display_name": display_names
         });
         self.state.mqtt.publish_sensor_attributes("runninggames", &attrs).await;
     }
@@ -68,21 +68,32 @@ impl GameSensor {
         // Check config games (includes Steam auto-discovered games)
         let config = self.state.config.read().await;
 
+        let mut found_games: Vec<(String, String)> = Vec::new();
+        let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
         for proc_name in &processes {
             let proc_lower = proc_name.to_lowercase();
 
             for (pattern, game_config) in &config.games {
                 let pattern_lower = pattern.to_lowercase();
                 if proc_lower.contains(&pattern_lower) {
-                    return (
-                        game_config.game_id().to_string(),
-                        game_config.display_name(),
-                    );
+                    let game_id = game_config.game_id().to_string();
+                    // Avoid duplicates (same game matched by multiple processes)
+                    if !seen_ids.contains(&game_id) {
+                        seen_ids.insert(game_id.clone());
+                        found_games.push((game_id, game_config.display_name()));
+                    }
                 }
             }
         }
 
-        ("none".to_string(), "None".to_string())
+        if found_games.is_empty() {
+            ("none".to_string(), "None".to_string())
+        } else {
+            let ids: Vec<&str> = found_games.iter().map(|(id, _)| id.as_str()).collect();
+            let names: Vec<&str> = found_games.iter().map(|(_, name)| name.as_str()).collect();
+            (ids.join(","), names.join(","))
+        }
     }
 
     fn get_process_names(&self) -> anyhow::Result<Vec<String>> {
