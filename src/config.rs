@@ -399,13 +399,20 @@ impl Config {
                 continue;
             }
             
-            // Generate game_id from name
-            let game_id = game.name
+            // Generate game_id from name - only allow ASCII alphanumeric and underscore
+            let game_id: String = game.name
                 .to_lowercase()
-                .replace(' ', "_")
-                .replace('-', "_")
-                .replace(':', "")
-                .replace("'", "");
+                .chars()
+                .filter_map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        Some(c)
+                    } else if c == ' ' || c == '-' {
+                        Some('_')
+                    } else {
+                        None // Strip ™, ®, :, ', etc.
+                    }
+                })
+                .collect();
             
             // Add to games map
             self.games.insert(
