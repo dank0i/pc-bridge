@@ -83,6 +83,8 @@ impl MqttClient {
         opts.set_keep_alive(Duration::from_secs(30));
         opts.set_clean_session(false); // Preserve subscriptions
 
+        // Reconnection is handled by rumqttc automatically - just keep polling
+
         // Last Will and Testament (LWT)
         let availability_topic = Self::availability_topic_static(&config.device_name);
         opts.set_last_will(rumqttc::LastWill::new(
@@ -97,6 +99,9 @@ impl MqttClient {
         let device_name = config.device_name.clone();
         let device_id = config.device_id();
         let (command_tx, command_rx) = mpsc::channel(50);
+
+        // Build list of topics to subscribe to (for reconnection)
+        let subscribe_topics = Self::build_subscribe_topics(&config.device_name, config);
 
         // Clone client for event loop to publish availability on reconnect
         let client_for_eventloop = client.clone();
@@ -121,7 +126,7 @@ impl MqttClient {
                         }
                     }
                     Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                        info!("MQTT connected - publishing availability");
+                        info!("MQTT connected - publishing availability and resubscribing");
                         // Republish availability on every connect/reconnect
                         let _ = client_for_eventloop.publish(
                             &availability_topic_for_eventloop, 
@@ -129,6 +134,14 @@ impl MqttClient {
                             true, 
                             "online"
                         ).await;
+                        
+                        // Re-subscribe to all command topics
+                        for topic in &subscribe_topics {
+                            if let Err(e) = client_for_eventloop.subscribe(topic, QoS::AtLeastOnce).await {
+                                warn!("Failed to resubscribe to {}: {:?}", topic, e);
+                            }
+                        }
+                        info!("Resubscribed to {} command topics", subscribe_topics.len());
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -546,8 +559,11 @@ impl MqttClient {
         }
     }
 
-    async fn subscribe_commands(&self, config: &Config) {
-        // Always subscribe to core commands
+    /// Build list of topics to subscribe to (for initial subscription and reconnection)
+    fn build_subscribe_topics(device_name: &str, config: &Config) -> Vec<String> {
+        let mut topics = Vec::new();
+        
+        // Core commands
         let commands = [
             "Launch", "Screensaver", "Wake", "Shutdown", "sleep", 
             "Lock", "Hibernate", "Restart",
@@ -555,10 +571,7 @@ impl MqttClient {
         ];
         
         for cmd in commands {
-            let topic = self.command_topic(cmd);
-            if let Err(e) = self.client.subscribe(&topic, QoS::AtLeastOnce).await {
-                error!("Failed to subscribe to {}: {:?}", topic, e);
-            }
+            topics.push(format!("{}/button/{}/{}/action", DISCOVERY_PREFIX, device_name, cmd));
         }
         
         // Audio commands if enabled
@@ -568,20 +581,33 @@ impl MqttClient {
                 "volume_set", "volume_mute"
             ];
             for cmd in audio_commands {
-                let topic = self.command_topic(cmd);
-                if let Err(e) = self.client.subscribe(&topic, QoS::AtLeastOnce).await {
-                    error!("Failed to subscribe to {}: {:?}", topic, e);
-                }
+                topics.push(format!("{}/button/{}/{}/action", DISCOVERY_PREFIX, device_name, cmd));
             }
         }
 
-        // Notification topic only if enabled
+        // Notification topic if enabled
         if config.features.notifications {
-            let notify_topic = format!("pc-bridge/notifications/{}", self.device_name);
-            let _ = self.client.subscribe(&notify_topic, QoS::AtLeastOnce).await;
+            topics.push(format!("pc-bridge/notifications/{}", device_name));
+        }
+        
+        // Custom commands
+        for cmd in &config.custom_commands {
+            topics.push(format!("{}/button/{}/{}/action", DISCOVERY_PREFIX, device_name, cmd.name));
         }
 
-        info!("Subscribed to command topics");
+        topics
+    }
+
+    async fn subscribe_commands(&self, config: &Config) {
+        let topics = Self::build_subscribe_topics(&self.device_name, config);
+        
+        for topic in &topics {
+            if let Err(e) = self.client.subscribe(topic, QoS::AtLeastOnce).await {
+                error!("Failed to subscribe to {}: {:?}", topic, e);
+            }
+        }
+
+        info!("Subscribed to {} command topics", topics.len());
     }
 
     /// Publish a sensor value (non-retained)
