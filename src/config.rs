@@ -21,6 +21,7 @@ const DEFAULT_CONFIG: &str = r#"{
     "intervals": {
         "game_sensor": 5,
         "last_active": 10,
+        "screensaver": 10,
         "availability": 30
     },
     "features": {
@@ -250,6 +251,8 @@ pub struct IntervalConfig {
     pub game_sensor: u64,
     #[serde(default = "default_last_active")]
     pub last_active: u64,
+    #[serde(default = "default_screensaver")]
+    pub screensaver: u64,
     #[serde(default = "default_availability")]
     pub availability: u64,
 }
@@ -259,6 +262,7 @@ impl Default for IntervalConfig {
         Self {
             game_sensor: default_game_sensor(),
             last_active: default_last_active(),
+            screensaver: default_screensaver(),
             availability: default_availability(),
         }
     }
@@ -266,6 +270,7 @@ impl Default for IntervalConfig {
 
 fn default_game_sensor() -> u64 { 5 }
 fn default_last_active() -> u64 { 10 }
+fn default_screensaver() -> u64 { 10 }
 fn default_availability() -> u64 { 30 }
 
 impl Config {

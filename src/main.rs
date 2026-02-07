@@ -46,18 +46,40 @@ pub struct AppState {
 /// Handle for optional tasks
 type TaskHandle = tokio::task::JoinHandle<()>;
 
+#[cfg(windows)]
+static SHUTDOWN_FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(windows)]
+unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> windows::Win32::Foundation::BOOL {
+    use windows::Win32::Foundation::BOOL;
+    // CTRL_C_EVENT = 0, CTRL_BREAK_EVENT = 1, CTRL_CLOSE_EVENT = 2
+    if ctrl_type <= 2 {
+        // Just exit - graceful shutdown doesn't work well with GUI subsystem + attached console
+        std::process::exit(0);
+    }
+    BOOL(0) // Not handled
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // On Windows, attach to parent console if launched from terminal
     // This allows seeing output when run from cmd/powershell
     #[cfg(windows)]
     {
-        use windows::Win32::System::Console::{AttachConsole, SetConsoleCtrlHandler};
+        use windows::Win32::System::Console::{
+            AttachConsole, SetConsoleCtrlHandler, GetStdHandle, SetConsoleMode,
+            STD_INPUT_HANDLE, ENABLE_PROCESSED_INPUT
+        };
         unsafe {
             // ATTACH_PARENT_PROCESS = -1 (0xFFFFFFFF)
-            let _ = AttachConsole(u32::MAX);
-            // Enable Ctrl+C handling - required when attached to parent console
-            let _ = SetConsoleCtrlHandler(None, false);
+            if AttachConsole(u32::MAX).is_ok() {
+                // Enable Ctrl+C processing on the attached console
+                if let Ok(handle) = GetStdHandle(STD_INPUT_HANDLE) {
+                    let _ = SetConsoleMode(handle, ENABLE_PROCESSED_INPUT);
+                }
+                // Set up Ctrl+C handler
+                let _ = SetConsoleCtrlHandler(Some(console_ctrl_handler), true);
+            }
         }
     }
     
@@ -222,6 +244,19 @@ async fn main() -> anyhow::Result<()> {
 
     // Wait for shutdown signal (Ctrl+C)
     info!("PC Bridge running. Press Ctrl+C to stop.");
+    
+    #[cfg(windows)]
+    {
+        // On Windows, poll custom flag (tokio signal doesn't work with attached console)
+        loop {
+            if SHUTDOWN_FLAG.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+    
+    #[cfg(not(windows))]
     tokio::signal::ctrl_c().await?;
 
     info!("Shutting down...");
