@@ -1,4 +1,5 @@
 //! Custom command execution - user-defined commands from config
+#![allow(dead_code)] // Platform-specific execution
 
 use std::sync::Arc;
 use tracing::{info, error, debug};

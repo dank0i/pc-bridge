@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::process::Command;
 use tokio::time::{interval, Duration};
-use tracing::{info, debug, warn};
+use tracing::{info, debug};
 
 use crate::AppState;
 

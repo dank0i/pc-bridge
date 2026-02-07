@@ -1,4 +1,5 @@
 //! Memory usage sensor - reports process memory consumption
+#![allow(dead_code)] // Used on Windows only
 
 use std::sync::Arc;
 use tokio::time::{interval, Duration};

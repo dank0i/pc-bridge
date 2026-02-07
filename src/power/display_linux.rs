@@ -1,4 +1,5 @@
 //! Display wake functions for Linux
+#![allow(dead_code)] // Used on Linux only
 
 use std::process::Command;
 use tracing::{info, debug};

@@ -3,6 +3,8 @@
 //! Memory-mapped, indexed access to Steam's app metadata cache.
 //! Only parses entries we actually need (installed games).
 
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -69,7 +71,6 @@ impl AppInfoReader {
         
         let mut index = HashMap::with_capacity(60000);
         let mut buf4 = [0u8; 4];
-        let mut buf8 = [0u8; 8];
         
         // v29 entry format:
         // - app_id: u32

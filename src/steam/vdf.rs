@@ -2,6 +2,8 @@
 //! 
 //! Parses libraryfolders.vdf and appmanifest_*.acf files.
 
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 
 /// Parse a text VDF file into nested key-value pairs
@@ -39,7 +41,7 @@ impl<'a> VdfValue<'a> {
     }
 }
 
-fn parse_block<'a>(chars: &mut std::iter::Peekable<std::str::Chars<'a>>, map: &mut HashMap<&'a str, VdfValue<'a>>) {
+fn parse_block<'a>(_chars: &mut std::iter::Peekable<std::str::Chars<'a>>, _map: &mut HashMap<&'a str, VdfValue<'a>>) {
     // This is a simplified parser - in practice we'd use the input slice directly
     // For now, this works for the small VDF files we're parsing
 }

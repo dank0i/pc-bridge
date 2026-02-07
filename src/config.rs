@@ -10,35 +10,6 @@ use tracing::{info, warn, error};
 
 use crate::AppState;
 
-/// Default config template (embedded in binary)
-const DEFAULT_CONFIG: &str = r#"{
-    "device_name": "my-pc",
-    "mqtt": {
-        "broker": "tcp://homeassistant.local:1883",
-        "user": "",
-        "pass": ""
-    },
-    "intervals": {
-        "game_sensor": 5,
-        "last_active": 10,
-        "screensaver": 10,
-        "availability": 30
-    },
-    "features": {
-        "game_detection": false,
-        "idle_tracking": false,
-        "power_events": false,
-        "notifications": false
-    },
-    "games": {},
-    "show_tray_icon": true,
-    "custom_sensors_enabled": false,
-    "custom_commands_enabled": false,
-    "custom_command_privileges_allowed": false,
-    "custom_sensors": [],
-    "custom_commands": []
-}"#;
-
 /// User configuration structure (matches userConfig.json)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -165,6 +136,8 @@ pub struct FeatureConfig {
     pub system_sensors: bool,
     #[serde(default)]
     pub audio_control: bool,
+    #[serde(default)]
+    pub steam_updates: bool,
 }
 
 /// Custom sensor definition
@@ -255,6 +228,10 @@ pub struct IntervalConfig {
     pub screensaver: u64,
     #[serde(default = "default_availability")]
     pub availability: u64,
+    #[serde(default = "default_steam_check")]
+    pub steam_check: u64,
+    #[serde(default = "default_steam_updating")]
+    pub steam_updating: u64,
 }
 
 impl Default for IntervalConfig {
@@ -264,6 +241,8 @@ impl Default for IntervalConfig {
             last_active: default_last_active(),
             screensaver: default_screensaver(),
             availability: default_availability(),
+            steam_check: default_steam_check(),
+            steam_updating: default_steam_updating(),
         }
     }
 }
@@ -272,6 +251,8 @@ fn default_game_sensor() -> u64 { 5 }
 fn default_last_active() -> u64 { 10 }
 fn default_screensaver() -> u64 { 10 }
 fn default_availability() -> u64 { 30 }
+fn default_steam_check() -> u64 { 30 }
+fn default_steam_updating() -> u64 { 5 }
 
 impl Config {
     /// Check if this is a first run (no config file exists)
@@ -558,46 +539,6 @@ impl Config {
     /// Get device ID (device_name with dashes replaced by underscores)
     pub fn device_id(&self) -> String {
         self.device_name.replace('-', "_")
-    }
-
-    /// Show alert to user about config (platform-specific)
-    #[cfg(windows)]
-    fn show_config_alert(path: &PathBuf) {
-        use windows::Win32::UI::WindowsAndMessaging::*;
-        use windows::core::w;
-        
-        let message = format!(
-            "Welcome to PC Bridge!\n\n\
-             A default configuration file has been created at:\n\
-             {}\n\n\
-             Please edit this file with your MQTT broker settings \
-             and device name, then restart the application.",
-            path.display()
-        );
-        
-        let wide_message: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
-        
-        unsafe {
-            MessageBoxW(
-                None,
-                windows::core::PCWSTR::from_raw(wide_message.as_ptr()),
-                w!("PC Bridge - Configuration Required"),
-                MB_OK | MB_ICONINFORMATION,
-            );
-        }
-    }
-
-    #[cfg(unix)]
-    fn show_config_alert(path: &PathBuf) {
-        // On Unix, just print to stderr (no GUI assumed)
-        eprintln!(
-            "Welcome to PC Bridge!\n\n\
-             A default configuration file has been created at:\n\
-             {}\n\n\
-             Please edit this file with your MQTT broker settings \
-             and device name, then restart the application.",
-            path.display()
-        );
     }
 
     /// Get MQTT client ID

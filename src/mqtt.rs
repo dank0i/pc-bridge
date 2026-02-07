@@ -3,7 +3,7 @@
 use std::time::Duration;
 use std::path::PathBuf;
 use rumqttc::{AsyncClient, MqttOptions, QoS, Event, Packet};
-use serde::{Serialize, Deserialize};
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tracing::{info, warn, error, debug};
 
@@ -164,7 +164,7 @@ impl MqttClient {
             .unwrap_or(url);
 
         let parts: Vec<&str> = without_scheme.split(':').collect();
-        let host = parts.get(0).unwrap_or(&"localhost").to_string();
+        let host = parts.first().unwrap_or(&"localhost").to_string();
         let port = parts.get(1)
             .and_then(|p| p.parse().ok())
             .unwrap_or(1883);
@@ -234,6 +234,11 @@ impl MqttClient {
             self.register_sensor(&device, "battery_level", "Battery Level", "mdi:battery", Some("battery"), Some("%")).await;
             self.register_sensor(&device, "battery_charging", "Battery Charging", "mdi:battery-charging", None, None).await;
             self.register_sensor(&device, "active_window", "Active Window", "mdi:application", None, None).await;
+        }
+
+        // Steam update sensor
+        if config.features.steam_updates {
+            self.register_sensor_with_attributes(&device, "steam_updating", "Steam Updating", "mdi:steam", None, None).await;
         }
 
         // Command buttons (always register - they're the core control interface)
@@ -412,6 +417,7 @@ impl MqttClient {
     }
 
     /// Internal helper to register a sensor
+    #[allow(clippy::too_many_arguments)]
     async fn register_sensor_internal(&self, device: &HADevice, name: &str, display_name: &str, icon: &str, device_class: Option<&str>, unit: Option<&str>, with_attributes: bool) {
         let payload = HADiscoveryPayload {
             name: display_name.to_string(),

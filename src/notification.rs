@@ -4,6 +4,7 @@
 //! - ~10ms instead of 200-500ms latency
 //! - No PowerShell process spawn overhead
 //! - Proper app identity support
+#![allow(dead_code)] // Used on Windows only
 
 #[cfg(windows)]
 use windows::{
@@ -11,6 +12,7 @@ use windows::{
     Data::Xml::Dom::XmlDocument,
     UI::Notifications::{ToastNotification, ToastNotificationManager},
 };
+#[cfg(windows)]
 use tracing::debug;
 
 /// Notification payload received from MQTT

@@ -84,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
     }
     
     // Initialize logging
-    let _subscriber = FmtSubscriber::builder()
+    FmtSubscriber::builder()
         .with_max_level(Level::INFO)
         .with_target(false)
         .with_thread_ids(false)
@@ -206,6 +206,14 @@ async fn main() -> anyhow::Result<()> {
         let sensor = SystemSensor::new(Arc::clone(&state));
         handles.push(tokio::spawn(sensor.run()));
         info!("  ✓ System sensors enabled (CPU, memory, battery, active window)");
+    }
+
+    #[cfg(windows)]
+    if config.features.steam_updates {
+        use crate::sensors::SteamSensor;
+        let sensor = SteamSensor::new(Arc::clone(&state));
+        handles.push(tokio::spawn(sensor.run()));
+        info!("  ✓ Steam update detection enabled");
     }
 
     // Custom sensors (if enabled and defined)
@@ -363,7 +371,7 @@ fn kill_existing_instances() {
 fn kill_existing_instances() {
     use std::process::Command;
     
-    let my_pid = std::process::id();
+    let _my_pid = std::process::id();
     let exe_name = std::env::current_exe()
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))

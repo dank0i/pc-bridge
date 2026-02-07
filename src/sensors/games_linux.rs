@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::fs;
 use tokio::time::{interval, Duration};
 use tracing::{debug, error};
-use serde_json;
 
 use crate::AppState;
 

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, UNIX_EPOCH};
 use tracing::{info, debug, warn};
 
 use super::vdf;
@@ -151,7 +151,7 @@ impl SteamGameDiscovery {
             
             // Try appinfo.vdf first (fast)
             if let Some((name, executable)) = appinfo.get_game_info(app_id) {
-                if let Some(key) = Self::add_game(&mut games, app_id, name, executable, &library_path) {
+                if let Some(_key) = Self::add_game(&mut games, app_id, name, executable, &library_path) {
                     from_appinfo += 1;
                     continue;
                 }

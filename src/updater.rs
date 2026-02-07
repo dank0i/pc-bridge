@@ -146,7 +146,7 @@ async fn download_update(url: &str, filename: &str) -> anyhow::Result<PathBuf> {
 
 fn is_newer_version(remote: &str, current: &str) -> bool {
     let parse = |v: &str| -> Vec<u32> {
-        v.split(|c| c == '.' || c == '-')
+        v.split(['.', '-'])
             .filter_map(|s| s.parse().ok())
             .collect()
     };

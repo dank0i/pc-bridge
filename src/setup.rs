@@ -19,6 +19,7 @@ pub struct SetupConfig {
     pub notifications: bool,
     pub system_sensors: bool,
     pub audio_control: bool,
+    pub steam_updates: bool,
 }
 
 impl Default for SetupConfig {
@@ -34,6 +35,7 @@ impl Default for SetupConfig {
             notifications: true,
             system_sensors: true,
             audio_control: true,
+            steam_updates: true,
         }
     }
 }
@@ -201,8 +203,11 @@ fn run_wizard_flow() -> Option<SetupConfig> {
         println!("  [6] {} Audio Control", if config.audio_control { "✓" } else { "○" });
         println!("      Volume, mute, media keys");
         println!();
+        println!("  [7] {} Steam Updates", if config.steam_updates { "✓" } else { "○" });
+        println!("      Detect when Steam games are updating");
+        println!();
 
-        let input = read_input("  Toggle (1-6) or Enter to continue: ");
+        let input = read_input("  Toggle (1-7) or Enter to continue: ");
         
         match input.as_str() {
             "1" => config.game_detection = !config.game_detection,
@@ -211,6 +216,7 @@ fn run_wizard_flow() -> Option<SetupConfig> {
             "4" => config.notifications = !config.notifications,
             "5" => config.system_sensors = !config.system_sensors,
             "6" => config.audio_control = !config.audio_control,
+            "7" => config.steam_updates = !config.steam_updates,
             "" => break,
             _ => {} // Ignore invalid input
         }
@@ -230,6 +236,7 @@ fn run_wizard_flow() -> Option<SetupConfig> {
     println!("    {} Notifications", if config.notifications { "✓" } else { "✗" });
     println!("    {} System Sensors", if config.system_sensors { "✓" } else { "✗" });
     println!("    {} Audio Control", if config.audio_control { "✓" } else { "✗" });
+    println!("    {} Steam Updates", if config.steam_updates { "✓" } else { "✗" });
     println!();
 
     let input = read_input("  Save configuration? [Y/n]: ");
@@ -263,6 +270,7 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
             notifications: config.notifications,
             system_sensors: config.system_sensors,
             audio_control: config.audio_control,
+            steam_updates: config.steam_updates,
         },
         games: HashMap::new(),
         show_tray_icon: true,
@@ -274,7 +282,7 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
     };
 
     let config_path = crate::config::Config::config_path()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
 
     // Create directory if needed
     if let Some(parent) = config_path.parent() {
@@ -282,7 +290,7 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
     }
 
     let json = serde_json::to_string_pretty(&full_config)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
 
     std::fs::write(&config_path, json)?;
 

@@ -2,6 +2,7 @@
 //!
 //! Uses Windows Core Audio API (IAudioEndpointVolume) for volume control.
 //! No PowerShell, no external processes.
+#![allow(dead_code)] // Used on Windows only
 
 #[cfg(windows)]
 use windows::{

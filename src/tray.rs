@@ -214,7 +214,7 @@ fn decode_bmp_dib(data: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     }
 
     let width = i32::from_le_bytes([data[4], data[5], data[6], data[7]]) as u32;
-    let height = i32::from_le_bytes([data[8], data[9], data[10], data[11]]).abs() as u32 / 2;
+    let height = i32::from_le_bytes([data[8], data[9], data[10], data[11]]).unsigned_abs() / 2;
     let bpp = u16::from_le_bytes([data[14], data[15]]);
 
     if bpp != 32 {

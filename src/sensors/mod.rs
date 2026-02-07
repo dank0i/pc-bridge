@@ -8,6 +8,8 @@ mod system;
 mod games;
 #[cfg(windows)]
 mod idle;
+#[cfg(windows)]
+mod steam;
 
 #[cfg(unix)]
 mod games_linux;
@@ -21,6 +23,8 @@ pub use system::SystemSensor;
 pub use games::GameSensor;
 #[cfg(windows)]
 pub use idle::IdleSensor;
+#[cfg(windows)]
+pub use steam::SteamSensor;
 
 #[cfg(unix)]
 pub use games_linux::GameSensor;
