@@ -1,12 +1,13 @@
 //! Idle time sensor - tracks last user input and screensaver state
 
 use std::sync::Arc;
-use std::os::windows::process::CommandExt;
 use chrono::{DateTime, Utc, Duration as ChronoDuration};
 use tokio::time::{interval, Duration};
 use tracing::debug;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::System::SystemInformation::GetTickCount64;
+use windows::Win32::System::Diagnostics::ToolHelp::*;
+use windows::Win32::Foundation::CloseHandle;
 
 use crate::AppState;
 
@@ -85,23 +86,38 @@ impl IdleSensor {
     }
     
     fn is_screensaver_running(&self) -> bool {
-        // Check if any .scr process is running (same method we use to close them)
-        let output = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "(Get-Process | Where-Object { $_.Path -like '*.scr' }).Count"
-            ])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
-            .output();
-        
-        match output {
-            Ok(out) => {
-                let count_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                let count: i32 = count_str.parse().unwrap_or(0);
-                count > 0
+        // Use native ToolHelp API to check for .scr processes (~2-5ms vs 200-500ms for PowerShell)
+        unsafe {
+            let snapshot = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+
+            let mut entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+
+            let mut found = false;
+            if Process32FirstW(snapshot, &mut entry).is_ok() {
+                loop {
+                    let name = String::from_utf16_lossy(&entry.szExeFile)
+                        .trim_end_matches('\0')
+                        .to_lowercase();
+                    
+                    if name.ends_with(".scr") {
+                        found = true;
+                        break;
+                    }
+
+                    if Process32NextW(snapshot, &mut entry).is_err() {
+                        break;
+                    }
+                }
             }
-            Err(_) => false
+
+            let _ = CloseHandle(snapshot);
+            found
         }
     }
 }

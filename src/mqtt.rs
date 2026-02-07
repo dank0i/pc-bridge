@@ -607,7 +607,7 @@ impl MqttClient {
     pub async fn publish_sensor_attributes(&self, name: &str, attributes: &serde_json::Value) {
         let topic = self.sensor_attributes_topic(name);
         let json = serde_json::to_string(attributes).unwrap_or_default();
-        let _ = self.client.publish(&topic, QoS::AtLeastOnce, false, json).await;
+        let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
     }
 
     // Topic helpers
