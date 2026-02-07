@@ -31,9 +31,9 @@ impl IdleSensor {
         let last_active = self.get_last_active_time();
         self.state.mqtt.publish_sensor("lastactive", &last_active.to_rfc3339()).await;
         
-        // Publish initial screensaver state
+        // Publish initial screensaver state (retained so HA picks it up)
         let screensaver_active = self.is_screensaver_running();
-        self.state.mqtt.publish_sensor("screensaver", if screensaver_active { "on" } else { "off" }).await;
+        self.state.mqtt.publish_sensor_retained("screensaver", if screensaver_active { "on" } else { "off" }).await;
         let mut prev_screensaver_state = screensaver_active;
 
         loop {
@@ -49,7 +49,7 @@ impl IdleSensor {
                     // Check screensaver state - only publish on change
                     let screensaver_active = self.is_screensaver_running();
                     if screensaver_active != prev_screensaver_state {
-                        self.state.mqtt.publish_sensor("screensaver", if screensaver_active { "on" } else { "off" }).await;
+                        self.state.mqtt.publish_sensor_retained("screensaver", if screensaver_active { "on" } else { "off" }).await;
                         prev_screensaver_state = screensaver_active;
                         debug!("Screensaver state changed to: {}", if screensaver_active { "on" } else { "off" });
                     }
