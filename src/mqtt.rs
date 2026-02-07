@@ -205,6 +205,7 @@ impl MqttClient {
         
         if config.features.idle_tracking {
             self.register_sensor(&device, "lastactive", "Last Active", "mdi:clock-outline", Some("timestamp"), None).await;
+            self.register_sensor(&device, "screensaver", "Screensaver", "mdi:monitor-shimmer", None, None).await;
         }
         
         if config.features.power_events {
@@ -326,6 +327,7 @@ impl MqttClient {
         if previous.idle_tracking && !config.features.idle_tracking {
             info!("Feature disabled: idle_tracking - removing entity");
             self.unregister_entity("sensor", "lastactive").await;
+            self.unregister_entity("sensor", "screensaver").await;
         }
         
         if previous.power_events && !config.features.power_events {
