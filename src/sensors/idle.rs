@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use chrono::{DateTime, Utc, Duration as ChronoDuration};
 use tokio::time::{interval, Duration};
-use tracing::debug;
+use tracing::{debug, info};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETSCREENSAVERRUNNING, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS};
@@ -33,7 +33,9 @@ impl IdleSensor {
         
         // Publish initial screensaver state (retained so HA picks it up)
         let screensaver_active = self.is_screensaver_running();
-        self.state.mqtt.publish_sensor_retained("screensaver", if screensaver_active { "on" } else { "off" }).await;
+        let screensaver_state = if screensaver_active { "on" } else { "off" };
+        info!("Publishing initial screensaver state: {}", screensaver_state);
+        self.state.mqtt.publish_sensor_retained("screensaver", screensaver_state).await;
         let mut prev_screensaver_state = screensaver_active;
 
         loop {
@@ -87,7 +89,9 @@ impl IdleSensor {
                 Some(&mut running as *mut i32 as *mut _),
                 SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
             );
-            result.is_ok() && running != 0
+            let is_running = result.is_ok() && running != 0;
+            debug!("Screensaver check: api_ok={}, raw_value={}", result.is_ok(), running);
+            is_running
         }
     }
 }
