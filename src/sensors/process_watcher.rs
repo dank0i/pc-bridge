@@ -8,7 +8,6 @@
 //!
 //! Falls back to polling if WMI subscription fails.
 
-use futures::StreamExt;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -141,7 +140,7 @@ impl ProcessWatcher {
                 if Process32FirstW(snapshot, &mut entry).is_ok() {
                     loop {
                         // Extract process name
-                        let mut name = String::from_utf16_lossy(&entry.szExeFile).into_owned();
+                        let mut name = String::from_utf16_lossy(&entry.szExeFile);
                         if let Some(pos) = name.find('\0') {
                             name.truncate(pos);
                         }
@@ -206,8 +205,16 @@ impl ProcessWatcher {
 
                 debug!("WMI process creation event thread started");
 
-                loop {
-                    match wmi.notification::<ProcessCreationEvent>().with_query(creation_query) {
+                let events = match wmi.raw_notification::<ProcessCreationEvent>(creation_query) {
+                    Ok(iter) => iter,
+                    Err(e) => {
+                        error!("Failed to subscribe to creation events: {}", e);
+                        return;
+                    }
+                };
+
+                for event_result in events {
+                    match event_result {
                         Ok(event) => {
                             if let Some(name) = event.target_instance.name {
                                 let pid = event.target_instance.process_id;
@@ -256,8 +263,16 @@ impl ProcessWatcher {
 
                 debug!("WMI process deletion event thread started");
 
-                loop {
-                    match wmi.notification::<ProcessDeletionEvent>().with_query(deletion_query) {
+                let events = match wmi.raw_notification::<ProcessDeletionEvent>(deletion_query) {
+                    Ok(iter) => iter,
+                    Err(e) => {
+                        error!("Failed to subscribe to deletion events: {}", e);
+                        return;
+                    }
+                };
+
+                for event_result in events {
+                    match event_result {
                         Ok(event) => {
                             let pid = event.target_instance.process_id;
                             debug!("Process ended: {:?} (PID {})", event.target_instance.name, pid);
