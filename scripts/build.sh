@@ -47,20 +47,21 @@ while [[ $# -gt 0 ]]; do
             echo "  -r, --release        Build in release mode (optimized)"
             echo "  -c, --check-only     Run quality checks without building"
             echo "  -v, --version X.Y.Z  Bump version in Cargo.toml (e.g., 2.5.0)"
-            echo "  -t, --tag            Commit, tag, and push (requires --version)"
+            echo "  -t, --tag            Commit, tag, and push (requires --version, skips local build)"
             echo "  -h, --help           Show this help"
             echo ""
             echo "Examples:"
-            echo "  $0 --release                              # Release build"
-            echo "  $0 --version 2.5.0 --release              # Bump to 2.5.0 and build"
-            echo "  $0 --version 2.5.0 --release --tag        # Full release workflow"
-            echo "  $0 --check-only                           # Just run checks"
+            echo "  $0 --release                        # Release build locally"
+            echo "  $0 --version 2.5.0 --release        # Bump version and build locally"
+            echo "  $0 --version 2.5.0 --tag            # Full release (GitHub builds binary)"
+            echo "  $0 --check-only                     # Just run checks"
             echo ""
             echo "The --tag option will:"
-            echo "  1. Commit all staged changes with message 'Release vX.Y.Z'"
-            echo "  2. Create annotated git tag vX.Y.Z"
-            echo "  3. Push commits and tags to origin"
-            echo "  4. Remind you to create patch notes on GitHub"
+            echo "  1. Run quality checks (fmt, clippy, tests, audit, deny)"
+            echo "  2. Commit all staged changes with message 'Release vX.Y.Z'"
+            echo "  3. Create annotated git tag vX.Y.Z"
+            echo "  4. Push commits and tags to origin"
+            echo "  5. GitHub Actions builds Windows binary and attaches to release"
             exit 0
             ;;
         *)
@@ -172,50 +173,10 @@ if $CHECK_ONLY; then
     exit 0
 fi
 
-# Build
-echo -e "${BLUE}Building...${NC}"
-if $RELEASE; then
-    echo -e "Mode: ${GREEN}release${NC} (optimized)"
-    cargo build --release 2>&1 | grep -E "Compiling|Finished" || true
-    
-    BINARY="target/release/pc-bridge"
-    if [[ -f "$BINARY" ]]; then
-        SIZE=$(du -h "$BINARY" | cut -f1)
-        echo ""
-        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${GREEN}Build successful!${NC}"
-        echo -e "Binary: ${BLUE}${BINARY}${NC}"
-        echo -e "Size:   ${BLUE}${SIZE}${NC}"
-        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        
-        # Size warning
-        SIZE_BYTES=$(stat -f%z "$BINARY" 2>/dev/null || stat -c%s "$BINARY" 2>/dev/null || echo 0)
-        if (( SIZE_BYTES > 25000000 )); then
-            echo -e "${RED}⚠ Warning: Binary exceeds 25MB!${NC}"
-        elif (( SIZE_BYTES > 15000000 )); then
-            echo -e "${YELLOW}⚠ Note: Binary exceeds 15MB${NC}"
-        fi
-    fi
-else
-    echo -e "Mode: ${YELLOW}debug${NC}"
-    cargo build 2>&1 | grep -E "Compiling|Finished" || true
-    
-    BINARY="target/debug/pc-bridge"
-    if [[ -f "$BINARY" ]]; then
-        SIZE=$(du -h "$BINARY" | cut -f1)
-        echo ""
-        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${GREEN}Build successful!${NC}"
-        echo -e "Binary: ${BLUE}${BINARY}${NC}"
-        echo -e "Size:   ${BLUE}${SIZE}${NC}"
-        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    fi
-fi
-
-# Handle git tag and push
+# Handle git tag and push (skips local build - GitHub Actions builds Windows binary)
 if $CREATE_TAG; then
-    echo ""
     echo -e "${BLUE}Creating release...${NC}"
+    echo -e "  ${YELLOW}ℹ${NC} Skipping local build (GitHub Actions will build Windows binary)"
     
     TAG="v${VERSION}"
     
@@ -253,4 +214,45 @@ if $CREATE_TAG; then
     echo -e "  1. Go to: ${BLUE}https://github.com/dank0i/pc-bridge/releases/new?tag=${TAG}${NC}"
     echo -e "  2. Create release notes (or let GitHub auto-generate)"
     echo -e "  3. GitHub Actions will build and attach the Windows binary"
+    exit 0
+fi
+
+# Build (only when not using --tag)
+echo -e "${BLUE}Building...${NC}"
+if $RELEASE; then
+    echo -e "Mode: ${GREEN}release${NC} (optimized)"
+    cargo build --release 2>&1 | grep -E "Compiling|Finished" || true
+    
+    BINARY="target/release/pc-bridge"
+    if [[ -f "$BINARY" ]]; then
+        SIZE=$(du -h "$BINARY" | cut -f1)
+        echo ""
+        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${GREEN}Build successful!${NC}"
+        echo -e "Binary: ${BLUE}${BINARY}${NC}"
+        echo -e "Size:   ${BLUE}${SIZE}${NC}"
+        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        
+        # Size warning
+        SIZE_BYTES=$(stat -f%z "$BINARY" 2>/dev/null || stat -c%s "$BINARY" 2>/dev/null || echo 0)
+        if (( SIZE_BYTES > 25000000 )); then
+            echo -e "${RED}⚠ Warning: Binary exceeds 25MB!${NC}"
+        elif (( SIZE_BYTES > 15000000 )); then
+            echo -e "${YELLOW}⚠ Note: Binary exceeds 15MB${NC}"
+        fi
+    fi
+else
+    echo -e "Mode: ${YELLOW}debug${NC}"
+    cargo build 2>&1 | grep -E "Compiling|Finished" || true
+    
+    BINARY="target/debug/pc-bridge"
+    if [[ -f "$BINARY" ]]; then
+        SIZE=$(du -h "$BINARY" | cut -f1)
+        echo ""
+        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${GREEN}Build successful!${NC}"
+        echo -e "Binary: ${BLUE}${BINARY}${NC}"
+        echo -e "Size:   ${BLUE}${SIZE}${NC}"
+        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    fi
 fi

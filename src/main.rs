@@ -25,6 +25,8 @@ mod updater;
 mod winapi;
 
 use std::sync::Arc;
+#[cfg(windows)]
+use std::time::Duration;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -33,6 +35,8 @@ use crate::commands::CommandExecutor;
 use crate::config::Config;
 use crate::mqtt::MqttClient;
 use crate::power::PowerEventListener;
+#[cfg(windows)]
+use crate::sensors::ProcessWatcher;
 use crate::sensors::{CustomSensorManager, GameSensor, IdleSensor, SystemSensor};
 use crate::steam::SteamGameDiscovery;
 
@@ -41,6 +45,10 @@ pub struct AppState {
     pub config: RwLock<Config>,
     pub mqtt: MqttClient,
     pub shutdown_tx: broadcast::Sender<()>,
+    /// Event-driven process watcher using WMI (Windows only)
+    /// Provides always-up-to-date process list for game detection and screensaver
+    #[cfg(windows)]
+    pub process_watcher: ProcessWatcher,
 }
 
 /// Handle for optional tasks
@@ -174,15 +182,32 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Create event-driven process watcher (Windows only)
+    // This does initial enumeration and sets up WMI event subscription
+    #[cfg(windows)]
+    let process_watcher = ProcessWatcher::new().await;
+
     // Create shared state
     let state = Arc::new(AppState {
         config: RwLock::new(config.clone()),
         mqtt,
         shutdown_tx: shutdown_tx.clone(),
+        #[cfg(windows)]
+        process_watcher,
     });
 
     // Collect task handles for cleanup
     let mut handles: Vec<TaskHandle> = Vec::new();
+
+    // Start event-driven process watcher if game detection or idle tracking is enabled
+    #[cfg(windows)]
+    if config.features.game_detection || config.features.idle_tracking {
+        let poll_interval = Duration::from_secs(config.intervals.game_sensor.max(5));
+        state
+            .process_watcher
+            .start_background(shutdown_tx.subscribe(), poll_interval);
+        info!("  ✓ Process watcher started (WMI events with polling fallback)");
+    }
 
     // Command executor always runs (needed for any remote control)
     let command_executor = CommandExecutor::new(Arc::clone(&state), command_rx);

@@ -1,6 +1,6 @@
 [package]
 name = "pc-bridge"
-version = "2.4.2"
+version = "2.5.0"
 edition = "2021"
 authors = ["dank0i"]
 description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
@@ -23,11 +23,18 @@ tokio = { version = "1", features = ["full", "sync", "time", "signal"] }
 rumqttc = "0.24"
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 
 # Error handling
 anyhow = "1"
+
+# Performance optimizations
+smallvec = "1.13"
+bytes = "1"
+
+# Async utilities
+futures = "0.3"
 
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
@@ -56,6 +63,10 @@ png = "0.17"
 # Windows registry
 [target.'cfg(windows)'.dependencies.winreg]
 version = "0.55"
+
+# WMI for event-driven process monitoring
+[target.'cfg(windows)'.dependencies.wmi]
+version = "0.14"
 
 # Windows-specific dependencies
 [target.'cfg(windows)'.dependencies]

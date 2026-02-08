@@ -2,10 +2,9 @@
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use std::sync::Arc;
-use tokio::time::{interval, Duration};
+use std::time::Duration;
+use tokio::time::interval;
 use tracing::debug;
-use windows::Win32::Foundation::CloseHandle;
-use windows::Win32::System::Diagnostics::ToolHelp::*;
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 
@@ -26,8 +25,9 @@ impl IdleSensor {
         let screensaver_interval_secs = config.intervals.screensaver.max(1);
         drop(config);
 
+        let screensaver_poll_interval = Duration::from_secs(screensaver_interval_secs);
         let mut tick = interval(Duration::from_secs(interval_secs));
-        let mut screensaver_tick = interval(Duration::from_secs(screensaver_interval_secs));
+        let mut screensaver_tick = interval(screensaver_poll_interval);
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
 
         // Publish initial state
@@ -38,7 +38,8 @@ impl IdleSensor {
             .await;
 
         // Publish initial screensaver state (retained so HA picks it up)
-        let screensaver_active = self.is_screensaver_running();
+        // Uses event-driven process watcher (always up-to-date)
+        let screensaver_active = self.state.process_watcher.has_screensaver_running().await;
         let screensaver_state = if screensaver_active { "on" } else { "off" };
         debug!("Initial screensaver state: {}", screensaver_state);
         self.state
@@ -58,8 +59,8 @@ impl IdleSensor {
                     self.state.mqtt.publish_sensor("lastactive", &last_active.to_rfc3339()).await;
                 }
                 _ = screensaver_tick.tick() => {
-                    // Check screensaver state - only publish on change
-                    let screensaver_active = self.is_screensaver_running();
+                    // Check screensaver state using event-driven watcher (always current)
+                    let screensaver_active = self.state.process_watcher.has_screensaver_running().await;
                     if screensaver_active != prev_screensaver_state {
                         let state_str = if screensaver_active { "on" } else { "off" };
                         debug!("Screensaver state changed: {}", state_str);
@@ -88,42 +89,6 @@ impl IdleSensor {
             } else {
                 Utc::now()
             }
-        }
-    }
-
-    fn is_screensaver_running(&self) -> bool {
-        // Use native ToolHelp API to check for .scr processes (~2-5ms vs 200-500ms for PowerShell)
-        unsafe {
-            let snapshot = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
-                Ok(s) => s,
-                Err(_) => return false,
-            };
-
-            let mut entry = PROCESSENTRY32W {
-                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-                ..Default::default()
-            };
-
-            let mut found = false;
-            if Process32FirstW(snapshot, &mut entry).is_ok() {
-                loop {
-                    let name = String::from_utf16_lossy(&entry.szExeFile)
-                        .trim_end_matches('\0')
-                        .to_lowercase();
-
-                    if name.ends_with(".scr") {
-                        found = true;
-                        break;
-                    }
-
-                    if Process32NextW(snapshot, &mut entry).is_err() {
-                        break;
-                    }
-                }
-            }
-
-            let _ = CloseHandle(snapshot);
-            found
         }
     }
 }

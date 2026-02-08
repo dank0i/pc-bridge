@@ -1,8 +1,11 @@
 //! MQTT client for Home Assistant communication
 
+use bytes::Bytes;
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -24,6 +27,58 @@ pub struct MqttClient {
     client: AsyncClient,
     device_name: String,
     device_id: String,
+    /// Fix #3: Cached topic strings to avoid repeated format!() calls
+    cached_topics: CachedTopics,
+    /// Fix #5: Shared device info to avoid repeated cloning
+    device: Arc<HADevice>,
+}
+
+/// Pre-computed topic strings for frequently published sensors
+struct CachedTopics {
+    availability: String,
+    /// Sensor state topics: sensor_name -> topic
+    sensor_state: HashMap<&'static str, String>,
+    /// Sensor attribute topics: sensor_name -> topic  
+    sensor_attrs: HashMap<&'static str, String>,
+}
+
+impl CachedTopics {
+    fn new(device_name: &str) -> Self {
+        let mut sensor_state = HashMap::new();
+        let mut sensor_attrs = HashMap::new();
+
+        // Pre-cache common sensor topics
+        let sensors: &[&'static str] = &[
+            "runninggames",
+            "lastactive",
+            "screensaver",
+            "volume_level",
+            "cpu_usage",
+            "memory_usage",
+            "gpu_temp",
+            "steam_updating",
+        ];
+
+        for name in sensors {
+            sensor_state.insert(
+                *name,
+                format!("{}/sensor/{}/{}/state", DISCOVERY_PREFIX, device_name, name),
+            );
+            sensor_attrs.insert(
+                *name,
+                format!(
+                    "{}/sensor/{}/{}/attributes",
+                    DISCOVERY_PREFIX, device_name, name
+                ),
+            );
+        }
+
+        Self {
+            availability: format!("{}/sensor/{}/availability", DISCOVERY_PREFIX, device_name),
+            sensor_state,
+            sensor_attrs,
+        }
+    }
 }
 
 /// Receiver for commands from MQTT
@@ -44,7 +99,8 @@ struct HADiscoveryPayload {
     availability_topic: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     json_attributes_topic: Option<String>,
-    device: HADevice,
+    /// Fix #5: Use Arc to avoid cloning device info for each button/sensor
+    device: Arc<HADevice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     icon: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -157,10 +213,24 @@ impl MqttClient {
             }
         });
 
+        // Fix #3: Pre-cache topic strings
+        let cached_topics = CachedTopics::new(&device_name);
+
+        // Fix #5: Create shared device info once
+        let device = Arc::new(HADevice {
+            identifiers: vec![device_id.clone()],
+            name: device_name.clone(),
+            model: format!("PC Bridge v{}", VERSION),
+            manufacturer: "dank0i".to_string(),
+            sw_version: VERSION.to_string(),
+        });
+
         let mqtt = Self {
             client,
             device_name,
             device_id,
+            cached_topics,
+            device,
         };
 
         let cmd_rx = CommandReceiver { rx: command_rx };
@@ -206,18 +276,13 @@ impl MqttClient {
     }
 
     async fn register_discovery(&self, config: &Config) {
-        let device = HADevice {
-            identifiers: vec![self.device_id.clone()],
-            name: self.device_name.clone(),
-            model: format!("PC Bridge v{}", VERSION),
-            manufacturer: "dank0i".to_string(),
-            sw_version: VERSION.to_string(),
-        };
+        // Fix #5: Use shared device reference instead of creating new one
+        let device = &self.device;
 
         // Conditionally register sensors based on features
         if config.features.game_detection {
             self.register_sensor_with_attributes(
-                &device,
+                device,
                 "runninggames",
                 "Running Game",
                 "mdi:gamepad-variant",
@@ -229,7 +294,7 @@ impl MqttClient {
 
         if config.features.idle_tracking {
             self.register_sensor(
-                &device,
+                device,
                 "lastactive",
                 "Last Active",
                 "mdi:clock-outline",
@@ -238,7 +303,7 @@ impl MqttClient {
             )
             .await;
             self.register_sensor(
-                &device,
+                device,
                 "screensaver",
                 "Screensaver",
                 "mdi:monitor-shimmer",
@@ -256,7 +321,7 @@ impl MqttClient {
                 state_topic: Some(self.sensor_topic("sleep_state")),
                 command_topic: None,
                 availability_topic: None,
-                device: device.clone(),
+                device: Arc::clone(device),
                 icon: Some("mdi:power-sleep".to_string()),
                 device_class: None,
                 unit_of_measurement: None,
@@ -276,7 +341,7 @@ impl MqttClient {
         // System sensors (CPU, memory, battery, active window)
         if config.features.system_sensors {
             self.register_sensor(
-                &device,
+                device,
                 "cpu_usage",
                 "CPU Usage",
                 "mdi:cpu-64-bit",
@@ -285,7 +350,7 @@ impl MqttClient {
             )
             .await;
             self.register_sensor(
-                &device,
+                device,
                 "memory_usage",
                 "Memory Usage",
                 "mdi:memory",
@@ -294,7 +359,7 @@ impl MqttClient {
             )
             .await;
             self.register_sensor(
-                &device,
+                device,
                 "battery_level",
                 "Battery Level",
                 "mdi:battery",
@@ -303,7 +368,7 @@ impl MqttClient {
             )
             .await;
             self.register_sensor(
-                &device,
+                device,
                 "battery_charging",
                 "Battery Charging",
                 "mdi:battery-charging",
@@ -312,7 +377,7 @@ impl MqttClient {
             )
             .await;
             self.register_sensor(
-                &device,
+                device,
                 "active_window",
                 "Active Window",
                 "mdi:application",
@@ -325,7 +390,7 @@ impl MqttClient {
         // Steam update sensor
         if config.features.steam_updates {
             self.register_sensor_with_attributes(
-                &device,
+                device,
                 "steam_updating",
                 "Steam Updating",
                 "mdi:steam",
@@ -356,7 +421,7 @@ impl MqttClient {
                 state_topic: None,
                 command_topic: Some(self.command_topic(name)),
                 availability_topic: Some(self.availability_topic()),
-                device: device.clone(),
+                device: Arc::clone(device),
                 icon: Some(icon.to_string()),
                 device_class: None,
                 unit_of_measurement: None,
@@ -391,7 +456,7 @@ impl MqttClient {
                     state_topic: None,
                     command_topic: Some(self.command_topic(name)),
                     availability_topic: Some(self.availability_topic()),
-                    device: device.clone(),
+                    device: Arc::clone(device),
                     icon: Some(icon.to_string()),
                     device_class: None,
                     unit_of_measurement: None,
@@ -411,7 +476,7 @@ impl MqttClient {
 
             // Register volume sensor
             self.register_sensor(
-                &device,
+                device,
                 "volume_level",
                 "Volume Level",
                 "mdi:volume-high",
@@ -423,7 +488,7 @@ impl MqttClient {
 
         // Register notify service only if notifications enabled
         if config.features.notifications {
-            self.register_notify_service(&device).await;
+            self.register_notify_service(device).await;
         }
 
         // Unregister entities for features that changed from enabled → disabled
@@ -550,7 +615,7 @@ impl MqttClient {
     /// Helper to register a single sensor
     async fn register_sensor(
         &self,
-        device: &HADevice,
+        device: &Arc<HADevice>,
         name: &str,
         display_name: &str,
         icon: &str,
@@ -564,7 +629,7 @@ impl MqttClient {
     /// Helper to register a sensor with JSON attributes support
     async fn register_sensor_with_attributes(
         &self,
-        device: &HADevice,
+        device: &Arc<HADevice>,
         name: &str,
         display_name: &str,
         icon: &str,
@@ -579,7 +644,7 @@ impl MqttClient {
     #[allow(clippy::too_many_arguments)]
     async fn register_sensor_internal(
         &self,
-        device: &HADevice,
+        device: &Arc<HADevice>,
         name: &str,
         display_name: &str,
         icon: &str,
@@ -598,7 +663,7 @@ impl MqttClient {
             } else {
                 None
             },
-            device: device.clone(),
+            device: Arc::clone(device),
             icon: Some(icon.to_string()),
             device_class: device_class.map(|s| s.to_string()),
             unit_of_measurement: unit.map(|s| s.to_string()),
@@ -616,7 +681,7 @@ impl MqttClient {
     }
 
     /// Register notify service for MQTT discovery
-    async fn register_notify_service(&self, device: &HADevice) {
+    async fn register_notify_service(&self, device: &Arc<HADevice>) {
         // The notify platform expects command_topic to receive messages
         let notify_topic = format!("pc-bridge/notifications/{}", self.device_name);
 
@@ -662,13 +727,7 @@ impl MqttClient {
                 state_topic: Some(self.sensor_topic(&topic_name)),
                 command_topic: None,
                 availability_topic: Some(self.availability_topic()),
-                device: HADevice {
-                    identifiers: vec![self.device_id.clone()],
-                    name: self.device_name.clone(),
-                    model: format!("PC Bridge v{}", VERSION),
-                    manufacturer: "dank0i".to_string(),
-                    sw_version: VERSION.to_string(),
-                },
+                device: Arc::clone(&self.device),
                 icon: Some(icon),
                 device_class: None,
                 unit_of_measurement: sensor.unit.clone(),
@@ -711,13 +770,7 @@ impl MqttClient {
                 state_topic: None,
                 command_topic: Some(self.command_topic(&cmd.name)),
                 availability_topic: Some(self.availability_topic()),
-                device: HADevice {
-                    identifiers: vec![self.device_id.clone()],
-                    name: self.device_name.clone(),
-                    model: format!("PC Bridge v{}", VERSION),
-                    manufacturer: "dank0i".to_string(),
-                    sw_version: VERSION.to_string(),
-                },
+                device: Arc::clone(&self.device),
                 icon: Some(icon),
                 device_class: None,
                 unit_of_measurement: None,
@@ -854,18 +907,23 @@ impl MqttClient {
     }
 
     /// Publish sensor attributes as JSON
+    /// Fix #9: Zero-copy - serialize directly to Vec, wrap in Bytes
     pub async fn publish_sensor_attributes(&self, name: &str, attributes: &serde_json::Value) {
         let topic = self.sensor_attributes_topic(name);
-        let json = serde_json::to_string(attributes).unwrap_or_default();
+        // Serialize directly to Vec, avoiding intermediate String allocation
+        let payload = match serde_json::to_vec(attributes) {
+            Ok(v) => Bytes::from(v),
+            Err(_) => return,
+        };
         let _ = self
             .client
-            .publish(&topic, QoS::AtLeastOnce, true, json)
+            .publish(&topic, QoS::AtLeastOnce, true, payload)
             .await;
     }
 
-    // Topic helpers
+    // Topic helpers - Fix #3: Use cached topics for frequently-used sensors
     fn availability_topic(&self) -> String {
-        Self::availability_topic_static(&self.device_name)
+        self.cached_topics.availability.clone()
     }
 
     fn availability_topic_static(device_name: &str) -> String {
@@ -873,17 +931,31 @@ impl MqttClient {
     }
 
     fn sensor_topic(&self, name: &str) -> String {
-        format!(
-            "{}/sensor/{}/{}/state",
-            DISCOVERY_PREFIX, self.device_name, name
-        )
+        // Try cache first, fall back to format for custom sensors
+        self.cached_topics
+            .sensor_state
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| {
+                format!(
+                    "{}/sensor/{}/{}/state",
+                    DISCOVERY_PREFIX, self.device_name, name
+                )
+            })
     }
 
     fn sensor_attributes_topic(&self, name: &str) -> String {
-        format!(
-            "{}/sensor/{}/{}/attributes",
-            DISCOVERY_PREFIX, self.device_name, name
-        )
+        // Try cache first, fall back to format for custom sensors
+        self.cached_topics
+            .sensor_attrs
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| {
+                format!(
+                    "{}/sensor/{}/{}/attributes",
+                    DISCOVERY_PREFIX, self.device_name, name
+                )
+            })
     }
 
     fn command_topic(&self, name: &str) -> String {
