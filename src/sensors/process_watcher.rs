@@ -5,6 +5,7 @@
 //! - Immediate detection of new processes (no polling delay)
 //! - Lower CPU usage (no periodic enumeration)
 //! - Always up-to-date process list
+//! - Push notifications to subscribers when processes change
 //!
 //! Falls back to polling if WMI subscription fails.
 
@@ -17,6 +18,10 @@ use tracing::{debug, error, info, warn};
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::System::Diagnostics::ToolHelp::*;
 use wmi::{COMLibrary, WMIConnection};
+
+/// Notification sent when process list changes
+#[derive(Clone, Debug)]
+pub struct ProcessChangeNotification;
 
 /// Process creation event from WMI
 #[derive(Deserialize, Debug)]
@@ -85,17 +90,32 @@ impl ProcessState {
 pub struct ProcessWatcher {
     /// Shared process state
     state: Arc<RwLock<ProcessState>>,
+    /// Channel for notifying subscribers of process changes
+    change_tx: broadcast::Sender<ProcessChangeNotification>,
 }
 
 impl ProcessWatcher {
     /// Create a new process watcher with initial enumeration
     pub async fn new() -> Self {
         let state = Arc::new(RwLock::new(ProcessState::new()));
+        // Channel capacity of 16 is enough - subscribers just need to know "something changed"
+        let (change_tx, _) = broadcast::channel(16);
 
         // Initial enumeration using ToolHelp (fast, reliable)
         Self::initial_enumeration(&state).await;
 
-        Self { state }
+        Self { state, change_tx }
+    }
+
+    /// Subscribe to process change notifications
+    pub fn subscribe(&self) -> broadcast::Receiver<ProcessChangeNotification> {
+        self.change_tx.subscribe()
+    }
+
+    /// Notify subscribers that processes changed
+    fn notify_change(&self) {
+        // Ignore send errors - means no subscribers
+        let _ = self.change_tx.send(ProcessChangeNotification);
     }
 
     /// Start the background WMI event watcher
@@ -105,10 +125,11 @@ impl ProcessWatcher {
     /// Falls back to polling if WMI fails.
     pub fn start_background(&self, shutdown_rx: broadcast::Receiver<()>, poll_interval: Duration) {
         let state = Arc::clone(&self.state);
+        let change_tx = self.change_tx.clone();
 
         // Try WMI first, fall back to polling
         tokio::spawn(async move {
-            match Self::setup_wmi_events(&state).await {
+            match Self::setup_wmi_events(&state, change_tx.clone()).await {
                 Ok(()) => {
                     info!("Process watcher using WMI events");
                     // WMI threads are running, just wait for shutdown
@@ -120,7 +141,7 @@ impl ProcessWatcher {
                         "WMI event subscription failed, using polling fallback: {}",
                         e
                     );
-                    Self::run_polling_fallback(&state, shutdown_rx, poll_interval).await;
+                    Self::run_polling_fallback(&state, shutdown_rx, poll_interval, change_tx).await;
                 }
             }
         });
@@ -166,7 +187,10 @@ impl ProcessWatcher {
     }
 
     /// Set up WMI event subscription for process changes
-    async fn setup_wmi_events(state: &Arc<RwLock<ProcessState>>) -> anyhow::Result<()> {
+    async fn setup_wmi_events(
+        state: &Arc<RwLock<ProcessState>>,
+        change_tx: broadcast::Sender<ProcessChangeNotification>,
+    ) -> anyhow::Result<()> {
         // WMI operations are blocking, run in spawn_blocking
         let state = Arc::clone(state);
 
@@ -185,6 +209,8 @@ impl ProcessWatcher {
             // WMI uses blocking iterators, we need separate threads for each
             let state_creation = Arc::clone(&state);
             let state_deletion = Arc::clone(&state);
+            let change_tx_creation = change_tx.clone();
+            let change_tx_deletion = change_tx;
 
             // Spawn thread for creation events
             std::thread::spawn(move || {
@@ -233,6 +259,8 @@ impl ProcessWatcher {
                                         });
                                     }
                                 }
+                                // Notify subscribers of change
+                                let _ = change_tx_creation.send(ProcessChangeNotification);
                             }
                         }
                         Err(e) => {
@@ -288,6 +316,8 @@ impl ProcessWatcher {
                                     });
                                 }
                             }
+                            // Notify subscribers of change
+                            let _ = change_tx_deletion.send(ProcessChangeNotification);
                         }
                         Err(e) => {
                             error!("WMI deletion event error: {}", e);
@@ -309,6 +339,7 @@ impl ProcessWatcher {
         state: &Arc<RwLock<ProcessState>>,
         mut shutdown_rx: broadcast::Receiver<()>,
         poll_interval: Duration,
+        change_tx: broadcast::Sender<ProcessChangeNotification>,
     ) {
         let mut interval = tokio::time::interval(poll_interval);
         let state = Arc::clone(state);
@@ -321,6 +352,8 @@ impl ProcessWatcher {
                 }
                 _ = interval.tick() => {
                     Self::initial_enumeration(&state).await;
+                    // Notify subscribers after each poll
+                    let _ = change_tx.send(ProcessChangeNotification);
                 }
             }
         }

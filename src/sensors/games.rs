@@ -3,13 +3,13 @@
 //! Detection priority:
 //! 1. Steam auto-discovery (if Steam installed) - uses process name → app_id lookup
 //! 2. Manual config `games` map (pattern → game_id)
+//!
+//! Uses push notifications from ProcessWatcher for instant detection.
 
 use smallvec::SmallVec;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::time::interval;
-use tracing::{debug, error};
+use tracing::{debug, info};
 
 use crate::AppState;
 
@@ -23,17 +23,17 @@ impl GameSensor {
     }
 
     pub async fn run(self) {
-        let config = self.state.config.read().await;
-        let interval_secs = config.intervals.game_sensor.max(1); // Prevent panic on 0
-        drop(config);
-
-        let poll_interval = Duration::from_secs(interval_secs);
-        let mut tick = interval(poll_interval);
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
+        let mut process_rx = self.state.process_watcher.subscribe();
 
         // Publish initial state
-        let (game_id, display_name) = self.detect_game(poll_interval).await;
+        let (game_id, display_name) = self.detect_game().await;
         self.publish_game(&game_id, &display_name).await;
+
+        // Track last published state to avoid duplicate MQTT messages
+        let mut last_game_id = game_id;
+
+        info!("Game sensor started (push-based)");
 
         loop {
             tokio::select! {
@@ -41,9 +41,30 @@ impl GameSensor {
                     debug!("Game sensor shutting down");
                     break;
                 }
-                _ = tick.tick() => {
-                    let (game_id, display_name) = self.detect_game(poll_interval).await;
-                    self.publish_game(&game_id, &display_name).await;
+                result = process_rx.recv() => {
+                    match result {
+                        Ok(_notification) => {
+                            // Process list changed - re-detect and publish if different
+                            let (game_id, display_name) = self.detect_game().await;
+                            if game_id != last_game_id {
+                                self.publish_game(&game_id, &display_name).await;
+                                last_game_id = game_id;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            // Missed some notifications, just re-detect
+                            debug!("Game sensor lagged {} notifications, re-detecting", n);
+                            let (game_id, display_name) = self.detect_game().await;
+                            if game_id != last_game_id {
+                                self.publish_game(&game_id, &display_name).await;
+                                last_game_id = game_id;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            debug!("Process watcher channel closed");
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -63,7 +84,7 @@ impl GameSensor {
             .await;
     }
 
-    async fn detect_game(&self, _max_cache_age: Duration) -> (String, String) {
+    async fn detect_game(&self) -> (String, String) {
         // Get processes from event-driven watcher (always up-to-date)
         let processes = self.state.process_watcher.get_names().await;
 
