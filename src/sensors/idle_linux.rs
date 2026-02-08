@@ -1,8 +1,8 @@
 //! Idle time sensor for Linux - tracks last user input
 
-use std::sync::Arc;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use std::process::Command;
-use chrono::{DateTime, Utc, Duration as ChronoDuration};
+use std::sync::Arc;
 use tokio::time::{interval, Duration};
 use tracing::{debug, warn};
 
@@ -27,7 +27,10 @@ impl IdleSensor {
 
         // Publish initial state
         let last_active = self.get_last_active_time();
-        self.state.mqtt.publish_sensor("lastactive", &last_active.to_rfc3339()).await;
+        self.state
+            .mqtt
+            .publish_sensor("lastactive", &last_active.to_rfc3339())
+            .await;
 
         loop {
             tokio::select! {
@@ -57,7 +60,11 @@ impl IdleSensor {
 
         // Try qdbus for KDE/Wayland
         if let Ok(output) = Command::new("qdbus")
-            .args(["org.freedesktop.ScreenSaver", "/ScreenSaver", "GetSessionIdleTime"])
+            .args([
+                "org.freedesktop.ScreenSaver",
+                "/ScreenSaver",
+                "GetSessionIdleTime",
+            ])
             .output()
         {
             if output.status.success() {

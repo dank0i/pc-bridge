@@ -1,9 +1,9 @@
 //! Power event listener for Linux - detects sleep/wake via systemd/dbus
 
-use std::sync::Arc;
 use std::process::Command;
+use std::sync::Arc;
 use tokio::time::{interval, Duration};
-use tracing::{info, debug};
+use tracing::{debug, info};
 
 use crate::AppState;
 
@@ -18,7 +18,7 @@ impl PowerEventListener {
 
     pub async fn run(self) {
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
-        
+
         // On Linux, we poll systemd's sleep state or use dbus-monitor
         // This is a simplified polling approach
         let mut tick = interval(Duration::from_secs(5));
@@ -34,7 +34,7 @@ impl PowerEventListener {
                 }
                 _ = tick.tick() => {
                     let is_sleeping = self.check_sleep_state();
-                    
+
                     if is_sleeping && !was_sleeping {
                         info!("Power event: SLEEP");
                         self.state.mqtt.publish_sensor_retained("sleep_state", "sleeping").await;
@@ -42,7 +42,7 @@ impl PowerEventListener {
                         info!("Power event: WAKE");
                         self.state.mqtt.publish_sensor_retained("sleep_state", "awake").await;
                     }
-                    
+
                     was_sleeping = is_sleeping;
                 }
             }

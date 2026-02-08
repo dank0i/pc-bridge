@@ -1,13 +1,13 @@
 //! Command executor for Linux
 
-use std::sync::Arc;
 use std::process::Command;
+use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::{info, warn, error, debug};
+use tracing::{debug, error, info, warn};
 
-use crate::AppState;
 use crate::mqtt::CommandReceiver;
 use crate::power::wake_display;
+use crate::AppState;
 
 const MAX_CONCURRENT_COMMANDS: usize = 5;
 
@@ -69,7 +69,11 @@ impl CommandExecutor {
 
     async fn execute_command(name: &str, payload: &str) -> anyhow::Result<()> {
         let payload = payload.trim();
-        let payload = if payload.eq_ignore_ascii_case("PRESS") { "" } else { payload };
+        let payload = if payload.eq_ignore_ascii_case("PRESS") {
+            ""
+        } else {
+            payload
+        };
 
         info!("Executing command: {} (payload: {:?})", name, payload);
 
@@ -103,16 +107,16 @@ impl CommandExecutor {
         info!("Running: {}", cmd_str);
 
         // Execute via bash
-        let mut child = Command::new("bash")
-            .args(["-c", &cmd_str])
-            .spawn()?;
+        let mut child = Command::new("bash").args(["-c", &cmd_str]).spawn()?;
 
         // Wait with timeout in background
         tokio::spawn(async move {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(300),
-                tokio::task::spawn_blocking(move || child.wait())
-            ).await {
+                tokio::task::spawn_blocking(move || child.wait()),
+            )
+            .await
+            {
                 Ok(Ok(Ok(status))) => {
                     if !status.success() {
                         warn!("Command exited with: {}", status);

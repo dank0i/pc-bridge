@@ -1,13 +1,13 @@
 //! MQTT client for Home Assistant communication
 
-use std::time::Duration;
-use std::path::PathBuf;
-use rumqttc::{AsyncClient, MqttOptions, QoS, Event, Packet};
+use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use serde::Serialize;
+use std::path::PathBuf;
+use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{info, warn, error, debug};
+use tracing::{debug, error, info, warn};
 
-use crate::config::{Config, CustomSensor, CustomCommand, FeatureConfig};
+use crate::config::{Config, CustomCommand, CustomSensor, FeatureConfig};
 
 const DISCOVERY_PREFIX: &str = "homeassistant";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -68,11 +68,7 @@ impl MqttClient {
         let broker = &config.mqtt.broker;
         let (host, port) = Self::parse_broker_url(broker)?;
 
-        let mut opts = MqttOptions::new(
-            config.client_id(),
-            host,
-            port,
-        );
+        let mut opts = MqttOptions::new(config.client_id(), host, port);
 
         // Authentication
         if !config.mqtt.user.is_empty() {
@@ -118,26 +114,35 @@ impl MqttClient {
                         debug!("MQTT message: {} = {}", topic, payload);
 
                         // Extract command name from topic
-                        if let Some(cmd_name) = Self::extract_command_name(&topic, &device_name_clone) {
-                            let _ = command_tx.send(Command {
-                                name: cmd_name,
-                                payload,
-                            }).await;
+                        if let Some(cmd_name) =
+                            Self::extract_command_name(&topic, &device_name_clone)
+                        {
+                            let _ = command_tx
+                                .send(Command {
+                                    name: cmd_name,
+                                    payload,
+                                })
+                                .await;
                         }
                     }
                     Ok(Event::Incoming(Packet::ConnAck(_))) => {
                         info!("MQTT connected - publishing availability and resubscribing");
                         // Republish availability on every connect/reconnect
-                        let _ = client_for_eventloop.publish(
-                            &availability_topic_for_eventloop, 
-                            QoS::AtLeastOnce, 
-                            true, 
-                            "online"
-                        ).await;
-                        
+                        let _ = client_for_eventloop
+                            .publish(
+                                &availability_topic_for_eventloop,
+                                QoS::AtLeastOnce,
+                                true,
+                                "online",
+                            )
+                            .await;
+
                         // Re-subscribe to all command topics
                         for topic in &subscribe_topics {
-                            if let Err(e) = client_for_eventloop.subscribe(topic, QoS::AtLeastOnce).await {
+                            if let Err(e) = client_for_eventloop
+                                .subscribe(topic, QoS::AtLeastOnce)
+                                .await
+                            {
                                 warn!("Failed to resubscribe to {}: {:?}", topic, e);
                             }
                         }
@@ -178,9 +183,7 @@ impl MqttClient {
 
         let parts: Vec<&str> = without_scheme.split(':').collect();
         let host = parts.first().unwrap_or(&"localhost").to_string();
-        let port = parts.get(1)
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(1883);
+        let port = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(1883);
 
         Ok((host, port))
     }
@@ -213,14 +216,38 @@ impl MqttClient {
 
         // Conditionally register sensors based on features
         if config.features.game_detection {
-            self.register_sensor_with_attributes(&device, "runninggames", "Running Game", "mdi:gamepad-variant", None, None).await;
+            self.register_sensor_with_attributes(
+                &device,
+                "runninggames",
+                "Running Game",
+                "mdi:gamepad-variant",
+                None,
+                None,
+            )
+            .await;
         }
-        
+
         if config.features.idle_tracking {
-            self.register_sensor(&device, "lastactive", "Last Active", "mdi:clock-outline", Some("timestamp"), None).await;
-            self.register_sensor(&device, "screensaver", "Screensaver", "mdi:monitor-shimmer", None, None).await;
+            self.register_sensor(
+                &device,
+                "lastactive",
+                "Last Active",
+                "mdi:clock-outline",
+                Some("timestamp"),
+                None,
+            )
+            .await;
+            self.register_sensor(
+                &device,
+                "screensaver",
+                "Screensaver",
+                "mdi:monitor-shimmer",
+                None,
+                None,
+            )
+            .await;
         }
-        
+
         if config.features.power_events {
             // sleep_state has no availability (always published)
             let payload = HADiscoveryPayload {
@@ -235,23 +262,77 @@ impl MqttClient {
                 unit_of_measurement: None,
                 json_attributes_topic: None,
             };
-            let topic = format!("{}/sensor/{}/sleep_state/config", DISCOVERY_PREFIX, self.device_name);
+            let topic = format!(
+                "{}/sensor/{}/sleep_state/config",
+                DISCOVERY_PREFIX, self.device_name
+            );
             let json = serde_json::to_string(&payload).unwrap();
-            let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
+            let _ = self
+                .client
+                .publish(&topic, QoS::AtLeastOnce, true, json)
+                .await;
         }
-        
+
         // System sensors (CPU, memory, battery, active window)
         if config.features.system_sensors {
-            self.register_sensor(&device, "cpu_usage", "CPU Usage", "mdi:cpu-64-bit", None, Some("%")).await;
-            self.register_sensor(&device, "memory_usage", "Memory Usage", "mdi:memory", None, Some("%")).await;
-            self.register_sensor(&device, "battery_level", "Battery Level", "mdi:battery", Some("battery"), Some("%")).await;
-            self.register_sensor(&device, "battery_charging", "Battery Charging", "mdi:battery-charging", None, None).await;
-            self.register_sensor(&device, "active_window", "Active Window", "mdi:application", None, None).await;
+            self.register_sensor(
+                &device,
+                "cpu_usage",
+                "CPU Usage",
+                "mdi:cpu-64-bit",
+                None,
+                Some("%"),
+            )
+            .await;
+            self.register_sensor(
+                &device,
+                "memory_usage",
+                "Memory Usage",
+                "mdi:memory",
+                None,
+                Some("%"),
+            )
+            .await;
+            self.register_sensor(
+                &device,
+                "battery_level",
+                "Battery Level",
+                "mdi:battery",
+                Some("battery"),
+                Some("%"),
+            )
+            .await;
+            self.register_sensor(
+                &device,
+                "battery_charging",
+                "Battery Charging",
+                "mdi:battery-charging",
+                None,
+                None,
+            )
+            .await;
+            self.register_sensor(
+                &device,
+                "active_window",
+                "Active Window",
+                "mdi:application",
+                None,
+                None,
+            )
+            .await;
         }
 
         // Steam update sensor
         if config.features.steam_updates {
-            self.register_sensor_with_attributes(&device, "steam_updating", "Steam Updating", "mdi:steam", None, None).await;
+            self.register_sensor_with_attributes(
+                &device,
+                "steam_updating",
+                "Steam Updating",
+                "mdi:steam",
+                None,
+                None,
+            )
+            .await;
         }
 
         // Command buttons (always register - they're the core control interface)
@@ -282,11 +363,17 @@ impl MqttClient {
                 json_attributes_topic: None,
             };
 
-            let topic = format!("{}/button/{}/{}/config", DISCOVERY_PREFIX, self.device_name, name);
+            let topic = format!(
+                "{}/button/{}/{}/config",
+                DISCOVERY_PREFIX, self.device_name, name
+            );
             let json = serde_json::to_string(&payload).unwrap();
-            let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
+            let _ = self
+                .client
+                .publish(&topic, QoS::AtLeastOnce, true, json)
+                .await;
         }
-        
+
         // Audio control commands (media keys) if enabled
         if config.features.audio_control {
             let audio_commands = vec![
@@ -296,7 +383,7 @@ impl MqttClient {
                 ("media_stop", "mdi:stop"),
                 ("volume_mute", "mdi:volume-mute"),
             ];
-            
+
             for (name, icon) in audio_commands {
                 let payload = HADiscoveryPayload {
                     name: name.to_string(),
@@ -311,13 +398,27 @@ impl MqttClient {
                     json_attributes_topic: None,
                 };
 
-                let topic = format!("{}/button/{}/{}/config", DISCOVERY_PREFIX, self.device_name, name);
+                let topic = format!(
+                    "{}/button/{}/{}/config",
+                    DISCOVERY_PREFIX, self.device_name, name
+                );
                 let json = serde_json::to_string(&payload).unwrap();
-                let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
+                let _ = self
+                    .client
+                    .publish(&topic, QoS::AtLeastOnce, true, json)
+                    .await;
             }
-            
+
             // Register volume sensor
-            self.register_sensor(&device, "volume_level", "Volume Level", "mdi:volume-high", None, Some("%")).await;
+            self.register_sensor(
+                &device,
+                "volume_level",
+                "Volume Level",
+                "mdi:volume-high",
+                None,
+                Some("%"),
+            )
+            .await;
         }
 
         // Register notify service only if notifications enabled
@@ -330,69 +431,90 @@ impl MqttClient {
 
         info!("Registered HA discovery");
     }
-    
+
     /// Unregister discovery only for features that changed from enabled to disabled
     async fn unregister_changed_features(&self, config: &Config) {
         let state_path = Self::feature_state_path();
         let previous = Self::load_feature_state(&state_path);
-        
+
         // Only unregister if feature was previously enabled and is now disabled
         if previous.game_detection && !config.features.game_detection {
             info!("Feature disabled: game_detection - removing entity");
             self.unregister_entity("sensor", "runninggames").await;
         }
-        
+
         if previous.idle_tracking && !config.features.idle_tracking {
             info!("Feature disabled: idle_tracking - removing entity");
             self.unregister_entity("sensor", "lastactive").await;
             self.unregister_entity("sensor", "screensaver").await;
         }
-        
+
         if previous.power_events && !config.features.power_events {
             info!("Feature disabled: power_events - removing entity");
             self.unregister_entity("sensor", "sleep_state").await;
         }
-        
+
         if previous.system_sensors && !config.features.system_sensors {
             info!("Feature disabled: system_sensors - removing entities");
-            for name in ["cpu_usage", "memory_usage", "battery_level", "battery_charging", "active_window"] {
+            for name in [
+                "cpu_usage",
+                "memory_usage",
+                "battery_level",
+                "battery_charging",
+                "active_window",
+            ] {
                 self.unregister_entity("sensor", name).await;
             }
         }
-        
+
         if previous.audio_control && !config.features.audio_control {
             info!("Feature disabled: audio_control - removing entities");
-            for name in ["media_play_pause", "media_next", "media_previous", "media_stop", "volume_mute"] {
+            for name in [
+                "media_play_pause",
+                "media_next",
+                "media_previous",
+                "media_stop",
+                "volume_mute",
+            ] {
                 self.unregister_entity("button", name).await;
             }
             self.unregister_entity("number", "volume_set").await;
         }
-        
+
         if previous.notifications && !config.features.notifications {
             info!("Feature disabled: notifications - removing entity");
             self.unregister_entity("notify", &self.device_name).await;
         }
-        
+
         // Save current feature state for next comparison
         Self::save_feature_state(&state_path, &config.features);
     }
-    
+
     /// Get path to feature state file (in app data dir, next to steam_cache.bin)
     fn feature_state_path() -> PathBuf {
         #[cfg(windows)]
         {
             std::env::var("LOCALAPPDATA")
-                .map(|p| PathBuf::from(p).join("pc-bridge").join("feature_state.json"))
+                .map(|p| {
+                    PathBuf::from(p)
+                        .join("pc-bridge")
+                        .join("feature_state.json")
+                })
                 .unwrap_or_else(|_| PathBuf::from("feature_state.json"))
         }
         #[cfg(unix)]
         {
             std::env::var("HOME")
-                .map(|p| PathBuf::from(p).join(".cache").join("pc-bridge").join("feature_state.json"))
+                .map(|p| {
+                    PathBuf::from(p)
+                        .join(".cache")
+                        .join("pc-bridge")
+                        .join("feature_state.json")
+                })
                 .unwrap_or_else(|_| PathBuf::from("feature_state.json"))
         }
     }
-    
+
     /// Load previous feature state (defaults to all false if not found)
     fn load_feature_state(path: &PathBuf) -> FeatureConfig {
         std::fs::read_to_string(path)
@@ -400,7 +522,7 @@ impl MqttClient {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()
     }
-    
+
     /// Save current feature state
     fn save_feature_state(path: &PathBuf, features: &FeatureConfig) {
         // Ensure parent directory exists
@@ -411,50 +533,93 @@ impl MqttClient {
             let _ = std::fs::write(path, json);
         }
     }
-    
+
     /// Unregister a single entity by publishing empty payload to its config topic
     async fn unregister_entity(&self, entity_type: &str, name: &str) {
-        let topic = format!("{}/{}/{}/{}/config", DISCOVERY_PREFIX, entity_type, self.device_name, name);
+        let topic = format!(
+            "{}/{}/{}/{}/config",
+            DISCOVERY_PREFIX, entity_type, self.device_name, name
+        );
         // Empty payload removes the entity from HA
-        let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, "").await;
+        let _ = self
+            .client
+            .publish(&topic, QoS::AtLeastOnce, true, "")
+            .await;
     }
 
     /// Helper to register a single sensor
-    async fn register_sensor(&self, device: &HADevice, name: &str, display_name: &str, icon: &str, device_class: Option<&str>, unit: Option<&str>) {
-        self.register_sensor_internal(device, name, display_name, icon, device_class, unit, false).await;
+    async fn register_sensor(
+        &self,
+        device: &HADevice,
+        name: &str,
+        display_name: &str,
+        icon: &str,
+        device_class: Option<&str>,
+        unit: Option<&str>,
+    ) {
+        self.register_sensor_internal(device, name, display_name, icon, device_class, unit, false)
+            .await;
     }
-    
+
     /// Helper to register a sensor with JSON attributes support
-    async fn register_sensor_with_attributes(&self, device: &HADevice, name: &str, display_name: &str, icon: &str, device_class: Option<&str>, unit: Option<&str>) {
-        self.register_sensor_internal(device, name, display_name, icon, device_class, unit, true).await;
+    async fn register_sensor_with_attributes(
+        &self,
+        device: &HADevice,
+        name: &str,
+        display_name: &str,
+        icon: &str,
+        device_class: Option<&str>,
+        unit: Option<&str>,
+    ) {
+        self.register_sensor_internal(device, name, display_name, icon, device_class, unit, true)
+            .await;
     }
 
     /// Internal helper to register a sensor
     #[allow(clippy::too_many_arguments)]
-    async fn register_sensor_internal(&self, device: &HADevice, name: &str, display_name: &str, icon: &str, device_class: Option<&str>, unit: Option<&str>, with_attributes: bool) {
+    async fn register_sensor_internal(
+        &self,
+        device: &HADevice,
+        name: &str,
+        display_name: &str,
+        icon: &str,
+        device_class: Option<&str>,
+        unit: Option<&str>,
+        with_attributes: bool,
+    ) {
         let payload = HADiscoveryPayload {
             name: display_name.to_string(),
             unique_id: format!("{}_{}", self.device_id, name),
             state_topic: Some(self.sensor_topic(name)),
             command_topic: None,
             availability_topic: Some(self.availability_topic()),
-            json_attributes_topic: if with_attributes { Some(self.sensor_attributes_topic(name)) } else { None },
+            json_attributes_topic: if with_attributes {
+                Some(self.sensor_attributes_topic(name))
+            } else {
+                None
+            },
             device: device.clone(),
             icon: Some(icon.to_string()),
             device_class: device_class.map(|s| s.to_string()),
             unit_of_measurement: unit.map(|s| s.to_string()),
         };
 
-        let topic = format!("{}/sensor/{}/{}/config", DISCOVERY_PREFIX, self.device_name, name);
+        let topic = format!(
+            "{}/sensor/{}/{}/config",
+            DISCOVERY_PREFIX, self.device_name, name
+        );
         let json = serde_json::to_string(&payload).unwrap();
-        let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
+        let _ = self
+            .client
+            .publish(&topic, QoS::AtLeastOnce, true, json)
+            .await;
     }
 
     /// Register notify service for MQTT discovery
     async fn register_notify_service(&self, device: &HADevice) {
         // The notify platform expects command_topic to receive messages
         let notify_topic = format!("pc-bridge/notifications/{}", self.device_name);
-        
+
         let payload = serde_json::json!({
             "name": "Notification",
             "unique_id": format!("{}_notify", self.device_id),
@@ -473,8 +638,11 @@ impl MqttClient {
 
         let topic = format!("{}/notify/{}/config", DISCOVERY_PREFIX, self.device_name);
         let json = serde_json::to_string(&payload).unwrap();
-        let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
-        
+        let _ = self
+            .client
+            .publish(&topic, QoS::AtLeastOnce, true, json)
+            .await;
+
         debug!("Registered notify service");
     }
 
@@ -483,8 +651,11 @@ impl MqttClient {
         for sensor in sensors {
             let topic_name = format!("custom_{}", sensor.name);
             let display_name = format!("Custom: {}", sensor.name);
-            let icon = sensor.icon.clone().unwrap_or_else(|| "mdi:gauge".to_string());
-            
+            let icon = sensor
+                .icon
+                .clone()
+                .unwrap_or_else(|| "mdi:gauge".to_string());
+
             let payload = HADiscoveryPayload {
                 name: display_name,
                 unique_id: format!("{}_{}", self.device_id, topic_name),
@@ -504,24 +675,36 @@ impl MqttClient {
                 json_attributes_topic: None,
             };
 
-            let topic = format!("{}/sensor/{}/{}/config", DISCOVERY_PREFIX, self.device_name, topic_name);
+            let topic = format!(
+                "{}/sensor/{}/{}/config",
+                DISCOVERY_PREFIX, self.device_name, topic_name
+            );
             let json = serde_json::to_string(&payload).unwrap();
-            let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
-            
+            let _ = self
+                .client
+                .publish(&topic, QoS::AtLeastOnce, true, json)
+                .await;
+
             debug!("Registered custom sensor: {}", sensor.name);
         }
-        
+
         if !sensors.is_empty() {
-            info!("Registered {} custom sensor(s) for HA discovery", sensors.len());
+            info!(
+                "Registered {} custom sensor(s) for HA discovery",
+                sensors.len()
+            );
         }
     }
 
     /// Register custom commands for MQTT discovery and subscribe to their topics
     pub async fn register_custom_commands(&self, commands: &[CustomCommand]) {
         for cmd in commands {
-            let icon = cmd.icon.clone().unwrap_or_else(|| "mdi:console".to_string());
+            let icon = cmd
+                .icon
+                .clone()
+                .unwrap_or_else(|| "mdi:console".to_string());
             let display_name = format!("Custom: {}", cmd.name);
-            
+
             let payload = HADiscoveryPayload {
                 name: display_name,
                 unique_id: format!("{}_custom_{}", self.device_id, cmd.name),
@@ -541,47 +724,76 @@ impl MqttClient {
                 json_attributes_topic: None,
             };
 
-            let topic = format!("{}/button/{}/{}/config", DISCOVERY_PREFIX, self.device_name, cmd.name);
+            let topic = format!(
+                "{}/button/{}/{}/config",
+                DISCOVERY_PREFIX, self.device_name, cmd.name
+            );
             let json = serde_json::to_string(&payload).unwrap();
-            let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
-            
+            let _ = self
+                .client
+                .publish(&topic, QoS::AtLeastOnce, true, json)
+                .await;
+
             // Subscribe to command topic
             let cmd_topic = self.command_topic(&cmd.name);
             if let Err(e) = self.client.subscribe(&cmd_topic, QoS::AtLeastOnce).await {
-                error!("Failed to subscribe to custom command {}: {:?}", cmd.name, e);
+                error!(
+                    "Failed to subscribe to custom command {}: {:?}",
+                    cmd.name, e
+                );
             }
-            
+
             debug!("Registered custom command: {}", cmd.name);
         }
-        
+
         if !commands.is_empty() {
-            info!("Registered {} custom command(s) for HA discovery", commands.len());
+            info!(
+                "Registered {} custom command(s) for HA discovery",
+                commands.len()
+            );
         }
     }
 
     /// Build list of topics to subscribe to (for initial subscription and reconnection)
     fn build_subscribe_topics(device_name: &str, config: &Config) -> Vec<String> {
         let mut topics = Vec::new();
-        
+
         // Core commands
         let commands = [
-            "Launch", "Screensaver", "Wake", "Shutdown", "sleep", 
-            "Lock", "Hibernate", "Restart",
-            "discord_join", "discord_leave_channel"
+            "Launch",
+            "Screensaver",
+            "Wake",
+            "Shutdown",
+            "sleep",
+            "Lock",
+            "Hibernate",
+            "Restart",
+            "discord_join",
+            "discord_leave_channel",
         ];
-        
+
         for cmd in commands {
-            topics.push(format!("{}/button/{}/{}/action", DISCOVERY_PREFIX, device_name, cmd));
+            topics.push(format!(
+                "{}/button/{}/{}/action",
+                DISCOVERY_PREFIX, device_name, cmd
+            ));
         }
-        
+
         // Audio commands if enabled
         if config.features.audio_control {
             let audio_commands = [
-                "media_play_pause", "media_next", "media_previous", "media_stop",
-                "volume_set", "volume_mute"
+                "media_play_pause",
+                "media_next",
+                "media_previous",
+                "media_stop",
+                "volume_set",
+                "volume_mute",
             ];
             for cmd in audio_commands {
-                topics.push(format!("{}/button/{}/{}/action", DISCOVERY_PREFIX, device_name, cmd));
+                topics.push(format!(
+                    "{}/button/{}/{}/action",
+                    DISCOVERY_PREFIX, device_name, cmd
+                ));
             }
         }
 
@@ -589,10 +801,13 @@ impl MqttClient {
         if config.features.notifications {
             topics.push(format!("pc-bridge/notifications/{}", device_name));
         }
-        
+
         // Custom commands
         for cmd in &config.custom_commands {
-            topics.push(format!("{}/button/{}/{}/action", DISCOVERY_PREFIX, device_name, cmd.name));
+            topics.push(format!(
+                "{}/button/{}/{}/action",
+                DISCOVERY_PREFIX, device_name, cmd.name
+            ));
         }
 
         topics
@@ -600,7 +815,7 @@ impl MqttClient {
 
     async fn subscribe_commands(&self, config: &Config) {
         let topics = Self::build_subscribe_topics(&self.device_name, config);
-        
+
         for topic in &topics {
             if let Err(e) = self.client.subscribe(topic, QoS::AtLeastOnce).await {
                 error!("Failed to subscribe to {}: {:?}", topic, e);
@@ -613,27 +828,39 @@ impl MqttClient {
     /// Publish a sensor value (non-retained)
     pub async fn publish_sensor(&self, name: &str, value: &str) {
         let topic = self.sensor_topic(name);
-        let _ = self.client.publish(&topic, QoS::AtLeastOnce, false, value).await;
+        let _ = self
+            .client
+            .publish(&topic, QoS::AtLeastOnce, false, value)
+            .await;
     }
 
     /// Publish a sensor value (retained)
     pub async fn publish_sensor_retained(&self, name: &str, value: &str) {
         let topic = self.sensor_topic(name);
-        let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, value).await;
+        let _ = self
+            .client
+            .publish(&topic, QoS::AtLeastOnce, true, value)
+            .await;
     }
 
     /// Publish availability status
     pub async fn publish_availability(&self, online: bool) {
         let topic = self.availability_topic();
         let value = if online { "online" } else { "offline" };
-        let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, value).await;
+        let _ = self
+            .client
+            .publish(&topic, QoS::AtLeastOnce, true, value)
+            .await;
     }
 
     /// Publish sensor attributes as JSON
     pub async fn publish_sensor_attributes(&self, name: &str, attributes: &serde_json::Value) {
         let topic = self.sensor_attributes_topic(name);
         let json = serde_json::to_string(attributes).unwrap_or_default();
-        let _ = self.client.publish(&topic, QoS::AtLeastOnce, true, json).await;
+        let _ = self
+            .client
+            .publish(&topic, QoS::AtLeastOnce, true, json)
+            .await;
     }
 
     // Topic helpers
@@ -646,15 +873,24 @@ impl MqttClient {
     }
 
     fn sensor_topic(&self, name: &str) -> String {
-        format!("{}/sensor/{}/{}/state", DISCOVERY_PREFIX, self.device_name, name)
+        format!(
+            "{}/sensor/{}/{}/state",
+            DISCOVERY_PREFIX, self.device_name, name
+        )
     }
 
     fn sensor_attributes_topic(&self, name: &str) -> String {
-        format!("{}/sensor/{}/{}/attributes", DISCOVERY_PREFIX, self.device_name, name)
+        format!(
+            "{}/sensor/{}/{}/attributes",
+            DISCOVERY_PREFIX, self.device_name, name
+        )
     }
 
     fn command_topic(&self, name: &str) -> String {
-        format!("{}/button/{}/{}/action", DISCOVERY_PREFIX, self.device_name, name)
+        format!(
+            "{}/button/{}/{}/action",
+            DISCOVERY_PREFIX, self.device_name, name
+        )
     }
 }
 
@@ -662,5 +898,128 @@ impl CommandReceiver {
     /// Receive next command (async)
     pub async fn recv(&mut self) -> Option<Command> {
         self.rx.recv().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ===== parse_broker_url tests =====
+
+    #[test]
+    fn test_parse_broker_url_tcp() {
+        let (host, port) = MqttClient::parse_broker_url("tcp://localhost:1883").unwrap();
+        assert_eq!(host, "localhost");
+        assert_eq!(port, 1883);
+    }
+
+    #[test]
+    fn test_parse_broker_url_ssl() {
+        let (host, port) = MqttClient::parse_broker_url("ssl://mqtt.example.com:8883").unwrap();
+        assert_eq!(host, "mqtt.example.com");
+        assert_eq!(port, 8883);
+    }
+
+    #[test]
+    fn test_parse_broker_url_ws() {
+        let (host, port) = MqttClient::parse_broker_url("ws://192.168.1.100:8083").unwrap();
+        assert_eq!(host, "192.168.1.100");
+        assert_eq!(port, 8083);
+    }
+
+    #[test]
+    fn test_parse_broker_url_wss() {
+        let (host, port) = MqttClient::parse_broker_url("wss://mqtt.example.com:8084").unwrap();
+        assert_eq!(host, "mqtt.example.com");
+        assert_eq!(port, 8084);
+    }
+
+    #[test]
+    fn test_parse_broker_url_default_port() {
+        let (host, port) = MqttClient::parse_broker_url("tcp://localhost").unwrap();
+        assert_eq!(host, "localhost");
+        assert_eq!(port, 1883);
+    }
+
+    #[test]
+    fn test_parse_broker_url_ipv4() {
+        let (host, port) = MqttClient::parse_broker_url("tcp://192.168.1.1:1883").unwrap();
+        assert_eq!(host, "192.168.1.1");
+        assert_eq!(port, 1883);
+    }
+
+    // ===== extract_command_name tests =====
+
+    #[test]
+    fn test_extract_command_name_button() {
+        let topic = "homeassistant/button/dank0i-pc/sleep/action";
+        let cmd = MqttClient::extract_command_name(topic, "dank0i-pc");
+        assert_eq!(cmd, Some("sleep".to_string()));
+    }
+
+    #[test]
+    fn test_extract_command_name_shutdown() {
+        let topic = "homeassistant/button/dank0i-pc/shutdown/action";
+        let cmd = MqttClient::extract_command_name(topic, "dank0i-pc");
+        assert_eq!(cmd, Some("shutdown".to_string()));
+    }
+
+    #[test]
+    fn test_extract_command_name_nested() {
+        let topic = "homeassistant/button/my-pc/launch_game/action";
+        let cmd = MqttClient::extract_command_name(topic, "my-pc");
+        assert_eq!(cmd, Some("launch_game".to_string()));
+    }
+
+    #[test]
+    fn test_extract_command_name_notification() {
+        let topic = "pc-bridge/notifications/dank0i-pc";
+        let cmd = MqttClient::extract_command_name(topic, "dank0i-pc");
+        assert_eq!(cmd, Some("notification".to_string()));
+    }
+
+    #[test]
+    fn test_extract_command_name_wrong_device() {
+        let topic = "homeassistant/button/other-pc/sleep/action";
+        let cmd = MqttClient::extract_command_name(topic, "dank0i-pc");
+        assert_eq!(cmd, None);
+    }
+
+    #[test]
+    fn test_extract_command_name_wrong_format() {
+        let topic = "homeassistant/sensor/dank0i-pc/state";
+        let cmd = MqttClient::extract_command_name(topic, "dank0i-pc");
+        assert_eq!(cmd, None);
+    }
+
+    // ===== Topic generation tests =====
+
+    #[test]
+    fn test_availability_topic_static() {
+        let topic = MqttClient::availability_topic_static("test-pc");
+        assert_eq!(topic, "homeassistant/sensor/test-pc/availability");
+    }
+
+    // ===== Command struct tests =====
+
+    #[test]
+    fn test_command_struct() {
+        let cmd = Command {
+            name: "sleep".to_string(),
+            payload: "".to_string(),
+        };
+        assert_eq!(cmd.name, "sleep");
+        assert!(cmd.payload.is_empty());
+    }
+
+    #[test]
+    fn test_command_with_payload() {
+        let cmd = Command {
+            name: "notification".to_string(),
+            payload: r#"{"title":"Test","message":"Hello"}"#.to_string(),
+        };
+        assert_eq!(cmd.name, "notification");
+        assert!(cmd.payload.contains("Test"));
     }
 }

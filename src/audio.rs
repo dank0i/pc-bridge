@@ -5,13 +5,9 @@
 #![allow(dead_code)] // Used on Windows only
 
 #[cfg(windows)]
-use windows::{
-    Win32::Media::Audio::*,
-    Win32::Media::Audio::Endpoints::*,
-    Win32::System::Com::*,
-};
-#[cfg(windows)]
 use std::sync::OnceLock;
+#[cfg(windows)]
+use windows::{Win32::Media::Audio::Endpoints::*, Win32::Media::Audio::*, Win32::System::Com::*};
 
 #[cfg(windows)]
 static COM_INITIALIZED: OnceLock<()> = OnceLock::new();
@@ -19,10 +15,8 @@ static COM_INITIALIZED: OnceLock<()> = OnceLock::new();
 /// Initialize COM once for the thread
 #[cfg(windows)]
 fn ensure_com_init() {
-    COM_INITIALIZED.get_or_init(|| {
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        }
+    COM_INITIALIZED.get_or_init(|| unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     });
 }
 
@@ -31,12 +25,12 @@ fn ensure_com_init() {
 pub fn get_volume() -> Option<f32> {
     ensure_com_init();
     unsafe {
-        let enumerator: IMMDeviceEnumerator = 
+        let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-        
+
         let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
         let volume: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None).ok()?;
-        
+
         let level = volume.GetMasterVolumeLevelScalar().ok()?;
         Some(level * 100.0)
         // COM objects dropped here via windows crate's Drop impl
@@ -48,23 +42,26 @@ pub fn get_volume() -> Option<f32> {
 pub fn set_volume(level: f32) -> bool {
     ensure_com_init();
     unsafe {
-        let enumerator: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
-            Ok(e) => e,
-            Err(_) => return false,
-        };
-        
+        let enumerator: IMMDeviceEnumerator =
+            match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+                Ok(e) => e,
+                Err(_) => return false,
+            };
+
         let device = match enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
             Ok(d) => d,
             Err(_) => return false,
         };
-        
+
         let volume: IAudioEndpointVolume = match device.Activate(CLSCTX_ALL, None) {
             Ok(v) => v,
             Err(_) => return false,
         };
-        
+
         let scalar = (level / 100.0).clamp(0.0, 1.0);
-        volume.SetMasterVolumeLevelScalar(scalar, std::ptr::null()).is_ok()
+        volume
+            .SetMasterVolumeLevelScalar(scalar, std::ptr::null())
+            .is_ok()
     }
 }
 
@@ -73,12 +70,12 @@ pub fn set_volume(level: f32) -> bool {
 pub fn get_mute() -> Option<bool> {
     ensure_com_init();
     unsafe {
-        let enumerator: IMMDeviceEnumerator = 
+        let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-        
+
         let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
         let volume: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None).ok()?;
-        
+
         let muted = volume.GetMute().ok()?;
         Some(muted.as_bool())
     }
@@ -89,21 +86,22 @@ pub fn get_mute() -> Option<bool> {
 pub fn set_mute(mute: bool) -> bool {
     ensure_com_init();
     unsafe {
-        let enumerator: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
-            Ok(e) => e,
-            Err(_) => return false,
-        };
-        
+        let enumerator: IMMDeviceEnumerator =
+            match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+                Ok(e) => e,
+                Err(_) => return false,
+            };
+
         let device = match enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
             Ok(d) => d,
             Err(_) => return false,
         };
-        
+
         let volume: IAudioEndpointVolume = match device.Activate(CLSCTX_ALL, None) {
             Ok(v) => v,
             Err(_) => return false,
         };
-        
+
         volume.SetMute(mute, std::ptr::null()).is_ok()
     }
 }
@@ -149,7 +147,7 @@ pub fn send_media_key(key: MediaKey) {
 
         // Key down
         SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
-        
+
         // Key up
         input.Anonymous.ki.dwFlags = KEYEVENTF_KEYUP;
         SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
@@ -193,7 +191,11 @@ pub fn get_volume() -> Option<f32> {
 #[cfg(unix)]
 pub fn set_volume(level: f32) -> bool {
     std::process::Command::new("pactl")
-        .args(["set-sink-volume", "@DEFAULT_SINK@", &format!("{}%", level as u32)])
+        .args([
+            "set-sink-volume",
+            "@DEFAULT_SINK@",
+            &format!("{}%", level as u32),
+        ])
         .spawn()
         .is_ok()
 }
@@ -213,7 +215,11 @@ pub fn get_mute() -> Option<bool> {
 #[cfg(unix)]
 pub fn set_mute(mute: bool) -> bool {
     std::process::Command::new("pactl")
-        .args(["set-sink-mute", "@DEFAULT_SINK@", if mute { "1" } else { "0" }])
+        .args([
+            "set-sink-mute",
+            "@DEFAULT_SINK@",
+            if mute { "1" } else { "0" },
+        ])
         .spawn()
         .is_ok()
 }
@@ -237,7 +243,7 @@ pub fn send_media_key(key: MediaKey) {
         MediaKey::VolumeDown => "XF86AudioLowerVolume",
         MediaKey::VolumeMute => "XF86AudioMute",
     };
-    
+
     let _ = std::process::Command::new("xdotool")
         .args(["key", key_name])
         .spawn();

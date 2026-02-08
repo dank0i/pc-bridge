@@ -1,13 +1,13 @@
 //! Idle time sensor - tracks last user input and screensaver state
 
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use std::sync::Arc;
-use chrono::{DateTime, Utc, Duration as ChronoDuration};
 use tokio::time::{interval, Duration};
 use tracing::debug;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
-use windows::Win32::System::SystemInformation::GetTickCount64;
-use windows::Win32::System::Diagnostics::ToolHelp::*;
 use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::System::Diagnostics::ToolHelp::*;
+use windows::Win32::System::SystemInformation::GetTickCount64;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 
 use crate::AppState;
 
@@ -32,13 +32,19 @@ impl IdleSensor {
 
         // Publish initial state
         let last_active = self.get_last_active_time();
-        self.state.mqtt.publish_sensor("lastactive", &last_active.to_rfc3339()).await;
-        
+        self.state
+            .mqtt
+            .publish_sensor("lastactive", &last_active.to_rfc3339())
+            .await;
+
         // Publish initial screensaver state (retained so HA picks it up)
         let screensaver_active = self.is_screensaver_running();
         let screensaver_state = if screensaver_active { "on" } else { "off" };
         debug!("Initial screensaver state: {}", screensaver_state);
-        self.state.mqtt.publish_sensor_retained("screensaver", screensaver_state).await;
+        self.state
+            .mqtt
+            .publish_sensor_retained("screensaver", screensaver_state)
+            .await;
         let mut prev_screensaver_state = screensaver_active;
 
         loop {
@@ -77,14 +83,14 @@ impl IdleSensor {
                 // dwTime is 32-bit, handle wrap correctly
                 let current_tick_32 = current_tick as u32;
                 let idle_ms = current_tick_32.wrapping_sub(lii.dwTime) as i64;
-                
+
                 Utc::now() - ChronoDuration::milliseconds(idle_ms)
             } else {
                 Utc::now()
             }
         }
     }
-    
+
     fn is_screensaver_running(&self) -> bool {
         // Use native ToolHelp API to check for .scr processes (~2-5ms vs 200-500ms for PowerShell)
         unsafe {
@@ -104,7 +110,7 @@ impl IdleSensor {
                     let name = String::from_utf16_lossy(&entry.szExeFile)
                         .trim_end_matches('\0')
                         .to_lowercase();
-                    
+
                     if name.ends_with(".scr") {
                         found = true;
                         break;

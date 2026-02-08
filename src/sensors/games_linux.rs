@@ -4,8 +4,8 @@
 //! 1. Steam auto-discovery (if Steam installed) - uses process name → app_id lookup
 //! 2. Manual config `games` map (pattern → game_id)
 
-use std::sync::Arc;
 use std::fs;
+use std::sync::Arc;
 use tokio::time::{interval, Duration};
 use tracing::{debug, error};
 
@@ -47,11 +47,17 @@ impl GameSensor {
     }
 
     async fn publish_game(&self, game_ids: &str, display_names: &str) {
-        self.state.mqtt.publish_sensor("runninggames", game_ids).await;
+        self.state
+            .mqtt
+            .publish_sensor("runninggames", game_ids)
+            .await;
         let attrs = serde_json::json!({
             "display_name": display_names
         });
-        self.state.mqtt.publish_sensor_attributes("runninggames", &attrs).await;
+        self.state
+            .mqtt
+            .publish_sensor_attributes("runninggames", &attrs)
+            .await;
     }
 
     async fn detect_game(&self) -> (String, String) {
@@ -102,7 +108,7 @@ impl GameSensor {
         for entry in fs::read_dir("/proc")? {
             let entry = entry?;
             let path = entry.path();
-            
+
             // Only process numeric directories (PIDs)
             if let Some(name) = path.file_name() {
                 if let Some(name_str) = name.to_str() {

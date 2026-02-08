@@ -13,10 +13,10 @@ use winreg::RegKey;
 use crate::AppState;
 
 /// StateFlags indicating a game is updating/downloading
-const STATE_UPDATE_RUNNING: u32 = 1024;      // 0x400
-const STATE_UPDATE_PAUSED: u32 = 2048;       // 0x800
-const STATE_DOWNLOADING: u32 = 524288;       // 0x80000
-const STATE_FULLY_INSTALLED: u32 = 4;        // Ready to play
+const STATE_UPDATE_RUNNING: u32 = 1024; // 0x400
+const STATE_UPDATE_PAUSED: u32 = 2048; // 0x800
+const STATE_DOWNLOADING: u32 = 524288; // 0x80000
+const STATE_FULLY_INSTALLED: u32 = 4; // Ready to play
 
 #[derive(Debug, Clone)]
 struct GameUpdateState {
@@ -53,15 +53,21 @@ impl SteamSensor {
 
         // Discover Steam library folders
         self.discover_library_folders();
-        
+
         if self.library_folders.is_empty() {
             warn!("No Steam library folders found, steam sensor disabled");
             // Publish initial "off" state
-            self.state.mqtt.publish_sensor_retained("steam_updating", "off").await;
+            self.state
+                .mqtt
+                .publish_sensor_retained("steam_updating", "off")
+                .await;
             return;
         }
 
-        info!("Found {} Steam library folder(s)", self.library_folders.len());
+        info!(
+            "Found {} Steam library folder(s)",
+            self.library_folders.len()
+        );
 
         // Publish initial state
         self.do_full_scan().await;
@@ -88,7 +94,7 @@ impl SteamSensor {
                     } else {
                         // Updates in progress - just check those specific games
                         self.do_targeted_scan().await;
-                        
+
                         // Periodic full scan even during updates (every 5 min)
                         if self.last_full_scan.elapsed() > Duration::from_secs(300) {
                             self.do_full_scan().await;
@@ -261,7 +267,7 @@ impl SteamSensor {
 
         for line in content.lines() {
             let trimmed = line.trim();
-            
+
             if trimmed.starts_with("\"appid\"") || trimmed.starts_with("\"AppID\"") {
                 if let Some(val) = self.extract_vdf_value(trimmed) {
                     app_id = val;
@@ -270,7 +276,8 @@ impl SteamSensor {
                 if let Some(val) = self.extract_vdf_value(trimmed) {
                     name = val;
                 }
-            } else if trimmed.starts_with("\"StateFlags\"") || trimmed.starts_with("\"stateflags\"") {
+            } else if trimmed.starts_with("\"StateFlags\"") || trimmed.starts_with("\"stateflags\"")
+            {
                 if let Some(val) = self.extract_vdf_value(trimmed) {
                     state_flags = val.parse().unwrap_or(0);
                 }
@@ -301,7 +308,7 @@ impl SteamSensor {
 
     fn is_updating(&self, game: &GameUpdateState) -> bool {
         let flags = game.state_flags;
-        
+
         // Check if any update-related flag is set
         if flags & STATE_UPDATE_RUNNING != 0 {
             return true;
@@ -312,7 +319,7 @@ impl SteamSensor {
         if flags & STATE_DOWNLOADING != 0 {
             return true;
         }
-        
+
         // If not fully installed (~4), something is in progress
         // But be careful - newly added games might have 0
         if flags != 0 && flags != STATE_FULLY_INSTALLED {
@@ -326,23 +333,36 @@ impl SteamSensor {
     async fn publish_state(&self) {
         let is_updating = !self.updating_games.is_empty();
         let state_str = if is_updating { "on" } else { "off" };
-        
-        self.state.mqtt.publish_sensor_retained("steam_updating", state_str).await;
+
+        self.state
+            .mqtt
+            .publish_sensor_retained("steam_updating", state_str)
+            .await;
 
         // Publish attributes with game names
         if is_updating {
-            let names: Vec<&str> = self.updating_games.values().map(|g| g.name.as_str()).collect();
+            let names: Vec<&str> = self
+                .updating_games
+                .values()
+                .map(|g| g.name.as_str())
+                .collect();
             let attrs = serde_json::json!({
                 "updating_games": names,
                 "count": self.updating_games.len()
             });
-            self.state.mqtt.publish_sensor_attributes("steam_updating", &attrs).await;
+            self.state
+                .mqtt
+                .publish_sensor_attributes("steam_updating", &attrs)
+                .await;
         } else {
             let attrs = serde_json::json!({
                 "updating_games": [],
                 "count": 0
             });
-            self.state.mqtt.publish_sensor_attributes("steam_updating", &attrs).await;
+            self.state
+                .mqtt
+                .publish_sensor_attributes("steam_updating", &attrs)
+                .await;
         }
     }
 }

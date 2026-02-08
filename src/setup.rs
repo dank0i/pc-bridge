@@ -60,7 +60,13 @@ fn clear_screen() {
         if GetConsoleScreenBufferInfo(handle, &mut info).is_ok() {
             let size = info.dwSize.X as u32 * info.dwSize.Y as u32;
             let mut written = 0;
-            let _ = FillConsoleOutputCharacterA(handle, b' ' as i8, size, Default::default(), &mut written);
+            let _ = FillConsoleOutputCharacterA(
+                handle,
+                b' ' as i8,
+                size,
+                Default::default(),
+                &mut written,
+            );
             let _ = SetConsoleCursorPosition(handle, Default::default());
         }
     }
@@ -76,7 +82,12 @@ fn print_header(title: &str) {
     let width = 44;
     let padding = (width - 2 - title.len()) / 2;
     println!("╔{}╗", "═".repeat(width - 2));
-    println!("║{}{}{} ║", " ".repeat(padding), title, " ".repeat(width - 3 - padding - title.len()));
+    println!(
+        "║{}{}{} ║",
+        " ".repeat(padding),
+        title,
+        " ".repeat(width - 3 - padding - title.len())
+    );
     println!("╚{}╝", "═".repeat(width - 2));
     println!();
 }
@@ -136,7 +147,7 @@ fn run_wizard_flow() -> Option<SetupConfig> {
         println!("  • Lowercase recommended");
         println!();
         let input = read_input(&format!("  Name [{}]: ", config.device_name));
-        
+
         if input.is_empty() {
             break; // Use default
         } else if input.contains(' ') {
@@ -185,30 +196,51 @@ fn run_wizard_flow() -> Option<SetupConfig> {
         println!("  Select which features to enable.");
         println!("  Type a number to toggle, Enter when done.");
         println!();
-        println!("  [1] {} Game Detection", if config.game_detection { "✓" } else { "○" });
+        println!(
+            "  [1] {} Game Detection",
+            if config.game_detection { "✓" } else { "○" }
+        );
         println!("      Detect running games, report to HA");
         println!();
-        println!("  [2] {} Idle Tracking", if config.idle_tracking { "✓" } else { "○" });
+        println!(
+            "  [2] {} Idle Tracking",
+            if config.idle_tracking { "✓" } else { "○" }
+        );
         println!("      Track keyboard/mouse activity");
         println!();
-        println!("  [3] {} Power Events", if config.power_events { "✓" } else { "○" });
+        println!(
+            "  [3] {} Power Events",
+            if config.power_events { "✓" } else { "○" }
+        );
         println!("      Report sleep/wake/shutdown");
         println!();
-        println!("  [4] {} Notifications", if config.notifications { "✓" } else { "○" });
+        println!(
+            "  [4] {} Notifications",
+            if config.notifications { "✓" } else { "○" }
+        );
         println!("      Receive toast notifications from HA");
         println!();
-        println!("  [5] {} System Sensors", if config.system_sensors { "✓" } else { "○" });
+        println!(
+            "  [5] {} System Sensors",
+            if config.system_sensors { "✓" } else { "○" }
+        );
         println!("      CPU, memory, battery, active window");
         println!();
-        println!("  [6] {} Audio Control", if config.audio_control { "✓" } else { "○" });
+        println!(
+            "  [6] {} Audio Control",
+            if config.audio_control { "✓" } else { "○" }
+        );
         println!("      Volume, mute, media keys");
         println!();
-        println!("  [7] {} Steam Updates", if config.steam_updates { "✓" } else { "○" });
+        println!(
+            "  [7] {} Steam Updates",
+            if config.steam_updates { "✓" } else { "○" }
+        );
         println!("      Detect when Steam games are updating");
         println!();
 
         let input = read_input("  Toggle (1-7) or Enter to continue: ");
-        
+
         match input.as_str() {
             "1" => config.game_detection = !config.game_detection,
             "2" => config.idle_tracking = !config.idle_tracking,
@@ -227,16 +259,44 @@ fn run_wizard_flow() -> Option<SetupConfig> {
     print_header("Confirm Configuration");
     println!("  Device:   {}", config.device_name);
     println!("  Broker:   {}", config.mqtt_broker);
-    println!("  Auth:     {}", if config.mqtt_user.is_empty() { "none" } else { "configured" });
+    println!(
+        "  Auth:     {}",
+        if config.mqtt_user.is_empty() {
+            "none"
+        } else {
+            "configured"
+        }
+    );
     println!();
     println!("  Features:");
-    println!("    {} Game Detection", if config.game_detection { "✓" } else { "✗" });
-    println!("    {} Idle Tracking", if config.idle_tracking { "✓" } else { "✗" });
-    println!("    {} Power Events", if config.power_events { "✓" } else { "✗" });
-    println!("    {} Notifications", if config.notifications { "✓" } else { "✗" });
-    println!("    {} System Sensors", if config.system_sensors { "✓" } else { "✗" });
-    println!("    {} Audio Control", if config.audio_control { "✓" } else { "✗" });
-    println!("    {} Steam Updates", if config.steam_updates { "✓" } else { "✗" });
+    println!(
+        "    {} Game Detection",
+        if config.game_detection { "✓" } else { "✗" }
+    );
+    println!(
+        "    {} Idle Tracking",
+        if config.idle_tracking { "✓" } else { "✗" }
+    );
+    println!(
+        "    {} Power Events",
+        if config.power_events { "✓" } else { "✗" }
+    );
+    println!(
+        "    {} Notifications",
+        if config.notifications { "✓" } else { "✗" }
+    );
+    println!(
+        "    {} System Sensors",
+        if config.system_sensors { "✓" } else { "✗" }
+    );
+    println!(
+        "    {} Audio Control",
+        if config.audio_control { "✓" } else { "✗" }
+    );
+    println!(
+        "    {} Steam Updates",
+        if config.steam_updates { "✓" } else { "✗" }
+    );
     println!();
 
     let input = read_input("  Save configuration? [Y/n]: ");
@@ -281,16 +341,14 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
         custom_commands: Vec::new(),
     };
 
-    let config_path = crate::config::Config::config_path()
-        .map_err(std::io::Error::other)?;
+    let config_path = crate::config::Config::config_path().map_err(std::io::Error::other)?;
 
     // Create directory if needed
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let json = serde_json::to_string_pretty(&full_config)
-        .map_err(std::io::Error::other)?;
+    let json = serde_json::to_string_pretty(&full_config).map_err(std::io::Error::other)?;
 
     std::fs::write(&config_path, json)?;
 

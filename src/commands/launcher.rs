@@ -51,7 +51,7 @@ pub fn expand_launcher_shortcut(cmd: &str) -> Option<String> {
 
             // Split path and arguments at .exe or .lnk
             let (exe_path, exe_args) = split_exe_args(arg);
-            
+
             // Quote path if it contains spaces
             let exe_path = if exe_path.contains(' ') && !exe_path.starts_with('"') {
                 format!(r#""{}""#, exe_path)
@@ -60,7 +60,10 @@ pub fn expand_launcher_shortcut(cmd: &str) -> Option<String> {
             };
 
             if let Some(args) = exe_args {
-                Some(format!(r#"Start-Process {} -ArgumentList '{}'"#, exe_path, args))
+                Some(format!(
+                    r#"Start-Process {} -ArgumentList '{}'"#,
+                    exe_path, args
+                ))
             } else {
                 Some(format!(r#"Start-Process {}"#, exe_path))
             }
@@ -87,19 +90,19 @@ pub fn expand_launcher_shortcut(cmd: &str) -> Option<String> {
 /// e.g., "C:\Games\Game.exe -fullscreen" → ("C:\Games\Game.exe", Some("-fullscreen"))
 fn split_exe_args(arg: &str) -> (&str, Option<&str>) {
     let lower = arg.to_lowercase();
-    
+
     if let Some(idx) = lower.find(".exe ") {
         let path = &arg[..idx + 4];
         let args = arg[idx + 5..].trim();
         return (path, if args.is_empty() { None } else { Some(args) });
     }
-    
+
     if let Some(idx) = lower.find(".lnk ") {
         let path = &arg[..idx + 4];
         let args = arg[idx + 5..].trim();
         return (path, if args.is_empty() { None } else { Some(args) });
     }
-    
+
     (arg, None)
 }
 
@@ -110,16 +113,17 @@ fn is_numeric(s: &str) -> bool {
 
 /// Check if string is a safe identifier (alphanumeric with .-_)
 fn is_safe_identifier(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| {
-        c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_'
-    })
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
 }
 
 /// Check if path doesn't contain dangerous shell metacharacters
 fn is_safe_path(s: &str) -> bool {
-    !s.is_empty() && !s.chars().any(|c| {
-        matches!(c, ';' | '|' | '&' | '$' | '`' | '"' | '\'' | '\n' | '\r')
-    })
+    !s.is_empty()
+        && !s
+            .chars()
+            .any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '"' | '\'' | '\n' | '\r'))
 }
 
 #[cfg(test)]

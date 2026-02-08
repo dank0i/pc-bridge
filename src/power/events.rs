@@ -3,15 +3,15 @@
 //! Uses atomic state machine to ensure exactly one sleep and one wake event
 //! per actual power state transition, regardless of how many Windows messages arrive.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{info, debug, error};
+use tracing::{debug, error, info};
 use windows::Win32::Foundation::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::AppState;
 use super::display::wake_display_with_retry;
+use crate::AppState;
 
 const WM_POWERBROADCAST: u32 = 0x218;
 const PBT_APMSUSPEND: usize = 4;
@@ -31,13 +31,17 @@ static POWER_STATE: AtomicU8 = AtomicU8::new(0); // Start awake
 /// Attempt to transition from awake (0) to sleeping (1).
 /// Returns true only if this call performed the transition.
 fn try_transition_to_sleep() -> bool {
-    POWER_STATE.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+    POWER_STATE
+        .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
 }
 
 /// Attempt to transition from sleeping (1) to awake (0).
 /// Returns true only if this call performed the transition.
 fn try_transition_to_awake() -> bool {
-    POWER_STATE.compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+    POWER_STATE
+        .compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
 }
 
 pub struct PowerEventListener {
@@ -56,7 +60,7 @@ impl PowerEventListener {
         // Spawn blocking thread for Windows message pump
         let stopped = Arc::new(AtomicBool::new(false));
         let stopped_clone = Arc::clone(&stopped);
-        
+
         std::thread::spawn(move || {
             Self::message_pump(event_tx, stopped_clone);
         });
@@ -79,7 +83,7 @@ impl PowerEventListener {
                             info!("Power event: WAKE");
                             // Wake display first
                             wake_display_with_retry(3, std::time::Duration::from_millis(500));
-                            
+
                             // Publish wake state with retries (network may take time)
                             self.publish_wake_with_retry().await;
                         }
@@ -91,20 +95,26 @@ impl PowerEventListener {
 
     async fn publish_wake_with_retry(&self) {
         // Publish immediately
-        self.state.mqtt.publish_sensor_retained("sleep_state", "awake").await;
+        self.state
+            .mqtt
+            .publish_sensor_retained("sleep_state", "awake")
+            .await;
         info!("Published awake state");
-        
+
         // Also publish after delays in case network was slow to reconnect
         for delay_secs in [2, 5, 10] {
             tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
-            self.state.mqtt.publish_sensor_retained("sleep_state", "awake").await;
+            self.state
+                .mqtt
+                .publish_sensor_retained("sleep_state", "awake")
+                .await;
         }
     }
 
     fn message_pump(event_tx: mpsc::Sender<PowerEvent>, stopped: Arc<AtomicBool>) {
         unsafe {
             let class_name = windows::core::w!("PCAgentPowerMonitor");
-            
+
             let wc = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 lpfnWndProc: Some(Self::wnd_proc),
@@ -120,7 +130,10 @@ impl PowerEventListener {
                 class_name,
                 windows::core::w!("PC Agent Power Monitor"),
                 WINDOW_STYLE::default(),
-                0, 0, 0, 0,
+                0,
+                0,
+                0,
+                0,
                 None,
                 None,
                 None,
@@ -137,7 +150,7 @@ impl PowerEventListener {
             let event_tx_box = Box::new(event_tx);
             let event_tx_ptr = Box::into_raw(event_tx_box);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, event_tx_ptr as isize);
-            
+
             info!("Power event listener started (hwnd: {:?})", hwnd);
 
             // Message loop
@@ -146,7 +159,7 @@ impl PowerEventListener {
                 if stopped.load(Ordering::SeqCst) {
                     break;
                 }
-                
+
                 let ret = PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE);
                 if ret.as_bool() {
                     if msg.message == WM_QUIT {
@@ -172,11 +185,12 @@ impl PowerEventListener {
         lparam: LPARAM,
     ) -> LRESULT {
         if msg == WM_POWERBROADCAST {
-            let event_tx_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const mpsc::Sender<PowerEvent>;
-            
+            let event_tx_ptr =
+                GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const mpsc::Sender<PowerEvent>;
+
             if !event_tx_ptr.is_null() {
                 let event_tx = &*event_tx_ptr;
-                
+
                 match wparam.0 {
                     PBT_APMSUSPEND => {
                         debug!("Received PBT_APMSUSPEND");

@@ -2,10 +2,10 @@
 
 use std::path::PathBuf;
 use tokio::sync::broadcast;
-use tracing::{info, error, debug};
+use tracing::{debug, error, info};
 
-use tray_icon::{TrayIconBuilder, Icon};
-use muda::{Menu, MenuItem, MenuEvent, PredefinedMenuItem};
+use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::{Icon, TrayIconBuilder};
 
 // Icon embedded in binary (ICO for Windows, will decode PNG from it)
 const ICON_BYTES: &[u8] = include_bytes!("../assets/icon.ico");
@@ -54,17 +54,15 @@ pub fn run_tray(shutdown_tx: broadcast::Sender<()>, config_path: PathBuf) {
 
     // Handle menu events in a separate thread
     let shutdown_tx_clone = shutdown_tx.clone();
-    std::thread::spawn(move || {
-        loop {
-            if let Ok(event) = MenuEvent::receiver().recv() {
-                if event.id == open_config_id {
-                    debug!("Tray: Open configuration clicked");
-                    open_config_file(&config_path);
-                } else if event.id == exit_id {
-                    info!("Tray: Exit clicked");
-                    let _ = shutdown_tx_clone.send(());
-                    break;
-                }
+    std::thread::spawn(move || loop {
+        if let Ok(event) = MenuEvent::receiver().recv() {
+            if event.id == open_config_id {
+                debug!("Tray: Open configuration clicked");
+                open_config_file(&config_path);
+            } else if event.id == exit_id {
+                info!("Tray: Exit clicked");
+                let _ = shutdown_tx_clone.send(());
+                break;
             }
         }
     });
@@ -79,7 +77,7 @@ pub fn run_tray(shutdown_tx: broadcast::Sender<()>, config_path: PathBuf) {
 #[cfg(windows)]
 fn run_message_loop(shutdown_tx: &broadcast::Sender<()>) {
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetMessageW, TranslateMessage, DispatchMessageW, MSG,
+        DispatchMessageW, GetMessageW, TranslateMessage, MSG,
     };
 
     unsafe {
@@ -106,7 +104,7 @@ fn run_message_loop(shutdown_tx: &broadcast::Sender<()>) {
     // On Linux, tray-icon uses GTK which requires a main loop
     // For now, just sleep and check for shutdown
     use std::time::Duration;
-    
+
     loop {
         std::thread::sleep(Duration::from_millis(100));
         if shutdown_tx.receiver_count() == 0 {
@@ -142,8 +140,16 @@ fn decode_ico(data: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
             break;
         }
 
-        let width = if data[offset] == 0 { 256 } else { data[offset] as u32 };
-        let height = if data[offset + 1] == 0 { 256 } else { data[offset + 1] as u32 };
+        let width = if data[offset] == 0 {
+            256
+        } else {
+            data[offset] as u32
+        };
+        let height = if data[offset + 1] == 0 {
+            256
+        } else {
+            data[offset + 1] as u32
+        };
         let size = width * height;
 
         if size > best_size {
@@ -182,15 +188,17 @@ fn decode_ico(data: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
 
 fn decode_png(data: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let decoder = png::Decoder::new(std::io::Cursor::new(data));
-    let mut reader = decoder.read_info()
+    let mut reader = decoder
+        .read_info()
         .map_err(|e| anyhow::anyhow!("PNG decode error: {}", e))?;
-    
+
     let mut buf = vec![0; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut buf)
+    let info = reader
+        .next_frame(&mut buf)
         .map_err(|e| anyhow::anyhow!("PNG frame error: {}", e))?;
-    
+
     buf.truncate(info.buffer_size());
-    
+
     // Convert to RGBA if needed
     let rgba = match info.color_type {
         png::ColorType::Rgba => buf,
@@ -204,7 +212,7 @@ fn decode_png(data: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
         }
         _ => anyhow::bail!("Unsupported PNG color type: {:?}", info.color_type),
     };
-    
+
     Ok((rgba, info.width, info.height))
 }
 
@@ -239,9 +247,9 @@ fn decode_bmp_dib(data: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
         for x in 0..width as usize {
             let src = src_row + x * 4;
             let dst = dst_row + x * 4;
-            rgba[dst] = pixel_data[src + 2];     // R
+            rgba[dst] = pixel_data[src + 2]; // R
             rgba[dst + 1] = pixel_data[src + 1]; // G
-            rgba[dst + 2] = pixel_data[src];     // B
+            rgba[dst + 2] = pixel_data[src]; // B
             rgba[dst + 3] = pixel_data[src + 3]; // A
         }
     }
@@ -255,14 +263,15 @@ fn open_config_file(path: &PathBuf) {
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    
-    let path_wide: Vec<u16> = path.to_string_lossy()
+
+    let path_wide: Vec<u16> = path
+        .to_string_lossy()
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
-    
+
     let operation: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
-    
+
     unsafe {
         ShellExecuteW(
             None,
@@ -279,15 +288,11 @@ fn open_config_file(path: &PathBuf) {
 #[cfg(unix)]
 fn open_config_file(path: &PathBuf) {
     use std::process::Command;
-    
+
     // Try xdg-open (Linux) then open (macOS)
-    let result = Command::new("xdg-open")
-        .arg(path)
-        .spawn();
-    
+    let result = Command::new("xdg-open").arg(path).spawn();
+
     if result.is_err() {
-        let _ = Command::new("open")
-            .arg(path)
-            .spawn();
+        let _ = Command::new("open").arg(path).spawn();
     }
 }

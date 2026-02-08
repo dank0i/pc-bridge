@@ -4,7 +4,7 @@ use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::info;
-use windows::Win32::Foundation::{WPARAM, LPARAM};
+use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -38,7 +38,7 @@ pub fn wake_display() {
 /// Dismiss screensaver by killing .scr processes via PowerShell
 fn dismiss_screensaver() {
     info!("Attempting to dismiss screensaver");
-    
+
     // Kill all screensaver processes (.scr) with PowerShell - matches Go version exactly
     let _ = std::process::Command::new("powershell")
         .args([
@@ -49,14 +49,17 @@ fn dismiss_screensaver() {
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .and_then(|mut child| child.wait());
-    
+
     info!("Screensaver dismiss attempted");
 }
 
 /// Wake display with retries (useful immediately after WoL)
 pub fn wake_display_with_retry(max_attempts: usize, delay_between: Duration) {
     let attempts = max_attempts.max(1);
-    info!("WakeDisplay: Starting wake sequence with {} attempts", attempts);
+    info!(
+        "WakeDisplay: Starting wake sequence with {} attempts",
+        attempts
+    );
 
     for attempt in 1..=attempts {
         dismiss_screensaver();
@@ -103,9 +106,10 @@ fn prevent_sleep_temporary(duration: Duration) {
     use windows::Win32::System::Power::*;
 
     // Only spawn one prevention goroutine at a time
-    if !SLEEP_PREVENTION_ACTIVE.compare_exchange(
-        false, true, Ordering::SeqCst, Ordering::SeqCst
-    ).is_ok() {
+    if !SLEEP_PREVENTION_ACTIVE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
         return;
     }
 
@@ -114,7 +118,7 @@ fn prevent_sleep_temporary(duration: Duration) {
             // Set execution state to prevent sleep
             let state = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED;
             let ret = SetThreadExecutionState(state);
-            
+
             if ret == EXECUTION_STATE::default() {
                 SLEEP_PREVENTION_ACTIVE.store(false, Ordering::SeqCst);
                 return;

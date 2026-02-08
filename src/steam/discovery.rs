@@ -10,10 +10,10 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, UNIX_EPOCH};
-use tracing::{info, debug, warn};
+use tracing::{debug, info, warn};
 
-use super::vdf;
 use super::appinfo::AppInfoReader;
+use super::vdf;
 
 /// Cache file magic + version
 const CACHE_MAGIC: u32 = 0x50435354; // "PCST"
@@ -24,8 +24,8 @@ const CACHE_VERSION: u32 = 1;
 pub struct SteamGame {
     pub app_id: u32,
     pub name: String,
-    pub executable: String,      // e.g., "cs2.exe"
-    pub install_path: PathBuf,   // Full path to game folder
+    pub executable: String,    // e.g., "cs2.exe"
+    pub install_path: PathBuf, // Full path to game folder
 }
 
 /// Steam game discovery result
@@ -50,7 +50,7 @@ impl SteamGameDiscovery {
             .ok()
             .flatten()
     }
-    
+
     /// Discover all installed Steam games (blocking)
     ///
     /// # Performance
@@ -59,18 +59,21 @@ impl SteamGameDiscovery {
     /// - Memory: ~1KB per game + index overhead
     pub fn discover() -> Option<Self> {
         let start = Instant::now();
-        
+
         // Find Steam installation
         let steam_path = Self::find_steam_path()?;
         debug!("Steam path: {:?}", steam_path);
-        
+
         let appinfo_path = steam_path.join("appcache").join("appinfo.vdf");
-        
+
         // Try loading from cache first (but reject empty caches)
         if let Some(cached) = Self::load_cache(&appinfo_path) {
             if cached.game_count > 0 {
                 let build_time_ms = start.elapsed().as_millis() as u64;
-                info!("Steam discovery: {} games from cache in {}ms", cached.game_count, build_time_ms);
+                info!(
+                    "Steam discovery: {} games from cache in {}ms",
+                    cached.game_count, build_time_ms
+                );
                 return Some(Self {
                     build_time_ms,
                     from_cache: true,
@@ -80,23 +83,26 @@ impl SteamGameDiscovery {
                 debug!("Ignoring empty cache, doing fresh discovery");
             }
         }
-        
+
         // Full discovery
         let result = Self::discover_full(&steam_path, &appinfo_path)?;
-        
+
         // Save to cache
         Self::save_cache(&result, &appinfo_path);
-        
+
         let build_time_ms = start.elapsed().as_millis() as u64;
-        info!("Steam discovery: {} games in {}ms (cached for next run)", result.game_count, build_time_ms);
-        
+        info!(
+            "Steam discovery: {} games in {}ms (cached for next run)",
+            result.game_count, build_time_ms
+        );
+
         Some(Self {
             build_time_ms,
             from_cache: false,
             ..result
         })
     }
-    
+
     fn discover_full(steam_path: &Path, appinfo_path: &Path) -> Option<Self> {
         // Parse library folders - get paths AND app_ids in one pass
         let library_info = Self::get_library_info(steam_path)?;
@@ -104,7 +110,7 @@ impl SteamGameDiscovery {
         for (path, apps) in &library_info {
             info!("  Library: {} ({} apps)", path, apps.len());
         }
-        
+
         // Collect all installed app_ids with their library path
         let mut installed_apps: Vec<(u32, PathBuf)> = Vec::new();
         for (lib_path, app_ids) in &library_info {
@@ -113,12 +119,12 @@ impl SteamGameDiscovery {
             }
         }
         info!("Steam: {} total installed app_ids", installed_apps.len());
-        
+
         if installed_apps.is_empty() {
             info!("Steam: no installed apps found, skipping discovery");
             return None;
         }
-        
+
         // Open appinfo.vdf for name + executable lookup
         let mut appinfo = match AppInfoReader::open(appinfo_path) {
             Ok(reader) => {
@@ -130,38 +136,40 @@ impl SteamGameDiscovery {
                 return None;
             }
         };
-        
+
         // Log installed app_ids for debugging
         info!("Steam: looking up {} app_ids", installed_apps.len());
-        
+
         // Build process name → game mapping
         let mut games = HashMap::with_capacity(installed_apps.len());
         let mut from_appinfo = 0;
         let mut from_manifest = 0;
-        
+
         // Skip non-game app_ids (tools, redistributables, etc.)
         let skip_app_ids: &[u32] = &[
-            228980,  // Steamworks Common Redistributables
+            228980, // Steamworks Common Redistributables
         ];
-        
+
         for (app_id, library_path) in installed_apps {
             if skip_app_ids.contains(&app_id) {
                 continue;
             }
-            
+
             // Try appinfo.vdf first (fast)
             if let Some((name, executable)) = appinfo.get_game_info(app_id) {
-                if let Some(_key) = Self::add_game(&mut games, app_id, name, executable, &library_path) {
+                if let Some(_key) =
+                    Self::add_game(&mut games, app_id, name, executable, &library_path)
+                {
                     from_appinfo += 1;
                     continue;
                 }
             }
-            
+
             // Fallback: read appmanifest_<appid>.acf directly
             let manifest_path = library_path
                 .join("steamapps")
                 .join(format!("appmanifest_{}.acf", app_id));
-            
+
             if let Ok(content) = fs::read_to_string(&manifest_path) {
                 if let Some((_, name, installdir)) = vdf::extract_appmanifest_fields(&content) {
                     // Try to find executable in game folder
@@ -169,7 +177,7 @@ impl SteamGameDiscovery {
                         .join("steamapps")
                         .join("common")
                         .join(&installdir);
-                    
+
                     if let Some(exe) = Self::find_game_executable(&game_path) {
                         if Self::add_game(&mut games, app_id, name, exe, &library_path).is_some() {
                             from_manifest += 1;
@@ -178,11 +186,14 @@ impl SteamGameDiscovery {
                 }
             }
         }
-        
-        info!("Steam: {} from appinfo, {} from manifests", from_appinfo, from_manifest);
+
+        info!(
+            "Steam: {} from appinfo, {} from manifests",
+            from_appinfo, from_manifest
+        );
         let game_count = games.len();
         info!("Steam: {} unique games total", game_count);
-        
+
         Some(Self {
             games,
             build_time_ms: 0,
@@ -190,7 +201,7 @@ impl SteamGameDiscovery {
             from_cache: false,
         })
     }
-    
+
     /// Add a game to the map, returns the key if successful
     fn add_game(
         games: &mut HashMap<String, SteamGame>,
@@ -203,60 +214,68 @@ impl SteamGameDiscovery {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or(&executable);
-        
+
         // Key: lowercase exe name without extension
         let key = exe_name
             .strip_suffix(".exe")
             .unwrap_or(exe_name)
             .to_lowercase();
-        
+
         // Skip if empty key
         if key.is_empty() {
             return None;
         }
-        
-        let install_path = library_path
-            .join("steamapps")
-            .join("common");
-        
-        games.insert(key.clone(), SteamGame {
-            app_id,
-            name,
-            executable: exe_name.to_string(),
-            install_path,
-        });
-        
+
+        let install_path = library_path.join("steamapps").join("common");
+
+        games.insert(
+            key.clone(),
+            SteamGame {
+                app_id,
+                name,
+                executable: exe_name.to_string(),
+                install_path,
+            },
+        );
+
         Some(key)
     }
-    
+
     /// Find the main executable in a game folder
-    /// 
+    ///
     /// Strategy: find exe that matches folder name, or largest exe that looks like a game
     fn find_game_executable(game_path: &Path) -> Option<String> {
         if !game_path.is_dir() {
             return None;
         }
-        
+
         let folder_name = game_path.file_name()?.to_str()?.to_lowercase();
         let mut candidates: Vec<(String, u64, bool)> = Vec::new(); // (name, size, matches_folder)
-        
+
         // Search root and common subdirectories
         Self::scan_for_executables(game_path, &folder_name, &mut candidates);
-        
+
         // Common game exe locations
         let subdirs = [
-            "bin", "Binaries", "Binaries/Win64", "Binaries/Win64/Shipping",
-            "game/bin/win64", "x64", "game", "Win64", "Win64/Shipping",
-            "Engine/Binaries/Win64",  // Unreal games
+            "bin",
+            "Binaries",
+            "Binaries/Win64",
+            "Binaries/Win64/Shipping",
+            "game/bin/win64",
+            "x64",
+            "game",
+            "Win64",
+            "Win64/Shipping",
+            "Engine/Binaries/Win64", // Unreal games
         ];
-        
+
         for subdir in subdirs {
             let sub_path = game_path.join(subdir);
             if sub_path.is_dir() {
                 Self::scan_for_executables(&sub_path, &folder_name, &mut candidates);
             }
         }
-        
+
         // Also scan immediate subdirectories (one level deep)
         if let Ok(entries) = fs::read_dir(game_path) {
             for entry in entries.flatten() {
@@ -266,26 +285,36 @@ impl SteamGameDiscovery {
                 }
             }
         }
-        
+
         // Sort: prefer exact/short matches, avoid trial/demo, then by size
         candidates.sort_by(|a, b| {
             let a_lower = a.0.to_lowercase();
             let b_lower = b.0.to_lowercase();
-            
+
             // Penalize trial/demo/test versions
-            let a_trial = a_lower.contains("trial") || a_lower.contains("demo") || a_lower.contains("test") || a_lower.contains("benchmark");
-            let b_trial = b_lower.contains("trial") || b_lower.contains("demo") || b_lower.contains("test") || b_lower.contains("benchmark");
+            let a_trial = a_lower.contains("trial")
+                || a_lower.contains("demo")
+                || a_lower.contains("test")
+                || a_lower.contains("benchmark");
+            let b_trial = b_lower.contains("trial")
+                || b_lower.contains("demo")
+                || b_lower.contains("test")
+                || b_lower.contains("benchmark");
             if a_trial != b_trial {
-                return if a_trial { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Less };
+                return if a_trial {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Less
+                };
             }
-            
+
             // Prefer folder name matches
             match (a.2, b.2) {
                 (true, false) => return std::cmp::Ordering::Less,
                 (false, true) => return std::cmp::Ordering::Greater,
                 _ => {}
             }
-            
+
             // Among matches, prefer shorter names (closer to exact match)
             if a.2 && b.2 {
                 let len_cmp = a.0.len().cmp(&b.0.len());
@@ -293,41 +322,51 @@ impl SteamGameDiscovery {
                     return len_cmp;
                 }
             }
-            
+
             // Finally, prefer larger files
             b.1.cmp(&a.1)
         });
-        
+
         // Return best candidate if one was found
         if let Some((name, _, _)) = candidates.first() {
             return Some(name.clone());
         }
-        
+
         // Fallback: use folder name as exe name (e.g., "3DMark" -> "3DMark.exe")
         // This works even if the exe is deeply nested or not found
         let folder_name = game_path.file_name()?.to_str()?;
         Some(format!("{}.exe", folder_name))
     }
-    
+
     /// Scan a directory for game executables
-    fn scan_for_executables(dir: &Path, folder_name: &str, candidates: &mut Vec<(String, u64, bool)>) {
-        let Ok(entries) = fs::read_dir(dir) else { return };
-        
+    fn scan_for_executables(
+        dir: &Path,
+        folder_name: &str,
+        candidates: &mut Vec<(String, u64, bool)>,
+    ) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_file() {
                 continue;
             }
-            
-            let Some(ext) = path.extension() else { continue };
+
+            let Some(ext) = path.extension() else {
+                continue;
+            };
             if !ext.eq_ignore_ascii_case("exe") {
                 continue;
             }
-            
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
             let lower = name.to_lowercase();
             let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
-            
+
             // Skip common non-game executables
             if lower.contains("unins")
                 || lower.contains("crash")
@@ -365,26 +404,26 @@ impl SteamGameDiscovery {
             {
                 continue;
             }
-            
+
             let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            
+
             // Check if exe name matches folder name (fuzzy)
             // bf6 matches "Battlefield 6", cs2 matches "Counter-Strike 2", etc.
             let folder_clean = folder_name.replace(['-', '_', ' ', '.'], "").to_lowercase();
             let exe_clean = stem.replace(['-', '_', ' ', '.'], "").to_lowercase();
-            
+
             // Match if: folder contains exe OR exe contains folder OR they share significant overlap
             // Also match common abbreviation patterns (bf6 = battlefield6, cs2 = counterstrike2)
-            let matches = folder_clean.contains(&exe_clean) 
+            let matches = folder_clean.contains(&exe_clean)
                 || exe_clean.contains(&folder_clean)
                 || folder_clean.starts_with(&exe_clean)
                 || exe_clean.starts_with(&folder_clean)
                 || Self::abbreviation_matches(&exe_clean, &folder_clean);
-            
+
             candidates.push((name.to_string(), size, matches));
         }
     }
-    
+
     /// Check if exe name is an abbreviation of the folder name
     /// e.g., "bf6" matches "battlefield6", "cs2" matches "counterstrike2"
     fn abbreviation_matches(exe: &str, folder: &str) -> bool {
@@ -392,7 +431,7 @@ impl SteamGameDiscovery {
         if exe.len() > 8 || exe.len() >= folder.len() {
             return false;
         }
-        
+
         // Check if exe letters appear in order in folder
         // bf6 -> b...f...6 in "battlefield6"
         let mut folder_chars = folder.chars().peekable();
@@ -401,31 +440,36 @@ impl SteamGameDiscovery {
             loop {
                 match folder_chars.next() {
                     Some(fc) if fc == exe_char => break, // Found match
-                    Some(_) => continue, // Keep looking
-                    None => return false, // Not found
+                    Some(_) => continue,                 // Keep looking
+                    None => return false,                // Not found
                 }
             }
         }
         true
     }
-    
+
     // =========================================================================
     // Caching
     // =========================================================================
-    
+
     fn cache_path() -> Option<PathBuf> {
         #[cfg(windows)]
         {
-            std::env::var("LOCALAPPDATA").ok()
+            std::env::var("LOCALAPPDATA")
+                .ok()
                 .map(|p| PathBuf::from(p).join("pc-bridge").join("steam_cache.bin"))
         }
         #[cfg(unix)]
         {
-            std::env::var("HOME").ok()
-                .map(|p| PathBuf::from(p).join(".cache").join("pc-bridge").join("steam_cache.bin"))
+            std::env::var("HOME").ok().map(|p| {
+                PathBuf::from(p)
+                    .join(".cache")
+                    .join("pc-bridge")
+                    .join("steam_cache.bin")
+            })
         }
     }
-    
+
     fn get_file_mtime(path: &Path) -> Option<u64> {
         fs::metadata(path)
             .and_then(|m| m.modified())
@@ -433,51 +477,52 @@ impl SteamGameDiscovery {
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
     }
-    
+
     fn load_cache(appinfo_path: &Path) -> Option<Self> {
         let cache_path = Self::cache_path()?;
         let file = File::open(&cache_path).ok()?;
         let mut reader = BufReader::new(file);
-        
+
         // Read header
         let mut buf = [0u8; 4];
         reader.read_exact(&mut buf).ok()?;
         if u32::from_le_bytes(buf) != CACHE_MAGIC {
             return None;
         }
-        
+
         reader.read_exact(&mut buf).ok()?;
         if u32::from_le_bytes(buf) != CACHE_VERSION {
             return None;
         }
-        
+
         // Read stored mtime
         let mut buf8 = [0u8; 8];
         reader.read_exact(&mut buf8).ok()?;
         let cached_mtime = u64::from_le_bytes(buf8);
-        
+
         // Check if appinfo.vdf has changed
         let current_mtime = Self::get_file_mtime(appinfo_path)?;
         if current_mtime != cached_mtime {
             debug!("Cache invalidated: appinfo.vdf modified");
             return None;
         }
-        
+
         // Read game count
         reader.read_exact(&mut buf).ok()?;
         let game_count = u32::from_le_bytes(buf) as usize;
-        
+
         // Read games
         let mut games = HashMap::with_capacity(game_count);
         for _ in 0..game_count {
             let game = Self::read_game(&mut reader)?;
-            let key = game.executable
+            let key = game
+                .executable
                 .strip_suffix(".exe")
                 .unwrap_or(&game.executable)
                 .to_lowercase();
             games.insert(key, game);
         }
-        
+
         Some(Self {
             games,
             build_time_ms: 0,
@@ -485,35 +530,35 @@ impl SteamGameDiscovery {
             from_cache: true,
         })
     }
-    
+
     fn read_game(reader: &mut BufReader<File>) -> Option<SteamGame> {
         let mut buf4 = [0u8; 4];
-        
+
         // app_id
         reader.read_exact(&mut buf4).ok()?;
         let app_id = u32::from_le_bytes(buf4);
-        
+
         // name (length-prefixed)
         reader.read_exact(&mut buf4).ok()?;
         let len = u32::from_le_bytes(buf4) as usize;
         let mut name_buf = vec![0u8; len];
         reader.read_exact(&mut name_buf).ok()?;
         let name = String::from_utf8(name_buf).ok()?;
-        
+
         // executable (length-prefixed)
         reader.read_exact(&mut buf4).ok()?;
         let len = u32::from_le_bytes(buf4) as usize;
         let mut exe_buf = vec![0u8; len];
         reader.read_exact(&mut exe_buf).ok()?;
         let executable = String::from_utf8(exe_buf).ok()?;
-        
+
         // install_path (length-prefixed)
         reader.read_exact(&mut buf4).ok()?;
         let len = u32::from_le_bytes(buf4) as usize;
         let mut path_buf = vec![0u8; len];
         reader.read_exact(&mut path_buf).ok()?;
         let install_path = PathBuf::from(String::from_utf8(path_buf).ok()?);
-        
+
         Some(SteamGame {
             app_id,
             name,
@@ -521,78 +566,82 @@ impl SteamGameDiscovery {
             install_path,
         })
     }
-    
+
     fn save_cache(&self, appinfo_path: &Path) {
-        let Some(cache_path) = Self::cache_path() else { return };
-        
+        let Some(cache_path) = Self::cache_path() else {
+            return;
+        };
+
         // Create cache directory
         if let Some(parent) = cache_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        
-        let Ok(file) = File::create(&cache_path) else { return };
+
+        let Ok(file) = File::create(&cache_path) else {
+            return;
+        };
         let mut writer = BufWriter::new(file);
-        
+
         // Write header
         let _ = writer.write_all(&CACHE_MAGIC.to_le_bytes());
         let _ = writer.write_all(&CACHE_VERSION.to_le_bytes());
-        
+
         // Write appinfo.vdf mtime
         let mtime = Self::get_file_mtime(appinfo_path).unwrap_or(0);
         let _ = writer.write_all(&mtime.to_le_bytes());
-        
+
         // Write game count
         let _ = writer.write_all(&(self.game_count as u32).to_le_bytes());
-        
+
         // Write games
         for game in self.games.values() {
             Self::write_game(&mut writer, game);
         }
-        
+
         let _ = writer.flush();
         debug!("Saved Steam cache to {:?}", cache_path);
     }
-    
+
     fn write_game(writer: &mut BufWriter<File>, game: &SteamGame) {
         // app_id
         let _ = writer.write_all(&game.app_id.to_le_bytes());
-        
+
         // name
         let name_bytes = game.name.as_bytes();
         let _ = writer.write_all(&(name_bytes.len() as u32).to_le_bytes());
         let _ = writer.write_all(name_bytes);
-        
+
         // executable
         let exe_bytes = game.executable.as_bytes();
         let _ = writer.write_all(&(exe_bytes.len() as u32).to_le_bytes());
         let _ = writer.write_all(exe_bytes);
-        
+
         // install_path
         let path_str = game.install_path.to_string_lossy();
         let path_bytes = path_str.as_bytes();
         let _ = writer.write_all(&(path_bytes.len() as u32).to_le_bytes());
         let _ = writer.write_all(path_bytes);
     }
-    
+
     // =========================================================================
     // Steam path discovery
     // =========================================================================
-    
+
     /// Find Steam installation path
     #[cfg(windows)]
     fn find_steam_path() -> Option<PathBuf> {
         use winreg::enums::*;
         use winreg::RegKey;
-        
+
         // Try registry first (most reliable)
-        if let Ok(hklm) = RegKey::predef(HKEY_LOCAL_MACHINE)
-            .open_subkey("SOFTWARE\\WOW6432Node\\Valve\\Steam")
+        if let Ok(hklm) =
+            RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey("SOFTWARE\\WOW6432Node\\Valve\\Steam")
         {
             if let Ok(path) = hklm.get_value::<String, _>("InstallPath") {
                 return Some(PathBuf::from(path));
             }
         }
-        
+
         // Fallback to common paths
         let common_paths = [
             "C:\\Program Files (x86)\\Steam",
@@ -600,42 +649,42 @@ impl SteamGameDiscovery {
             "D:\\Steam",
             "D:\\SteamLibrary",
         ];
-        
+
         for path in common_paths {
             let p = PathBuf::from(path);
             if p.join("steam.exe").exists() {
                 return Some(p);
             }
         }
-        
+
         None
     }
-    
+
     #[cfg(unix)]
     fn find_steam_path() -> Option<PathBuf> {
         let home = std::env::var("HOME").ok()?;
-        
+
         let paths = [
             format!("{}/.steam/steam", home),
             format!("{}/.local/share/Steam", home),
             format!("{}/.steam/debian-installation", home),
         ];
-        
+
         for path in paths {
             let p = PathBuf::from(&path);
             if p.join("steamapps").exists() {
                 return Some(p);
             }
         }
-        
+
         None
     }
-    
+
     /// Get library info from libraryfolders.vdf (paths + app_ids)
     fn get_library_info(steam_path: &Path) -> Option<Vec<(String, Vec<u32>)>> {
         let vdf_path = steam_path.join("steamapps").join("libraryfolders.vdf");
         debug!("Reading libraryfolders.vdf from {:?}", vdf_path);
-        
+
         let content = match fs::read_to_string(&vdf_path) {
             Ok(c) => c,
             Err(e) => {
@@ -643,13 +692,13 @@ impl SteamGameDiscovery {
                 return None;
             }
         };
-        
+
         let mut info = vdf::extract_library_info(&content);
         debug!("VDF parser returned {} libraries:", info.len());
         for (path, apps) in &info {
             debug!("  {} - {} apps", path, apps.len());
         }
-        
+
         // Also include main Steam path if not in list
         let steam_path_str = steam_path.to_string_lossy().to_string();
         if !info.iter().any(|(p, _)| p == &steam_path_str) {
@@ -657,10 +706,10 @@ impl SteamGameDiscovery {
             debug!("Adding main Steam path: {}", steam_path_str);
             info.insert(0, (steam_path_str, vec![]));
         }
-        
+
         Some(info)
     }
-    
+
     /// Lookup game by process name
     #[inline]
     pub fn lookup(&self, process_name: &str) -> Option<&SteamGame> {
@@ -669,10 +718,10 @@ impl SteamGameDiscovery {
             .strip_suffix(".exe")
             .unwrap_or(process_name)
             .to_lowercase();
-        
+
         self.games.get(&key)
     }
-    
+
     /// Get all discovered games
     pub fn all_games(&self) -> impl Iterator<Item = &SteamGame> {
         self.games.values()

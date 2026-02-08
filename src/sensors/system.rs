@@ -1,5 +1,5 @@
 //! System sensors - CPU, memory, battery, active window
-//! 
+//!
 //! All implementations use native Win32 APIs for maximum performance.
 //! No WMI, no PowerShell, no external processes.
 
@@ -22,7 +22,7 @@ impl SystemSensor {
     pub async fn run(self) {
         let mut tick = interval(Duration::from_secs(10));
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
-        
+
         // CPU calculation needs previous sample
         let mut prev_cpu = get_cpu_times();
 
@@ -45,21 +45,36 @@ impl SystemSensor {
     async fn publish_all(&self, prev_cpu: &mut CpuTimes) {
         // CPU usage (percentage)
         let cpu = calculate_cpu_usage(prev_cpu);
-        self.state.mqtt.publish_sensor("cpu_usage", &format!("{:.1}", cpu)).await;
+        self.state
+            .mqtt
+            .publish_sensor("cpu_usage", &format!("{:.1}", cpu))
+            .await;
 
         // Memory usage (percentage)
         let mem = get_memory_percent();
-        self.state.mqtt.publish_sensor("memory_usage", &format!("{:.1}", mem)).await;
+        self.state
+            .mqtt
+            .publish_sensor("memory_usage", &format!("{:.1}", mem))
+            .await;
 
         // Battery (percentage and charging status)
         if let Some((percent, charging)) = get_battery_status() {
-            self.state.mqtt.publish_sensor("battery_level", &percent.to_string()).await;
-            self.state.mqtt.publish_sensor("battery_charging", if charging { "true" } else { "false" }).await;
+            self.state
+                .mqtt
+                .publish_sensor("battery_level", &percent.to_string())
+                .await;
+            self.state
+                .mqtt
+                .publish_sensor("battery_charging", if charging { "true" } else { "false" })
+                .await;
         }
 
         // Active window title
         let title = get_active_window_title();
-        self.state.mqtt.publish_sensor("active_window", &title).await;
+        self.state
+            .mqtt
+            .publish_sensor("active_window", &title)
+            .await;
     }
 }
 
@@ -76,8 +91,8 @@ struct CpuTimes {
 
 #[cfg(windows)]
 fn get_cpu_times() -> CpuTimes {
-    use windows::Win32::System::Threading::GetSystemTimes;
     use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::GetSystemTimes;
 
     unsafe {
         let mut idle = FILETIME::default();
@@ -111,7 +126,7 @@ fn get_cpu_times() -> CpuTimes {
                 .skip(1) // Skip "cpu"
                 .filter_map(|s| s.parse().ok())
                 .collect();
-            
+
             if parts.len() >= 4 {
                 // user, nice, system, idle
                 let user = parts[0] + parts[1]; // user + nice
@@ -126,28 +141,28 @@ fn get_cpu_times() -> CpuTimes {
 
 fn calculate_cpu_usage(prev: &mut CpuTimes) -> f64 {
     let curr = get_cpu_times();
-    
+
     let idle_delta = curr.idle.saturating_sub(prev.idle);
     let kernel_delta = curr.kernel.saturating_sub(prev.kernel);
     let user_delta = curr.user.saturating_sub(prev.user);
-    
+
     // Total = kernel + user (kernel includes idle on Windows)
     #[cfg(windows)]
     let total = kernel_delta + user_delta;
     #[cfg(unix)]
     let total = idle_delta + kernel_delta + user_delta;
-    
+
     let usage = if total > 0 {
         #[cfg(windows)]
         let busy = total - idle_delta;
         #[cfg(unix)]
         let busy = kernel_delta + user_delta;
-        
+
         (busy as f64 / total as f64) * 100.0
     } else {
         0.0
     };
-    
+
     *prev = curr;
     usage.clamp(0.0, 100.0)
 }
@@ -180,7 +195,7 @@ fn get_memory_percent() -> f64 {
     if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
         let mut total: u64 = 0;
         let mut available: u64 = 0;
-        
+
         for line in meminfo.lines() {
             if line.starts_with("MemTotal:") {
                 total = parse_meminfo_value(line);
@@ -188,7 +203,7 @@ fn get_memory_percent() -> f64 {
                 available = parse_meminfo_value(line);
             }
         }
-        
+
         if total > 0 {
             return ((total - available) as f64 / total as f64) * 100.0;
         }
@@ -219,16 +234,16 @@ fn get_battery_status() -> Option<(u8, bool)> {
             if status.BatteryFlag == 128 {
                 return None;
             }
-            
+
             let percent = if status.BatteryLifePercent == 255 {
                 100 // Unknown = assume full
             } else {
                 status.BatteryLifePercent
             };
-            
+
             // ACLineStatus: 1 = plugged in
             let charging = status.ACLineStatus == 1;
-            
+
             Some((percent, charging))
         } else {
             None
@@ -240,25 +255,25 @@ fn get_battery_status() -> Option<(u8, bool)> {
 fn get_battery_status() -> Option<(u8, bool)> {
     // Try common battery names: BAT0, BAT1, CMB0, etc.
     let power_supply = std::path::Path::new("/sys/class/power_supply");
-    
+
     if let Ok(entries) = std::fs::read_dir(power_supply) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            
+
             // Look for battery devices (BAT*, CMB*, etc.)
             if name_str.starts_with("BAT") || name_str.starts_with("CMB") {
                 let path = entry.path();
-                
+
                 let capacity = std::fs::read_to_string(path.join("capacity"))
                     .ok()
                     .and_then(|s| s.trim().parse::<u8>().ok());
-                
+
                 if let Some(cap) = capacity {
                     let status = std::fs::read_to_string(path.join("status"))
                         .ok()
                         .unwrap_or_default();
-                    
+
                     let charging = status.trim() == "Charging";
                     return Some((cap, charging));
                 }
@@ -284,7 +299,7 @@ fn get_active_window_title() -> String {
 
         let mut buffer = [0u16; 512];
         let len = GetWindowTextW(hwnd, &mut buffer);
-        
+
         if len > 0 {
             String::from_utf16_lossy(&buffer[..len as usize])
         } else {

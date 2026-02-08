@@ -1,0 +1,20 @@
+# Rustfmt configuration for pc-bridge
+# Docs: https://rust-lang.github.io/rustfmt/
+# Only stable options - nightly options cause warnings
+
+edition = "2021"
+max_width = 100
+hard_tabs = false
+tab_spaces = 4
+newline_style = "Auto"
+use_small_heuristics = "Default"
+
+# Import and module ordering
+reorder_imports = true
+reorder_modules = true
+
+# Code simplification
+remove_nested_parens = true
+use_field_init_shorthand = true
+use_try_shorthand = true
+

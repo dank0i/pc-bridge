@@ -9,31 +9,31 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod audio;
+mod commands;
 mod config;
 mod mqtt;
-mod sensors;
-mod commands;
-mod power;
-mod updater;
-mod tray;
 mod notification;
+mod power;
+mod sensors;
 mod setup;
-mod audio;
 mod steam;
+mod tray;
+mod updater;
 
 #[cfg(windows)]
 mod winapi;
 
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{info, warn, error, Level};
+use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
+use crate::commands::CommandExecutor;
 use crate::config::Config;
 use crate::mqtt::MqttClient;
-use crate::sensors::{GameSensor, IdleSensor, CustomSensorManager, SystemSensor};
 use crate::power::PowerEventListener;
-use crate::commands::CommandExecutor;
+use crate::sensors::{CustomSensorManager, GameSensor, IdleSensor, SystemSensor};
 use crate::steam::SteamGameDiscovery;
 
 /// Application state shared across tasks
@@ -67,8 +67,8 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     {
         use windows::Win32::System::Console::{
-            AttachConsole, SetConsoleCtrlHandler, GetStdHandle, SetConsoleMode,
-            STD_INPUT_HANDLE, ENABLE_PROCESSED_INPUT
+            AttachConsole, GetStdHandle, SetConsoleCtrlHandler, SetConsoleMode,
+            ENABLE_PROCESSED_INPUT, STD_INPUT_HANDLE,
         };
         unsafe {
             // ATTACH_PARENT_PROCESS = -1 (0xFFFFFFFF)
@@ -82,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
-    
+
     // Initialize logging
     FmtSubscriber::builder()
         .with_max_level(Level::INFO)
@@ -95,11 +95,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Kill any existing instances
     kill_existing_instances();
-    
+
     // Check for first run - show setup wizard if no config exists
     if Config::is_first_run()? {
         info!("First run detected - launching setup wizard");
-        
+
         if let Some(setup_config) = setup::run_setup_wizard() {
             setup::save_setup_config(&setup_config)?;
             info!("Setup complete! Configuration saved.");
@@ -114,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
                         None,
                         w!("Setup was cancelled.\n\nPC Bridge will now exit."),
                         w!("PC Bridge"),
-                        MB_OK | MB_ICONWARNING
+                        MB_OK | MB_ICONWARNING,
                     );
                 }
             }
@@ -128,10 +128,10 @@ async fn main() -> anyhow::Result<()> {
     // Load configuration
     let config = Config::load()?;
     info!("Loaded config for device: {}", config.device_name);
-    
+
     // Log enabled features
     log_enabled_features(&config);
-    
+
     let show_tray = config.show_tray_icon;
     let config_path = Config::config_path()?;
 
@@ -146,12 +146,17 @@ async fn main() -> anyhow::Result<()> {
     if config.features.game_detection {
         info!("Discovering Steam games...");
         if let Some(discovery) = SteamGameDiscovery::discover_async().await {
-            info!("  ✓ Found {} Steam games in {}ms{}", 
-                discovery.game_count, 
+            info!(
+                "  ✓ Found {} Steam games in {}ms{}",
+                discovery.game_count,
                 discovery.build_time_ms,
-                if discovery.from_cache { " (cached)" } else { "" }
+                if discovery.from_cache {
+                    " (cached)"
+                } else {
+                    ""
+                }
             );
-            
+
             // Merge into config and save
             match config.merge_steam_games(&discovery) {
                 Ok(added) if added > 0 => {
@@ -220,14 +225,26 @@ async fn main() -> anyhow::Result<()> {
     if config.custom_sensors_enabled && !config.custom_sensors.is_empty() {
         let manager = CustomSensorManager::new(Arc::clone(&state));
         handles.push(tokio::spawn(manager.run()));
-        state.mqtt.register_custom_sensors(&config.custom_sensors).await;
-        info!("  ✓ Custom sensors enabled ({} defined)", config.custom_sensors.len());
+        state
+            .mqtt
+            .register_custom_sensors(&config.custom_sensors)
+            .await;
+        info!(
+            "  ✓ Custom sensors enabled ({} defined)",
+            config.custom_sensors.len()
+        );
     }
 
     // Custom commands (just register discovery, executor handles them)
     if config.custom_commands_enabled && !config.custom_commands.is_empty() {
-        state.mqtt.register_custom_commands(&config.custom_commands).await;
-        info!("  ✓ Custom commands enabled ({} defined)", config.custom_commands.len());
+        state
+            .mqtt
+            .register_custom_commands(&config.custom_commands)
+            .await;
+        info!(
+            "  ✓ Custom commands enabled ({} defined)",
+            config.custom_commands.len()
+        );
     }
 
     // Config file watcher for hot-reload
@@ -244,15 +261,18 @@ async fn main() -> anyhow::Result<()> {
 
     // Publish initial availability
     state.mqtt.publish_availability(true).await;
-    
+
     // Only publish sleep_state if power_events enabled
     if config.features.power_events {
-        state.mqtt.publish_sensor_retained("sleep_state", "awake").await;
+        state
+            .mqtt
+            .publish_sensor_retained("sleep_state", "awake")
+            .await;
     }
 
     // Wait for shutdown signal (Ctrl+C)
     info!("PC Bridge running. Press Ctrl+C to stop.");
-    
+
     #[cfg(windows)]
     {
         // On Windows, poll custom flag (tokio signal doesn't work with attached console)
@@ -263,7 +283,7 @@ async fn main() -> anyhow::Result<()> {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
-    
+
     #[cfg(not(windows))]
     tokio::signal::ctrl_c().await?;
 
@@ -271,23 +291,21 @@ async fn main() -> anyhow::Result<()> {
     let _ = shutdown_tx.send(());
 
     // Wait for tasks to finish (with timeout)
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        async {
-            for handle in handles {
-                let _ = handle.await;
-            }
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        for handle in handles {
+            let _ = handle.await;
         }
-    ).await;
+    })
+    .await;
 
     // Publish offline status
     state.mqtt.publish_availability(false).await;
 
     info!("PC Bridge stopped");
-    
+
     // Print newline to ensure terminal prompt is on its own line
     println!();
-    
+
     Ok(())
 }
 
@@ -301,8 +319,11 @@ fn log_enabled_features(config: &Config) {
         features.notifications,
         config.custom_sensors_enabled,
         config.custom_commands_enabled,
-    ].iter().filter(|&&x| x).count();
-    
+    ]
+    .iter()
+    .filter(|&&x| x)
+    .count();
+
     if count == 0 {
         info!("No features enabled - running in minimal mode");
     } else {
@@ -313,12 +334,12 @@ fn log_enabled_features(config: &Config) {
 /// Kill any other running instances (platform-specific)
 #[cfg(windows)]
 fn kill_existing_instances() {
+    use windows::Win32::Foundation::*;
     use windows::Win32::System::Diagnostics::ToolHelp::*;
     use windows::Win32::System::Threading::*;
-    use windows::Win32::Foundation::*;
 
     let my_pid = std::process::id();
-    
+
     // Match any of these exe names (covers renames)
     let exe_names = ["pc-bridge.exe", "pc bridge.exe", "pc-agent.exe"];
 
@@ -344,10 +365,13 @@ fn kill_existing_instances() {
 
                 // Check if this process matches any of our exe names
                 let is_match = exe_names.iter().any(|&name| proc_name == name);
-                
+
                 if is_match && entry.th32ProcessID != my_pid {
                     if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, entry.th32ProcessID) {
-                        info!("Killing existing instance: {} (PID {})", proc_name, entry.th32ProcessID);
+                        info!(
+                            "Killing existing instance: {} (PID {})",
+                            proc_name, entry.th32ProcessID
+                        );
                         let _ = TerminateProcess(handle, 0);
                         let _ = CloseHandle(handle);
                     }
@@ -370,22 +394,22 @@ fn kill_existing_instances() {
 #[cfg(unix)]
 fn kill_existing_instances() {
     use std::process::Command;
-    
+
     let _my_pid = std::process::id();
     let exe_name = std::env::current_exe()
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_default();
-    
+
     if exe_name.is_empty() {
         return;
     }
-    
+
     // Use pkill to kill other instances, excluding our PID
     // This is a safe approach - pkill won't kill itself
     let _ = Command::new("pkill")
         .args(["-f", &exe_name, "--signal", "TERM"])
         .spawn();
-    
+
     std::thread::sleep(std::time::Duration::from_millis(200));
 }

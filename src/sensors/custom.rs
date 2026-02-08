@@ -1,18 +1,18 @@
 //! Custom sensor polling - user-defined sensors from config
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use std::collections::HashMap;
 use tokio::time::interval;
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 
-use crate::AppState;
 use crate::config::{CustomSensor, CustomSensorType};
+use crate::AppState;
 
-#[cfg(windows)]
-use std::process::Command;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use std::process::Command;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -29,7 +29,7 @@ impl CustomSensorManager {
 
     pub async fn run(self) {
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
-        
+
         // Check if custom sensors are enabled
         {
             let config = self.state.config.read().await;
@@ -41,20 +41,28 @@ impl CustomSensorManager {
                 info!("No custom sensors configured");
                 return;
             }
-            
-            warn!("⚠️  Custom sensors ENABLED - {} sensor(s) configured", config.custom_sensors.len());
+
+            warn!(
+                "⚠️  Custom sensors ENABLED - {} sensor(s) configured",
+                config.custom_sensors.len()
+            );
             for sensor in &config.custom_sensors {
-                info!("  - {} ({:?}, {}s interval)", sensor.name, sensor.sensor_type, sensor.interval_seconds);
+                info!(
+                    "  - {} ({:?}, {}s interval)",
+                    sensor.name, sensor.sensor_type, sensor.interval_seconds
+                );
             }
         }
 
         // Track last poll time per sensor
         let mut last_poll: HashMap<String, tokio::time::Instant> = HashMap::new();
-        
+
         // Use minimum sensor interval for tick (avoids waking every 1s)
         let min_interval = {
             let config = self.state.config.read().await;
-            config.custom_sensors.iter()
+            config
+                .custom_sensors
+                .iter()
                 .map(|s| s.interval_seconds)
                 .min()
                 .unwrap_or(30)
@@ -70,27 +78,27 @@ impl CustomSensorManager {
                 }
                 _ = tick.tick() => {
                     let config = self.state.config.read().await;
-                    
+
                     if !config.custom_sensors_enabled {
                         continue;
                     }
-                    
+
                     let now = tokio::time::Instant::now();
-                    
+
                     for sensor in &config.custom_sensors {
                         let should_poll = match last_poll.get(&sensor.name) {
                             Some(last) => now.duration_since(*last) >= Duration::from_secs(sensor.interval_seconds),
                             None => true,
                         };
-                        
+
                         if should_poll {
                             let value = self.poll_sensor(sensor).await;
-                            
+
                             // Publish to MQTT
                             let topic_name = format!("custom_{}", sensor.name);
                             self.state.mqtt.publish_sensor(&topic_name, &value).await;
                             debug!("Custom sensor '{}' = {}", sensor.name, value);
-                            
+
                             last_poll.insert(sensor.name.clone(), now);
                         }
                     }
@@ -134,7 +142,8 @@ impl CustomSensorManager {
                 }
                 Err(e) => format!("error: {}", e),
             }
-        }).await;
+        })
+        .await;
 
         result.unwrap_or_else(|e| format!("error: {}", e))
     }
@@ -152,8 +161,8 @@ impl CustomSensorManager {
             None => return "error: no process".to_string(),
         };
 
-        use windows::Win32::System::Diagnostics::ToolHelp::*;
         use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Diagnostics::ToolHelp::*;
 
         let exists = unsafe {
             let snapshot = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
@@ -200,15 +209,20 @@ impl CustomSensorManager {
 
         let result = tokio::task::spawn_blocking(move || {
             use std::process::Command;
-            let output = Command::new("pgrep")
-                .args(["-x", &process])
-                .output();
+            let output = Command::new("pgrep").args(["-x", &process]).output();
 
             match output {
-                Ok(out) => if out.status.success() { "on" } else { "off" },
+                Ok(out) => {
+                    if out.status.success() {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                }
                 Err(_) => "error",
             }
-        }).await;
+        })
+        .await;
 
         result.unwrap_or("error").to_string()
     }
@@ -270,7 +284,8 @@ impl CustomSensorManager {
                     }
                 }
             }
-        }).await;
+        })
+        .await;
 
         result.unwrap_or_else(|e| format!("error: {}", e))
     }

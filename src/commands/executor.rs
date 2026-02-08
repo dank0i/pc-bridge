@@ -1,18 +1,18 @@
 //! Command executor - handles commands from Home Assistant
 
-use std::sync::Arc;
-use std::process::Command;
 use std::os::windows::process::CommandExt;
+use std::process::Command;
+use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::{info, warn, error, debug};
+use tracing::{debug, error, info, warn};
 
-use crate::AppState;
-use crate::mqtt::CommandReceiver;
-use crate::power::wake_display;
-use crate::notification;
-use crate::audio::{self, MediaKey};
-use super::launcher::expand_launcher_shortcut;
 use super::custom::execute_custom_command;
+use super::launcher::expand_launcher_shortcut;
+use crate::audio::{self, MediaKey};
+use crate::mqtt::CommandReceiver;
+use crate::notification;
+use crate::power::wake_display;
+use crate::AppState;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const MAX_CONCURRENT_COMMANDS: usize = 5;
@@ -22,7 +22,7 @@ fn get_predefined_command(name: &str) -> Option<&'static str> {
     match name {
         "Screensaver" => Some(r#"%windir%\System32\scrnsave.scr /s"#),
         // These are handled natively in execute_command
-        "Wake" | "Lock" | "Hibernate" | "Restart" | "volume_set" | "volume_mute" 
+        "Wake" | "Lock" | "Hibernate" | "Restart" | "volume_set" | "volume_mute"
         | "media_play_pause" | "media_next" | "media_previous" | "media_stop" => None,
         "Shutdown" => Some("shutdown -s -t 0"),
         "sleep" => Some("Rundll32.exe powrprof.dll,SetSuspendState 0,1,0"),
@@ -76,10 +76,18 @@ impl CommandExecutor {
         }
     }
 
-    async fn execute_command(name: &str, payload: &str, state: &Arc<AppState>) -> anyhow::Result<()> {
+    async fn execute_command(
+        name: &str,
+        payload: &str,
+        state: &Arc<AppState>,
+    ) -> anyhow::Result<()> {
         // Normalize payload
         let payload = payload.trim();
-        let payload = if payload.eq_ignore_ascii_case("PRESS") { "" } else { payload };
+        let payload = if payload.eq_ignore_ascii_case("PRESS") {
+            ""
+        } else {
+            payload
+        };
 
         info!("Executing command: {} (payload: {:?})", name, payload);
 
@@ -190,8 +198,10 @@ impl CommandExecutor {
         tokio::spawn(async move {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(300),
-                tokio::task::spawn_blocking(move || child.wait())
-            ).await {
+                tokio::task::spawn_blocking(move || child.wait()),
+            )
+            .await
+            {
                 Ok(Ok(Ok(status))) => {
                     if !status.success() {
                         warn!("Command exited with: {}", status);
@@ -212,15 +222,24 @@ impl CommandExecutor {
 
 /// Check if command needs "& " prefix for PowerShell
 fn needs_ampersand(cmd: &str) -> bool {
-    let ps_cmdlets = ["Start-Process", "Add-Type", "Get-Process", "Stop-Process", 
-                       "Set-", "Get-", "New-", "Remove-", "Invoke-"];
+    let ps_cmdlets = [
+        "Start-Process",
+        "Add-Type",
+        "Get-Process",
+        "Stop-Process",
+        "Set-",
+        "Get-",
+        "New-",
+        "Remove-",
+        "Invoke-",
+    ];
     !ps_cmdlets.iter().any(|prefix| cmd.starts_with(prefix))
 }
 
 /// Expand Windows-style %VAR% environment variables
 fn expand_env_vars(s: &str) -> String {
     let mut result = s.to_string();
-    
+
     while let Some(start) = result.find('%') {
         if let Some(end) = result[start + 1..].find('%') {
             let end = start + 1 + end;
@@ -231,7 +250,7 @@ fn expand_env_vars(s: &str) -> String {
             break;
         }
     }
-    
+
     result
 }
 
@@ -246,15 +265,15 @@ fn send_ctrl_f6() {
         // Key down Ctrl
         keybd_event(VK_CONTROL, 0, KEYBD_EVENT_FLAGS(0), 0);
         std::thread::sleep(std::time::Duration::from_millis(10));
-        
+
         // Key down F6
         keybd_event(VK_F6, 0, KEYBD_EVENT_FLAGS(0), 0);
         std::thread::sleep(std::time::Duration::from_millis(10));
-        
+
         // Key up F6
         keybd_event(VK_F6, 0, KEYEVENTF_KEYUP, 0);
         std::thread::sleep(std::time::Duration::from_millis(10));
-        
+
         // Key up Ctrl
         keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
     }
@@ -279,21 +298,26 @@ fn hibernate() {
 
 /// Restart system (native, no PowerShell)
 fn restart() {
+    use windows::core::w;
+    use windows::Win32::Foundation::{HANDLE, LUID};
+    use windows::Win32::Security::{
+        AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
+        TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    };
     use windows::Win32::System::Shutdown::*;
     use windows::Win32::System::Threading::GetCurrentProcess;
-    use windows::Win32::Security::{
-        TOKEN_ADJUST_PRIVILEGES, TOKEN_QUERY, SE_PRIVILEGE_ENABLED,
-        TOKEN_PRIVILEGES, LUID_AND_ATTRIBUTES, AdjustTokenPrivileges,
-        LookupPrivilegeValueW,
-    };
     use windows::Win32::System::Threading::OpenProcessToken;
-    use windows::Win32::Foundation::{HANDLE, LUID};
-    use windows::core::w;
 
     unsafe {
         // Get shutdown privilege
         let mut token = HANDLE::default();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token).is_ok() {
+        if OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut token,
+        )
+        .is_ok()
+        {
             let mut luid = LUID::default();
             if LookupPrivilegeValueW(None, w!("SeShutdownPrivilege"), &mut luid).is_ok() {
                 let tp = TOKEN_PRIVILEGES {
@@ -306,7 +330,7 @@ fn restart() {
                 let _ = AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None);
             }
         }
-        
+
         // Restart
         let _ = ExitWindowsEx(EWX_REBOOT, SHUTDOWN_REASON(0));
     }

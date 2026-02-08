@@ -1,12 +1,13 @@
 [package]
 name = "pc-bridge"
-version = "2.4.1"
+version = "2.4.2"
 edition = "2021"
 authors = ["dank0i"]
 description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
 repository = "https://github.com/dank0i/pc-bridge"
 license = "MIT"
 keywords = ["home-assistant", "mqtt", "gaming", "automation"]
+categories = ["development-tools", "network-programming"]
 
 [build-dependencies]
 winresource = "0.1"
@@ -83,6 +84,12 @@ windows = { version = "0.58", features = [
 ] }
 windows-service = "0.7"
 
+[dev-dependencies]
+# Testing utilities
+tempfile = "3"
+tokio-test = "0.4"
+pretty_assertions = "1"
+
 [profile.release]
 opt-level = 3
 lto = true
@@ -92,3 +99,55 @@ panic = "abort"
 
 [profile.dev]
 opt-level = 0
+
+# Lint configuration
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+# Enable lint groups (lower priority than individual lints)
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+# Allow noisy pedantic lints
+module_name_repetitions = "allow"
+too_many_lines = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+uninlined_format_args = "allow"
+redundant_closure_for_method_calls = "allow"
+map_unwrap_or = "allow"
+unreadable_literal = "allow"
+match_wildcard_for_single_variants = "allow"
+single_match_else = "allow"
+needless_pass_by_value = "allow"
+struct_excessive_bools = "allow"
+
+# Windows API requires these patterns
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+
+# Platform-specific code patterns
+unused_async = "allow"
+unnecessary_debug_formatting = "allow"
+unused_self = "allow"
+
+# Minor style preferences
+manual_string_new = "allow"
+case_sensitive_file_extension_comparisons = "allow"
+needless_raw_string_hashes = "allow"
+redundant_else = "allow"
+unnecessary_wraps = "allow"
+needless_continue = "allow"
+match_same_arms = "allow"
+manual_let_else = "allow"
+inefficient_to_string = "allow"
+
+# Handled by cargo-deny
+multiple_crate_versions = "allow"
