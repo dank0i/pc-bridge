@@ -10,9 +10,14 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
-use windows::Win32::Foundation::*;
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Power::RegisterPowerSettingNotification;
-use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetWindowLongPtrW,
+    PeekMessageW, RegisterClassExW, SetWindowLongPtrW, TranslateMessage,
+    DEVICE_NOTIFY_WINDOW_HANDLE, GWLP_USERDATA, MSG, PM_REMOVE, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_QUIT, WNDCLASSEXW,
+};
 
 use super::display::wake_display_with_retry;
 use crate::AppState;
@@ -156,7 +161,7 @@ impl PowerEventListener {
                 ..Default::default()
             };
 
-            RegisterClassExW(&wc);
+            RegisterClassExW(&raw const wc);
 
             // Create a real window to receive power broadcasts
             let hwnd = match CreateWindowExW(
@@ -205,13 +210,13 @@ impl PowerEventListener {
                     break;
                 }
 
-                let ret = PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE);
+                let ret = PeekMessageW(&raw mut msg, None, 0, 0, PM_REMOVE);
                 if ret.as_bool() {
                     if msg.message == WM_QUIT {
                         break;
                     }
-                    let _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
+                    let _ = TranslateMessage(&raw const msg);
+                    DispatchMessageW(&raw const msg);
                 } else {
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }

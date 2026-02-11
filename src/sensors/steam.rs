@@ -3,11 +3,11 @@
 //! Adaptive polling: 30s base interval, 5s when updates are active
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
-use winreg::enums::*;
+use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 use winreg::RegKey;
 
 use crate::AppState;
@@ -86,7 +86,7 @@ impl SteamSensor {
                     debug!("Steam sensor shutting down");
                     break;
                 }
-                _ = tokio::time::sleep(sleep_duration) => {
+                () = tokio::time::sleep(sleep_duration) => {
                     if self.updating_games.is_empty() {
                         // No updates in progress - do full scan
                         self.do_full_scan().await;
@@ -201,8 +201,8 @@ impl SteamSensor {
                 match glob::glob(pattern_str) {
                     Ok(entries) => {
                         for entry in entries.flatten() {
-                            if let Some(game_state) = self.parse_acf_file(&entry) {
-                                if self.is_updating(&game_state) {
+                            if let Some(game_state) = parse_acf_file(&entry) {
+                                if is_updating(&game_state) {
                                     new_updating.insert(game_state.app_id.clone(), game_state);
                                 }
                             }
@@ -238,8 +238,8 @@ impl SteamSensor {
         let mut still_updating: HashMap<String, GameUpdateState> = HashMap::new();
 
         for (app_id, game_state) in &self.updating_games {
-            if let Some(new_state) = self.parse_acf_file(&game_state.manifest_path) {
-                if self.is_updating(&new_state) {
+            if let Some(new_state) = parse_acf_file(&game_state.manifest_path) {
+                if is_updating(&new_state) {
                     still_updating.insert(app_id.clone(), new_state);
                 } else {
                     info!("Steam game finished updating: {}", game_state.name);
@@ -254,82 +254,90 @@ impl SteamSensor {
             self.publish_state().await;
         }
     }
+}
 
-    fn parse_acf_file(&self, path: &PathBuf) -> Option<GameUpdateState> {
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => return None,
-        };
+/// Parse an ACF manifest file into a GameUpdateState
+fn parse_acf_file(path: &Path) -> Option<GameUpdateState> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+    parse_acf_content(&content, path)
+}
 
-        let mut app_id = String::new();
-        let mut name = String::new();
-        let mut state_flags: u32 = 0;
+/// Parse ACF content string into a GameUpdateState (testable without filesystem)
+fn parse_acf_content(content: &str, manifest_path: &Path) -> Option<GameUpdateState> {
+    let mut app_id = String::new();
+    let mut name = String::new();
+    let mut state_flags: u32 = 0;
 
-        for line in content.lines() {
-            let trimmed = line.trim();
+    for line in content.lines() {
+        let trimmed = line.trim();
 
-            if trimmed.starts_with("\"appid\"") || trimmed.starts_with("\"AppID\"") {
-                if let Some(val) = self.extract_vdf_value(trimmed) {
-                    app_id = val;
-                }
-            } else if trimmed.starts_with("\"name\"") {
-                if let Some(val) = self.extract_vdf_value(trimmed) {
-                    name = val;
-                }
-            } else if trimmed.starts_with("\"StateFlags\"") || trimmed.starts_with("\"stateflags\"")
-            {
-                if let Some(val) = self.extract_vdf_value(trimmed) {
-                    state_flags = val.parse().unwrap_or(0);
-                }
+        if trimmed.starts_with("\"appid\"") || trimmed.starts_with("\"AppID\"") {
+            if let Some(val) = extract_vdf_value(trimmed) {
+                app_id = val;
+            }
+        } else if trimmed.starts_with("\"name\"") {
+            if let Some(val) = extract_vdf_value(trimmed) {
+                name = val;
+            }
+        } else if trimmed.starts_with("\"StateFlags\"") || trimmed.starts_with("\"stateflags\"") {
+            if let Some(val) = extract_vdf_value(trimmed) {
+                state_flags = val.parse().unwrap_or(0);
             }
         }
-
-        if app_id.is_empty() {
-            return None;
-        }
-
-        Some(GameUpdateState {
-            app_id,
-            name,
-            state_flags,
-            manifest_path: path.clone(),
-        })
     }
 
-    fn extract_vdf_value(&self, line: &str) -> Option<String> {
-        // Format: "key"		"value"
-        let parts: Vec<&str> = line.split('"').collect();
-        if parts.len() >= 4 {
-            Some(parts[3].to_string())
-        } else {
-            None
-        }
+    if app_id.is_empty() {
+        return None;
     }
 
-    fn is_updating(&self, game: &GameUpdateState) -> bool {
-        let flags = game.state_flags;
+    Some(GameUpdateState {
+        app_id,
+        name,
+        state_flags,
+        manifest_path: manifest_path.to_path_buf(),
+    })
+}
 
-        // Check if any update-related flag is set
-        if flags & STATE_UPDATE_RUNNING != 0 {
-            return true;
-        }
-        if flags & STATE_UPDATE_PAUSED != 0 {
-            return true;
-        }
-        if flags & STATE_DOWNLOADING != 0 {
-            return true;
-        }
+/// Extract a quoted value from a VDF key-value line
+/// Format: "key"\t\t"value"
+fn extract_vdf_value(line: &str) -> Option<String> {
+    let parts: Vec<&str> = line.split('"').collect();
+    if parts.len() >= 4 {
+        Some(parts[3].to_string())
+    } else {
+        None
+    }
+}
 
-        // If not fully installed (~4), something is in progress
-        // But be careful - newly added games might have 0
-        if flags != 0 && flags != STATE_FULLY_INSTALLED {
-            // Could be installing, updating, etc.
-            return true;
-        }
+/// Check if a game's state flags indicate an update in progress
+fn is_updating(game: &GameUpdateState) -> bool {
+    let flags = game.state_flags;
 
-        false
+    // Check if any update-related flag is set
+    if flags & STATE_UPDATE_RUNNING != 0 {
+        return true;
+    }
+    if flags & STATE_UPDATE_PAUSED != 0 {
+        return true;
+    }
+    if flags & STATE_DOWNLOADING != 0 {
+        return true;
     }
 
+    // If not fully installed (~4), something is in progress
+    // But be careful - newly added games might have 0
+    if flags != 0 && flags != STATE_FULLY_INSTALLED {
+        // Could be installing, updating, etc.
+        return true;
+    }
+
+    false
+}
+
+impl SteamSensor {
     async fn publish_state(&self) {
         let is_updating = !self.updating_games.is_empty();
         let state_str = if is_updating { "on" } else { "off" };
@@ -364,5 +372,167 @@ impl SteamSensor {
                 .publish_sensor_attributes("steam_updating", &attrs)
                 .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- extract_vdf_value tests --
+
+    #[test]
+    fn test_extract_vdf_value_basic() {
+        let line = r#"	"appid"		"730""#;
+        assert_eq!(extract_vdf_value(line), Some("730".to_string()));
+    }
+
+    #[test]
+    fn test_extract_vdf_value_name() {
+        let line = r#"	"name"		"Counter-Strike 2""#;
+        assert_eq!(
+            extract_vdf_value(line),
+            Some("Counter-Strike 2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_vdf_value_no_value() {
+        let line = r#"	"appid""#;
+        assert_eq!(extract_vdf_value(line), None);
+    }
+
+    #[test]
+    fn test_extract_vdf_value_empty_value() {
+        let line = r#"	"key"		"""#;
+        assert_eq!(extract_vdf_value(line), Some(String::new()));
+    }
+
+    #[test]
+    fn test_extract_vdf_value_state_flags() {
+        let line = r#"	"StateFlags"		"4""#;
+        assert_eq!(extract_vdf_value(line), Some("4".to_string()));
+    }
+
+    // -- is_updating tests --
+
+    fn make_game(flags: u32) -> GameUpdateState {
+        GameUpdateState {
+            app_id: "730".to_string(),
+            name: "Test Game".to_string(),
+            state_flags: flags,
+            manifest_path: PathBuf::from("/tmp/test.acf"),
+        }
+    }
+
+    #[test]
+    fn test_is_updating_fully_installed() {
+        assert!(!is_updating(&make_game(STATE_FULLY_INSTALLED)));
+    }
+
+    #[test]
+    fn test_is_updating_zero_flags() {
+        assert!(!is_updating(&make_game(0)));
+    }
+
+    #[test]
+    fn test_is_updating_update_running() {
+        assert!(is_updating(&make_game(STATE_UPDATE_RUNNING)));
+    }
+
+    #[test]
+    fn test_is_updating_update_paused() {
+        assert!(is_updating(&make_game(STATE_UPDATE_PAUSED)));
+    }
+
+    #[test]
+    fn test_is_updating_downloading() {
+        assert!(is_updating(&make_game(STATE_DOWNLOADING)));
+    }
+
+    #[test]
+    fn test_is_updating_combined_flags() {
+        assert!(is_updating(&make_game(
+            STATE_FULLY_INSTALLED | STATE_UPDATE_RUNNING
+        )));
+    }
+
+    #[test]
+    fn test_is_updating_unknown_nonzero() {
+        // Non-zero, non-installed flags → updating
+        assert!(is_updating(&make_game(2)));
+    }
+
+    // -- parse_acf_content tests --
+
+    #[test]
+    fn test_parse_acf_content_valid() {
+        let content = r#"
+"AppState"
+{
+	"appid"		"730"
+	"name"		"Counter-Strike 2"
+	"StateFlags"		"4"
+	"installdir"		"Counter-Strike Global Offensive"
+}
+"#;
+        let path = PathBuf::from("/tmp/appmanifest_730.acf");
+        let result = parse_acf_content(content, &path).unwrap();
+        assert_eq!(result.app_id, "730");
+        assert_eq!(result.name, "Counter-Strike 2");
+        assert_eq!(result.state_flags, 4);
+    }
+
+    #[test]
+    fn test_parse_acf_content_updating() {
+        let content = r#"
+"AppState"
+{
+	"appid"		"440"
+	"name"		"Team Fortress 2"
+	"StateFlags"		"1028"
+}
+"#;
+        let path = PathBuf::from("/tmp/appmanifest_440.acf");
+        let result = parse_acf_content(content, &path).unwrap();
+        assert_eq!(result.app_id, "440");
+        assert_eq!(result.state_flags, 1028);
+        assert!(is_updating(&result));
+    }
+
+    #[test]
+    fn test_parse_acf_content_missing_appid() {
+        let content = r#"
+"AppState"
+{
+	"name"		"No AppID Game"
+	"StateFlags"		"4"
+}
+"#;
+        let path = PathBuf::from("/tmp/test.acf");
+        assert!(parse_acf_content(content, &path).is_none());
+    }
+
+    #[test]
+    fn test_parse_acf_content_empty() {
+        let path = PathBuf::from("/tmp/empty.acf");
+        assert!(parse_acf_content("", &path).is_none());
+    }
+
+    #[test]
+    fn test_parse_acf_content_case_variants() {
+        // Tests both "appid" and "AppID" variants
+        let content = r#"
+"AppState"
+{
+	"AppID"		"553850"
+	"name"		"HELLDIVERS 2"
+	"stateflags"		"4"
+}
+"#;
+        let path = PathBuf::from("/tmp/test.acf");
+        let result = parse_acf_content(content, &path).unwrap();
+        assert_eq!(result.app_id, "553850");
+        assert_eq!(result.state_flags, 4);
     }
 }

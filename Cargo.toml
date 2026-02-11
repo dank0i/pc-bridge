@@ -1,6 +1,6 @@
 [package]
 name = "pc-bridge"
-version = "2.7.0"
+version = "2.7.1"
 edition = "2021"
 authors = ["dank0i"]
 description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
@@ -110,7 +110,7 @@ opt-level = 0
 
 # Lint configuration
 [lints.rust]
-unsafe_code = "warn"
+unsafe_code = "allow"
 
 [lints.clippy]
 # Enable lint groups (lower priority than individual lints)

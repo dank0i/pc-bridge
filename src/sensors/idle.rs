@@ -84,7 +84,7 @@ impl IdleSensor {
                 dwTime: 0,
             };
 
-            if GetLastInputInfo(&mut lii).as_bool() {
+            if GetLastInputInfo(&raw mut lii).as_bool() {
                 let current_tick = GetTickCount64();
                 // dwTime is 32-bit, handle wrap correctly
                 let current_tick_32 = current_tick as u32;

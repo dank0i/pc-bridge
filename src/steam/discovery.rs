@@ -630,7 +630,7 @@ impl SteamGameDiscovery {
     /// Find Steam installation path
     #[cfg(windows)]
     fn find_steam_path() -> Option<PathBuf> {
-        use winreg::enums::*;
+        use winreg::enums::HKEY_LOCAL_MACHINE;
         use winreg::RegKey;
 
         // Try registry first (most reliable)
@@ -725,5 +725,229 @@ impl SteamGameDiscovery {
     /// Get all discovered games
     pub fn all_games(&self) -> impl Iterator<Item = &SteamGame> {
         self.games.values()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- abbreviation_matches tests --
+
+    #[test]
+    fn test_abbreviation_bf6_battlefield6() {
+        assert!(SteamGameDiscovery::abbreviation_matches(
+            "bf6",
+            "battlefield6"
+        ));
+    }
+
+    #[test]
+    fn test_abbreviation_cs2_counterstrike2() {
+        assert!(SteamGameDiscovery::abbreviation_matches(
+            "cs2",
+            "counterstrike2"
+        ));
+    }
+
+    #[test]
+    fn test_abbreviation_too_long() {
+        // exe longer than 8 chars is not an abbreviation
+        assert!(!SteamGameDiscovery::abbreviation_matches(
+            "longexename",
+            "longexenameandmore"
+        ));
+    }
+
+    #[test]
+    fn test_abbreviation_same_length() {
+        // exe must be shorter than folder
+        assert!(!SteamGameDiscovery::abbreviation_matches("game", "game"));
+    }
+
+    #[test]
+    fn test_abbreviation_no_match() {
+        assert!(!SteamGameDiscovery::abbreviation_matches(
+            "xyz",
+            "battlefield"
+        ));
+    }
+
+    #[test]
+    fn test_abbreviation_single_char() {
+        assert!(SteamGameDiscovery::abbreviation_matches("b", "battlefield"));
+    }
+
+    #[test]
+    fn test_abbreviation_out_of_order() {
+        // "fb" can't match "battlefield" because f appears before b in "fb" but
+        // in "battlefield" b comes before f — wait, actually b-a-t-t-l-e-f...
+        // 'f' first: find 'f' in "battlefield" → not found before 'b' wait...
+        // The algorithm finds chars in order. "fb": find 'f' in battlefield → pos 6,
+        // then find 'b' in remainder "ield" → not found. So false.
+        assert!(!SteamGameDiscovery::abbreviation_matches(
+            "fb",
+            "battlefield"
+        ));
+    }
+
+    // -- add_game tests --
+
+    #[test]
+    fn test_add_game_basic() {
+        let mut games = HashMap::new();
+        let lib = PathBuf::from("C:\\Steam");
+        let key = SteamGameDiscovery::add_game(
+            &mut games,
+            730,
+            "Counter-Strike 2".to_string(),
+            "cs2.exe".to_string(),
+            &lib,
+        );
+        assert_eq!(key, Some("cs2".to_string()));
+        assert_eq!(games.len(), 1);
+        let game = games.get("cs2").unwrap();
+        assert_eq!(game.app_id, 730);
+        assert_eq!(game.name, "Counter-Strike 2");
+        assert_eq!(game.executable, "cs2.exe");
+    }
+
+    #[test]
+    fn test_add_game_strips_exe_and_lowercases() {
+        let mut games = HashMap::new();
+        let lib = PathBuf::from("C:\\Steam");
+        let key = SteamGameDiscovery::add_game(
+            &mut games,
+            12345,
+            "My Game".to_string(),
+            "MyGame.exe".to_string(),
+            &lib,
+        );
+        assert_eq!(key, Some("mygame".to_string()));
+    }
+
+    #[test]
+    fn test_add_game_no_extension() {
+        let mut games = HashMap::new();
+        let lib = PathBuf::from("/steam");
+        let key = SteamGameDiscovery::add_game(
+            &mut games,
+            999,
+            "Linux Game".to_string(),
+            "linuxgame".to_string(),
+            &lib,
+        );
+        assert_eq!(key, Some("linuxgame".to_string()));
+    }
+
+    #[test]
+    fn test_add_game_empty_exe() {
+        let mut games = HashMap::new();
+        let lib = PathBuf::from("C:\\Steam");
+        let key = SteamGameDiscovery::add_game(
+            &mut games,
+            0,
+            "Empty".to_string(),
+            ".exe".to_string(),
+            &lib,
+        );
+        // key would be "" after stripping .exe, should return None
+        assert_eq!(key, None);
+        assert!(games.is_empty());
+    }
+
+    #[test]
+    fn test_add_game_install_path() {
+        let mut games = HashMap::new();
+        let lib = PathBuf::from("D:\\SteamLibrary");
+        SteamGameDiscovery::add_game(
+            &mut games,
+            440,
+            "Team Fortress 2".to_string(),
+            "hl2.exe".to_string(),
+            &lib,
+        );
+        let game = games.get("hl2").unwrap();
+        let expected = PathBuf::from("D:\\SteamLibrary")
+            .join("steamapps")
+            .join("common");
+        assert_eq!(game.install_path, expected);
+    }
+
+    // -- lookup tests --
+
+    #[test]
+    fn test_lookup_with_exe_extension() {
+        let mut games = HashMap::new();
+        games.insert(
+            "cs2".to_string(),
+            SteamGame {
+                app_id: 730,
+                name: "Counter-Strike 2".to_string(),
+                executable: "cs2.exe".to_string(),
+                install_path: PathBuf::from("C:\\Steam\\steamapps\\common"),
+            },
+        );
+        let discovery = SteamGameDiscovery {
+            games,
+            build_time_ms: 0,
+            game_count: 1,
+            from_cache: false,
+        };
+        assert!(discovery.lookup("cs2.exe").is_some());
+        assert_eq!(discovery.lookup("cs2.exe").unwrap().app_id, 730);
+    }
+
+    #[test]
+    fn test_lookup_without_extension() {
+        let mut games = HashMap::new();
+        games.insert(
+            "cs2".to_string(),
+            SteamGame {
+                app_id: 730,
+                name: "CS2".to_string(),
+                executable: "cs2.exe".to_string(),
+                install_path: PathBuf::from("/steam"),
+            },
+        );
+        let discovery = SteamGameDiscovery {
+            games,
+            build_time_ms: 0,
+            game_count: 1,
+            from_cache: false,
+        };
+        assert!(discovery.lookup("cs2").is_some());
+    }
+
+    #[test]
+    fn test_lookup_case_insensitive() {
+        let mut games = HashMap::new();
+        games.insert(
+            "cs2".to_string(),
+            SteamGame {
+                app_id: 730,
+                name: "CS2".to_string(),
+                executable: "cs2.exe".to_string(),
+                install_path: PathBuf::from("/steam"),
+            },
+        );
+        let discovery = SteamGameDiscovery {
+            games,
+            build_time_ms: 0,
+            game_count: 1,
+            from_cache: false,
+        };
+        assert!(discovery.lookup("CS2.exe").is_some());
+    }
+
+    #[test]
+    fn test_lookup_not_found() {
+        let discovery = SteamGameDiscovery {
+            games: HashMap::new(),
+            build_time_ms: 0,
+            game_count: 0,
+            from_cache: false,
+        };
+        assert!(discovery.lookup("nonexistent.exe").is_none());
     }
 }

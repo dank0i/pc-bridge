@@ -120,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
             #[cfg(windows)]
             {
                 use windows::core::w;
-                use windows::Win32::UI::WindowsAndMessaging::*;
+                use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK};
                 unsafe {
                     MessageBoxW(
                         None,
@@ -365,9 +365,12 @@ fn log_enabled_features(config: &Config) {
 /// Kill any other running instances (platform-specific)
 #[cfg(windows)]
 fn kill_existing_instances() {
-    use windows::Win32::Foundation::*;
-    use windows::Win32::System::Diagnostics::ToolHelp::*;
-    use windows::Win32::System::Threading::*;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
 
     let my_pid = std::process::id();
 
@@ -388,7 +391,7 @@ fn kill_existing_instances() {
             ..Default::default()
         };
 
-        if Process32FirstW(snapshot, &mut entry).is_ok() {
+        if Process32FirstW(snapshot, &raw mut entry).is_ok() {
             loop {
                 let proc_name = String::from_utf16_lossy(&entry.szExeFile)
                     .trim_end_matches('\0')
@@ -408,7 +411,7 @@ fn kill_existing_instances() {
                     }
                 }
 
-                if Process32NextW(snapshot, &mut entry).is_err() {
+                if Process32NextW(snapshot, &raw mut entry).is_err() {
                     break;
                 }
             }

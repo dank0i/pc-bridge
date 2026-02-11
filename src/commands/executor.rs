@@ -273,7 +273,9 @@ fn expand_env_vars(s: &str) -> String {
 
 /// Send Ctrl+F6 keypress (Discord leave channel hotkey)
 fn send_ctrl_f6() {
-    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        keybd_event, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+    };
 
     const VK_CONTROL: u8 = 0x11;
     const VK_F6: u8 = 0x75;
@@ -321,7 +323,7 @@ fn restart() {
         AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
         TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
     };
-    use windows::Win32::System::Shutdown::*;
+    use windows::Win32::System::Shutdown::{ExitWindowsEx, EWX_REBOOT, SHUTDOWN_REASON};
     use windows::Win32::System::Threading::GetCurrentProcess;
     use windows::Win32::System::Threading::OpenProcessToken;
 
@@ -331,12 +333,12 @@ fn restart() {
         if OpenProcessToken(
             GetCurrentProcess(),
             TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
-            &mut token,
+            &raw mut token,
         )
         .is_ok()
         {
             let mut luid = LUID::default();
-            if LookupPrivilegeValueW(None, w!("SeShutdownPrivilege"), &mut luid).is_ok() {
+            if LookupPrivilegeValueW(None, w!("SeShutdownPrivilege"), &raw mut luid).is_ok() {
                 let tp = TOKEN_PRIVILEGES {
                     PrivilegeCount: 1,
                     Privileges: [LUID_AND_ATTRIBUTES {
@@ -344,11 +346,162 @@ fn restart() {
                         Attributes: SE_PRIVILEGE_ENABLED,
                     }],
                 };
-                let _ = AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None);
+                let _ = AdjustTokenPrivileges(token, false, Some(&raw const tp), 0, None, None);
             }
         }
 
         // Restart
         let _ = ExitWindowsEx(EWX_REBOOT, SHUTDOWN_REASON(0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- get_predefined_command tests --
+
+    #[test]
+    fn test_predefined_screensaver() {
+        let cmd = get_predefined_command("Screensaver");
+        assert!(cmd.is_some());
+        assert!(cmd.unwrap().contains("scrnsave.scr"));
+    }
+
+    #[test]
+    fn test_predefined_shutdown() {
+        assert_eq!(get_predefined_command("Shutdown"), Some("shutdown -s -t 0"));
+    }
+
+    #[test]
+    fn test_predefined_sleep() {
+        let cmd = get_predefined_command("sleep");
+        assert!(cmd.is_some());
+        assert!(cmd.unwrap().contains("SetSuspendState"));
+    }
+
+    #[test]
+    fn test_predefined_native_commands_return_none() {
+        // These are handled natively, not via shell command
+        for name in &[
+            "Wake",
+            "Lock",
+            "Hibernate",
+            "Restart",
+            "volume_set",
+            "volume_mute",
+            "media_play_pause",
+            "media_next",
+            "media_previous",
+            "media_stop",
+        ] {
+            assert!(
+                get_predefined_command(name).is_none(),
+                "{name} should be None"
+            );
+        }
+    }
+
+    #[test]
+    fn test_predefined_unknown_returns_none() {
+        assert!(get_predefined_command("nonexistent").is_none());
+    }
+
+    // -- needs_ampersand tests --
+
+    #[test]
+    fn test_needs_ampersand_plain_command() {
+        assert!(needs_ampersand("notepad.exe"));
+    }
+
+    #[test]
+    fn test_needs_ampersand_path_command() {
+        assert!(needs_ampersand(r"C:\Program Files\app.exe"));
+    }
+
+    #[test]
+    fn test_needs_ampersand_start_process() {
+        assert!(!needs_ampersand("Start-Process notepad"));
+    }
+
+    #[test]
+    fn test_needs_ampersand_get_process() {
+        assert!(!needs_ampersand("Get-Process notepad"));
+    }
+
+    #[test]
+    fn test_needs_ampersand_stop_process() {
+        assert!(!needs_ampersand("Stop-Process -Name notepad"));
+    }
+
+    #[test]
+    fn test_needs_ampersand_add_type() {
+        assert!(!needs_ampersand("Add-Type -TypeDefinition ..."));
+    }
+
+    #[test]
+    fn test_needs_ampersand_set_cmdlet() {
+        assert!(!needs_ampersand("Set-Location C:\\"));
+    }
+
+    #[test]
+    fn test_needs_ampersand_new_cmdlet() {
+        assert!(!needs_ampersand("New-Item -Path test.txt"));
+    }
+
+    #[test]
+    fn test_needs_ampersand_remove_cmdlet() {
+        assert!(!needs_ampersand("Remove-Item test.txt"));
+    }
+
+    #[test]
+    fn test_needs_ampersand_invoke_cmdlet() {
+        assert!(!needs_ampersand("Invoke-WebRequest https://example.com"));
+    }
+
+    // -- expand_env_vars tests --
+
+    #[test]
+    fn test_expand_env_no_vars() {
+        assert_eq!(expand_env_vars("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_expand_env_known_var() {
+        std::env::set_var("PC_BRIDGE_TEST_VAR", "replaced");
+        assert_eq!(
+            expand_env_vars("before %PC_BRIDGE_TEST_VAR% after"),
+            "before replaced after"
+        );
+        std::env::remove_var("PC_BRIDGE_TEST_VAR");
+    }
+
+    #[test]
+    fn test_expand_env_unknown_var() {
+        // Unknown vars expand to empty string
+        assert_eq!(
+            expand_env_vars("before %UNLIKELY_VAR_39182% after"),
+            "before  after"
+        );
+    }
+
+    #[test]
+    fn test_expand_env_unclosed_percent() {
+        // Unclosed % keeps literal text
+        assert_eq!(expand_env_vars("path %unclosed"), "path %unclosed");
+    }
+
+    #[test]
+    fn test_expand_env_multiple_vars() {
+        std::env::set_var("PC_BRIDGE_A", "X");
+        std::env::set_var("PC_BRIDGE_B", "Y");
+        assert_eq!(expand_env_vars("%PC_BRIDGE_A%-%PC_BRIDGE_B%"), "X-Y");
+        std::env::remove_var("PC_BRIDGE_A");
+        std::env::remove_var("PC_BRIDGE_B");
+    }
+
+    #[test]
+    fn test_expand_env_empty_input() {
+        assert_eq!(expand_env_vars(""), "");
     }
 }

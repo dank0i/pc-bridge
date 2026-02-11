@@ -2,7 +2,7 @@
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 const GITHUB_OWNER: &str = "dank0i";
@@ -158,7 +158,7 @@ fn is_newer_version(remote: &str, current: &str) -> bool {
 
 /// Install update and restart the application
 #[cfg(windows)]
-fn install_and_restart(update_path: &PathBuf) {
+fn install_and_restart(update_path: &Path) {
     use std::process::Command;
 
     let current_exe = match std::env::current_exe() {
@@ -217,7 +217,7 @@ fn install_and_restart(update_path: &PathBuf) {
 }
 
 #[cfg(unix)]
-fn install_and_restart(update_path: &PathBuf) {
+fn install_and_restart(update_path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
@@ -258,4 +258,66 @@ fn install_and_restart(update_path: &PathBuf) {
     }
 
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_newer_version_major_bump() {
+        assert!(is_newer_version("3.0.0", "2.7.0"));
+    }
+
+    #[test]
+    fn test_is_newer_version_minor_bump() {
+        assert!(is_newer_version("2.8.0", "2.7.0"));
+    }
+
+    #[test]
+    fn test_is_newer_version_patch_bump() {
+        assert!(is_newer_version("2.7.1", "2.7.0"));
+    }
+
+    #[test]
+    fn test_is_newer_version_same() {
+        assert!(!is_newer_version("2.7.0", "2.7.0"));
+    }
+
+    #[test]
+    fn test_is_newer_version_older() {
+        assert!(!is_newer_version("2.6.0", "2.7.0"));
+    }
+
+    #[test]
+    fn test_is_newer_version_older_major() {
+        assert!(!is_newer_version("1.9.9", "2.0.0"));
+    }
+
+    #[test]
+    fn test_is_newer_version_with_v_prefix() {
+        // "v" prefix causes first segment to fail parse, so "v3.0.0" → [0,0] vs "v2.7.0" → [0,0]
+        // Both parse equally — this tests that the function doesn't panic on non-numeric input
+        assert!(!is_newer_version("v3.0.0", "v2.7.0"));
+        // Without "v" prefix, it works correctly
+        assert!(is_newer_version("3.0.0", "2.7.0"));
+    }
+
+    #[test]
+    fn test_is_newer_version_with_prerelease() {
+        // "2.8.0-1" splits into [2,8,0,1] which is > [2,7,0]
+        assert!(is_newer_version("2.8.0-1", "2.7.0"));
+    }
+
+    #[test]
+    fn test_is_newer_version_extra_segments() {
+        // [2,7,0,1] > [2,7,0] due to longer length after equal prefix
+        assert!(is_newer_version("2.7.0.1", "2.7.0"));
+    }
+
+    #[test]
+    fn test_is_newer_version_shorter_not_newer() {
+        // [2,7] vs [2,7,0] — equal prefix but shorter, so not newer
+        assert!(!is_newer_version("2.7", "2.7.0"));
+    }
 }

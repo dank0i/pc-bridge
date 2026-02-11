@@ -5,8 +5,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::info;
 use windows::Win32::Foundation::{LPARAM, WPARAM};
-use windows::Win32::UI::Input::KeyboardAndMouse::*;
-use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    keybd_event, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+};
+use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, HWND_BROADCAST};
 
 const WM_SYSCOMMAND: u32 = 0x0112;
 const SC_MONITORPOWER: usize = 0xF170;
@@ -103,12 +105,15 @@ fn send_benign_keypress() {
 
 /// Temporarily prevent system sleep using SetThreadExecutionState
 fn prevent_sleep_temporary(duration: Duration) {
-    use windows::Win32::System::Power::*;
+    use windows::Win32::System::Power::{
+        SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
+        EXECUTION_STATE,
+    };
 
     // Only spawn one prevention goroutine at a time
-    if !SLEEP_PREVENTION_ACTIVE
+    if SLEEP_PREVENTION_ACTIVE
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
+        .is_err()
     {
         return;
     }

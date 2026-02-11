@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 use windows::Win32::Foundation::CloseHandle;
-use windows::Win32::System::Diagnostics::ToolHelp::*;
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
 use wmi::{COMLibrary, WMIConnection};
 
 /// Notification sent when process list changes
@@ -184,7 +186,7 @@ impl ProcessWatcher {
                     ..Default::default()
                 };
 
-                if Process32FirstW(snapshot, &mut entry).is_ok() {
+                if Process32FirstW(snapshot, &raw mut entry).is_ok() {
                     loop {
                         // Extract process name
                         let mut name = String::from_utf16_lossy(&entry.szExeFile);
@@ -196,7 +198,7 @@ impl ProcessWatcher {
                             guard.add_process(name, entry.th32ProcessID);
                         }
 
-                        if Process32NextW(snapshot, &mut entry).is_err() {
+                        if Process32NextW(snapshot, &raw mut entry).is_err() {
                             break;
                         }
                     }
@@ -381,15 +383,15 @@ impl ProcessWatcher {
         let mut guard = state.write().await;
 
         // Remove PIDs no longer running
-        let stale: Vec<u32> = guard
+        let expired: Vec<u32> = guard
             .pid_to_name
             .keys()
             .filter(|pid| !snapshot.contains_key(pid))
             .copied()
             .collect();
 
-        let pruned = stale.len();
-        for pid in stale {
+        let pruned = expired.len();
+        for pid in expired {
             guard.remove_process(pid);
         }
 
@@ -416,7 +418,7 @@ impl ProcessWatcher {
                     ..Default::default()
                 };
 
-                if Process32FirstW(snapshot, &mut entry).is_ok() {
+                if Process32FirstW(snapshot, &raw mut entry).is_ok() {
                     loop {
                         let mut name = String::from_utf16_lossy(&entry.szExeFile);
                         if let Some(pos) = name.find('\0') {
@@ -425,7 +427,7 @@ impl ProcessWatcher {
                         if !name.is_empty() {
                             pids.insert(entry.th32ProcessID, name);
                         }
-                        if Process32NextW(snapshot, &mut entry).is_err() {
+                        if Process32NextW(snapshot, &raw mut entry).is_err() {
                             break;
                         }
                     }

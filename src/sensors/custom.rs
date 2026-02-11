@@ -224,7 +224,7 @@ impl CustomSensorManager {
         };
 
         let result = tokio::task::spawn_blocking(move || {
-            use winreg::enums::*;
+            use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
             use winreg::RegKey;
 
             // Parse key path (e.g., "HKEY_LOCAL_MACHINE\\SOFTWARE\\...")

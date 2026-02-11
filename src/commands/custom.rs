@@ -85,7 +85,7 @@ async fn execute_powershell(cmd: &CustomCommand) -> anyhow::Result<()> {
     tokio::task::spawn_blocking(move || {
         if admin {
             // Run elevated via Start-Process -Verb RunAs
-            let escaped = script.replace("'", "''");
+            let escaped = script.replace('\'', "''");
             let ps_cmd = format!(
                 "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -Command \"{}\"'",
                 escaped
@@ -190,7 +190,7 @@ async fn execute_shell(cmd: &CustomCommand) -> anyhow::Result<()> {
 
     tokio::task::spawn_blocking(move || {
         if admin {
-            let escaped = command.replace("'", "''");
+            let escaped = command.replace('\'', "''");
             let ps_cmd = format!(
                 "Start-Process cmd -Verb RunAs -ArgumentList '/c {}'",
                 escaped

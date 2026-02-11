@@ -7,7 +7,11 @@
 #[cfg(windows)]
 use std::sync::OnceLock;
 #[cfg(windows)]
-use windows::{Win32::Media::Audio::Endpoints::*, Win32::Media::Audio::*, Win32::System::Com::*};
+use windows::{
+    Win32::Media::Audio::Endpoints::IAudioEndpointVolume,
+    Win32::Media::Audio::{eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator},
+    Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_APARTMENTTHREADED},
+};
 
 #[cfg(windows)]
 static COM_INITIALIZED: OnceLock<()> = OnceLock::new();
@@ -119,7 +123,11 @@ pub fn toggle_mute() -> bool {
 /// Send media key press (play/pause, next, previous, stop)
 #[cfg(windows)]
 pub fn send_media_key(key: MediaKey) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+        VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK, VK_MEDIA_STOP,
+        VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
+    };
 
     let vk = match key {
         MediaKey::PlayPause => VK_MEDIA_PLAY_PAUSE,

@@ -53,21 +53,24 @@ fn get_default_device_name() -> String {
 /// Clear screen (Windows)
 #[cfg(windows)]
 fn clear_screen() {
-    use windows::Win32::System::Console::*;
+    use windows::Win32::System::Console::{
+        FillConsoleOutputCharacterA, GetConsoleScreenBufferInfo, GetStdHandle,
+        SetConsoleCursorPosition, COORD, STD_OUTPUT_HANDLE,
+    };
     unsafe {
         let handle = GetStdHandle(STD_OUTPUT_HANDLE).unwrap_or_default();
         let mut info = std::mem::zeroed();
-        if GetConsoleScreenBufferInfo(handle, &mut info).is_ok() {
+        if GetConsoleScreenBufferInfo(handle, &raw mut info).is_ok() {
             let size = info.dwSize.X as u32 * info.dwSize.Y as u32;
             let mut written = 0;
             let _ = FillConsoleOutputCharacterA(
                 handle,
                 b' ' as i8,
                 size,
-                Default::default(),
-                &mut written,
+                COORD::default(),
+                &raw mut written,
             );
-            let _ = SetConsoleCursorPosition(handle, Default::default());
+            let _ = SetConsoleCursorPosition(handle, COORD::default());
         }
     }
 }
@@ -105,7 +108,7 @@ fn read_input(prompt: &str) -> String {
 #[cfg(windows)]
 pub fn run_setup_wizard() -> Option<SetupConfig> {
     use windows::core::w;
-    use windows::Win32::System::Console::*;
+    use windows::Win32::System::Console::{AllocConsole, FreeConsole, SetConsoleTitleW};
 
     // Allocate console for input (we're a GUI app)
     unsafe {

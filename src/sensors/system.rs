@@ -99,11 +99,17 @@ fn get_cpu_times() -> CpuTimes {
         let mut kernel = FILETIME::default();
         let mut user = FILETIME::default();
 
-        if GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user)).is_ok() {
+        if GetSystemTimes(
+            Some(&raw mut idle),
+            Some(&raw mut kernel),
+            Some(&raw mut user),
+        )
+        .is_ok()
+        {
             CpuTimes {
-                idle: filetime_to_u64(&idle),
-                kernel: filetime_to_u64(&kernel),
-                user: filetime_to_u64(&user),
+                idle: filetime_to_u64(idle),
+                kernel: filetime_to_u64(kernel),
+                user: filetime_to_u64(user),
             }
         } else {
             CpuTimes::default()
@@ -112,7 +118,7 @@ fn get_cpu_times() -> CpuTimes {
 }
 
 #[cfg(windows)]
-fn filetime_to_u64(ft: &windows::Win32::Foundation::FILETIME) -> u64 {
+fn filetime_to_u64(ft: windows::Win32::Foundation::FILETIME) -> u64 {
     ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64)
 }
 
@@ -181,7 +187,7 @@ fn get_memory_percent() -> f64 {
             ..Default::default()
         };
 
-        if GlobalMemoryStatusEx(&mut mem).is_ok() {
+        if GlobalMemoryStatusEx(&raw mut mem).is_ok() {
             mem.dwMemoryLoad as f64
         } else {
             0.0
@@ -229,7 +235,7 @@ fn get_battery_status() -> Option<(u8, bool)> {
 
     unsafe {
         let mut status = SYSTEM_POWER_STATUS::default();
-        if GetSystemPowerStatus(&mut status).is_ok() {
+        if GetSystemPowerStatus(&raw mut status).is_ok() {
             // BatteryFlag 128 = no battery
             if status.BatteryFlag == 128 {
                 return None;
@@ -293,7 +299,7 @@ fn get_active_window_title() -> String {
 
     unsafe {
         let hwnd = GetForegroundWindow();
-        if hwnd.0 == std::ptr::null_mut() {
+        if hwnd.0.is_null() {
             return String::new();
         }
 

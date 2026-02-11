@@ -1,6 +1,6 @@
 //! Cross-platform system tray icon with menu
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::sync::broadcast;
 use tracing::{debug, error, info};
 
@@ -83,12 +83,12 @@ fn run_message_loop(shutdown_tx: &broadcast::Sender<()>) {
     unsafe {
         let mut msg: MSG = std::mem::zeroed();
         loop {
-            let ret = GetMessageW(&mut msg, None, 0, 0);
+            let ret = GetMessageW(&raw mut msg, None, 0, 0);
             if ret.0 == 0 || ret.0 == -1 {
                 break;
             }
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+            let _ = TranslateMessage(&raw const msg);
+            DispatchMessageW(&raw const msg);
 
             // Check if we should exit
             if shutdown_tx.receiver_count() == 0 {
@@ -259,7 +259,7 @@ fn decode_bmp_dib(data: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
 
 /// Open config file with default editor
 #[cfg(windows)]
-fn open_config_file(path: &PathBuf) {
+fn open_config_file(path: &Path) {
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -286,7 +286,7 @@ fn open_config_file(path: &PathBuf) {
 
 /// Open config file with default editor (Linux/macOS)
 #[cfg(unix)]
-fn open_config_file(path: &PathBuf) {
+fn open_config_file(path: &Path) {
     use std::process::Command;
 
     // Try xdg-open (Linux) then open (macOS)
