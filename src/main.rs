@@ -110,6 +110,9 @@ async fn main() -> anyhow::Result<()> {
     // Kill any existing instances
     kill_existing_instances();
 
+    // Clean up leftover .old files from a previous update
+    updater::cleanup_old_files();
+
     // Check for first run - show setup wizard if no config exists
     if Config::is_first_run()? {
         info!("First run detected - launching setup wizard");

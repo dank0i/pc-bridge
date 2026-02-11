@@ -1,4 +1,8 @@
 //! Auto-updater - checks GitHub releases on launch
+//!
+//! Uses the "rename trick" on Windows: a running exe can be renamed but not
+//! deleted. So we rename ourselves to `.old`, move the update into place,
+//! spawn the new exe, and exit. The new instance cleans up `.old` on startup.
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -23,6 +27,22 @@ struct GitHubRelease {
 struct GitHubAsset {
     name: String,
     browser_download_url: String,
+}
+
+/// Clean up leftover `.old` files from a previous update.
+/// Called on startup before the update check.
+pub fn cleanup_old_files() {
+    let current_exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let old_path = current_exe.with_extension("exe.old");
+    if old_path.exists() {
+        match std::fs::remove_file(&old_path) {
+            Ok(()) => info!("Cleaned up old update file: {:?}", old_path),
+            Err(e) => warn!("Failed to clean up {:?}: {}", old_path, e),
+        }
+    }
 }
 
 /// Check for updates and download if available
@@ -156,7 +176,14 @@ fn is_newer_version(remote: &str, current: &str) -> bool {
     remote_parts.len() > current_parts.len()
 }
 
-/// Install update and restart the application
+/// Install update and restart the application.
+///
+/// Uses the rename trick — no external processes (cmd.exe, PowerShell, bash).
+/// A running exe on Windows can be renamed but not overwritten, so:
+/// 1. Rename `pc-bridge.exe` → `pc-bridge.exe.old`
+/// 2. Rename `pc-bridge.exe.update` → `pc-bridge.exe`
+/// 3. Spawn the new `pc-bridge.exe`
+/// 4. Exit — new instance cleans up `.old` on startup via `cleanup_old_files()`
 #[cfg(windows)]
 fn install_and_restart(update_path: &Path) {
     use std::process::Command;
@@ -169,53 +196,54 @@ fn install_and_restart(update_path: &Path) {
         }
     };
 
-    let my_pid = std::process::id();
+    let old_path = current_exe.with_extension("exe.old");
 
-    // PowerShell script that:
-    // 1. Waits for this process to exit
-    // 2. Replaces the old exe with the new one
-    // 3. Starts the new exe
-    let ps_script = format!(
-        r#"
-        Start-Sleep -Milliseconds 500
-        $maxWait = 30
-        $waited = 0
-        while ((Get-Process -Id {pid} -ErrorAction SilentlyContinue) -and ($waited -lt $maxWait)) {{
-            Start-Sleep -Seconds 1
-            $waited++
-        }}
-        Start-Sleep -Milliseconds 500
-        Remove-Item -Path '{current}' -Force -ErrorAction SilentlyContinue
-        Move-Item -Path '{update}' -Destination '{current}' -Force
-        Start-Process -FilePath '{current}'
-        "#,
-        pid = my_pid,
-        current = current_exe.display(),
-        update = update_path.display()
-    );
+    // Remove any leftover .old file from a previous update
+    if old_path.exists() {
+        if let Err(e) = std::fs::remove_file(&old_path) {
+            warn!("Failed to remove old update file: {}", e);
+            // Non-fatal — try to rename anyway, it may work if the old .old is unlocked
+        }
+    }
 
-    info!("Launching update installer and exiting...");
-
-    // Launch PowerShell in background to do the swap
-    let mut cmd = Command::new("powershell");
-    cmd.args([
-        "-NoProfile",
-        "-WindowStyle",
-        "Hidden",
-        "-Command",
-        &ps_script,
-    ]);
-    cmd.creation_flags(CREATE_NO_WINDOW);
-
-    if let Err(e) = cmd.spawn() {
-        warn!("Failed to spawn update installer: {}", e);
+    // Step 1: Rename running exe out of the way
+    if let Err(e) = std::fs::rename(&current_exe, &old_path) {
+        warn!("Failed to rename current exe to .old: {}", e);
         return;
     }
 
-    // Exit so the installer can replace us
+    // Step 2: Move update into place
+    if let Err(e) = std::fs::rename(update_path, &current_exe) {
+        warn!("Failed to move update into place: {}", e);
+        // Try to restore the original
+        if let Err(e2) = std::fs::rename(&old_path, &current_exe) {
+            warn!(
+                "Failed to restore original exe: {} — manual intervention needed",
+                e2
+            );
+        }
+        return;
+    }
+
+    info!("Update installed, starting new version...");
+
+    // Step 3: Spawn the new exe
+    let mut cmd = Command::new(&current_exe);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    if let Err(e) = cmd.spawn() {
+        warn!("Failed to start updated exe: {}", e);
+        return;
+    }
+
+    // Step 4: Exit so the new instance takes over
     std::process::exit(0);
 }
 
+/// Install update and restart (Unix).
+///
+/// On Unix, a running binary can be replaced directly (the OS keeps the old
+/// inode open until the process exits). So this is even simpler than Windows.
 #[cfg(unix)]
 fn install_and_restart(update_path: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -234,26 +262,16 @@ fn install_and_restart(update_path: &Path) {
         warn!("Failed to set permissions: {}", e);
     }
 
-    let my_pid = std::process::id();
+    // Replace in place — Unix allows this while running
+    if let Err(e) = std::fs::rename(update_path, &current_exe) {
+        warn!("Failed to replace binary: {}", e);
+        return;
+    }
 
-    // Bash script to wait, replace, and restart
-    let script = format!(
-        r#"
-        sleep 1
-        while kill -0 {pid} 2>/dev/null; do sleep 1; done
-        sleep 0.5
-        mv -f '{update}' '{current}'
-        '{current}' &
-        "#,
-        pid = my_pid,
-        current = current_exe.display(),
-        update = update_path.display()
-    );
+    info!("Update installed, starting new version...");
 
-    info!("Launching update installer and exiting...");
-
-    if let Err(e) = Command::new("bash").args(["-c", &script]).spawn() {
-        warn!("Failed to spawn update installer: {}", e);
+    if let Err(e) = Command::new(&current_exe).spawn() {
+        warn!("Failed to start updated binary: {}", e);
         return;
     }
 
