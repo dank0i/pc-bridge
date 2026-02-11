@@ -24,17 +24,21 @@ pub struct Config {
     #[serde(default)]
     pub games: HashMap<String, GameConfig>,
 
-    // Tray icon - enabled by default
-    #[serde(default = "default_true")]
-    pub show_tray_icon: bool,
+    // Legacy field - read during deserialization for migration, then discarded
+    #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
+    pub(crate) show_tray_icon: Option<bool>,
 
-    // Custom sensors/commands - disabled by default for security
+    /// Allow custom sensor polling via PowerShell/WMI/registry
     #[serde(default)]
     pub custom_sensors_enabled: bool,
+    /// Allow custom command execution via MQTT
     #[serde(default)]
     pub custom_commands_enabled: bool,
+    /// Allow custom commands to run with elevated privileges
     #[serde(default)]
     pub custom_command_privileges_allowed: bool,
+
     #[serde(default)]
     pub custom_sensors: Vec<CustomSensor>,
     #[serde(default)]
@@ -123,14 +127,17 @@ impl GameConfig {
     }
 }
 
-/// Feature toggles - all disabled by default (opt-in philosophy)
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Feature toggles
+///
+/// All features default to `false` (opt-in) except `power_events` which
+/// defaults to `true` since sleep/wake/display tracking is fundamental.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureConfig {
     #[serde(default)]
     pub game_detection: bool,
     #[serde(default)]
     pub idle_tracking: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub power_events: bool,
     #[serde(default)]
     pub notifications: bool,
@@ -140,6 +147,26 @@ pub struct FeatureConfig {
     pub audio_control: bool,
     #[serde(default)]
     pub steam_updates: bool,
+    #[serde(default)]
+    pub discord: bool,
+    #[serde(default = "default_true")]
+    pub show_tray_icon: bool,
+}
+
+impl Default for FeatureConfig {
+    fn default() -> Self {
+        Self {
+            game_detection: false,
+            idle_tracking: false,
+            power_events: true,
+            notifications: false,
+            system_sensors: false,
+            audio_control: false,
+            steam_updates: false,
+            discord: false,
+            show_tray_icon: true,
+        }
+    }
 }
 
 /// Custom sensor definition
@@ -314,12 +341,6 @@ impl Config {
 
         let mut migrated = false;
 
-        // Add show_tray_icon if missing (default true)
-        if !obj.contains_key("show_tray_icon") {
-            obj.insert("show_tray_icon".to_string(), serde_json::Value::Bool(true));
-            migrated = true;
-        }
-
         // Fix zero intervals (bug from v1.9.0-beta.1/2)
         if let Some(intervals) = obj.get_mut("intervals").and_then(|v| v.as_object_mut()) {
             if intervals.get("game_sensor").and_then(|v| v.as_u64()) == Some(0) {
@@ -336,54 +357,38 @@ impl Config {
             }
         }
 
-        // Add features section if missing (all disabled by default)
+        // Ensure features object exists
         if !obj.contains_key("features") {
-            obj.insert(
-                "features".to_string(),
-                serde_json::json!({
-                    "game_detection": false,
-                    "idle_tracking": false,
-                    "power_events": false,
-                    "notifications": false
-                }),
-            );
+            obj.insert("features".to_string(), serde_json::json!({}));
             migrated = true;
         }
 
-        // Add custom sensor/command fields if missing
-        if !obj.contains_key("custom_sensors_enabled") {
-            obj.insert(
-                "custom_sensors_enabled".to_string(),
-                serde_json::Value::Bool(false),
-            );
+        // Migrate legacy top-level show_tray_icon into features (preserving user's value)
+        let show_tray_icon_val = obj.get("show_tray_icon").and_then(|v| v.as_bool());
+
+        if let Some(val) = show_tray_icon_val {
+            let features = obj
+                .get_mut("features")
+                .and_then(|v| v.as_object_mut())
+                .expect("features must exist after insert above");
+            if !features.contains_key("show_tray_icon") {
+                features.insert("show_tray_icon".to_string(), serde_json::Value::Bool(val));
+                migrated = true;
+            }
+        }
+
+        // Remove legacy top-level show_tray_icon (now in features)
+        if obj.remove("show_tray_icon").is_some() {
             migrated = true;
         }
-        if !obj.contains_key("custom_commands_enabled") {
-            obj.insert(
-                "custom_commands_enabled".to_string(),
-                serde_json::Value::Bool(false),
-            );
-            migrated = true;
-        }
-        if !obj.contains_key("custom_command_privileges_allowed") {
-            obj.insert(
-                "custom_command_privileges_allowed".to_string(),
-                serde_json::Value::Bool(false),
-            );
-            migrated = true;
-        }
-        if !obj.contains_key("custom_sensors") {
-            obj.insert(
-                "custom_sensors".to_string(),
-                serde_json::Value::Array(vec![]),
-            );
-            migrated = true;
-        }
-        if !obj.contains_key("custom_commands") {
-            obj.insert(
-                "custom_commands".to_string(),
-                serde_json::Value::Array(vec![]),
-            );
+
+        // Ensure power_events defaults to true for new features sections
+        let features = obj
+            .get_mut("features")
+            .and_then(|v| v.as_object_mut())
+            .expect("features must exist");
+        if !features.contains_key("power_events") {
+            features.insert("power_events".to_string(), serde_json::Value::Bool(true));
             migrated = true;
         }
 
@@ -392,7 +397,7 @@ impl Config {
             let new_content = serde_json::to_string_pretty(&json)?;
             std::fs::write(config_path, &new_content)
                 .with_context(|| format!("Failed to write migrated config to {:?}", config_path))?;
-            info!("Migrated userConfig.json - added new fields");
+            info!("Migrated userConfig.json - moved feature toggles into features section");
             Ok(new_content)
         } else {
             Ok(content.to_string())
@@ -749,20 +754,20 @@ async fn reload_games(state: &AppState) {
             // Log security-relevant changes
             if config.custom_sensors_enabled != old_sensors_enabled {
                 if config.custom_sensors_enabled {
-                    warn!("⚠️  custom_sensors_enabled is now TRUE");
+                    warn!("custom_sensors_enabled is now TRUE");
                 } else {
                     info!("custom_sensors_enabled is now false");
                 }
             }
             if config.custom_commands_enabled != old_commands_enabled {
                 if config.custom_commands_enabled {
-                    warn!("⚠️  custom_commands_enabled is now TRUE - arbitrary code execution possible via MQTT");
+                    warn!("custom_commands_enabled is now TRUE - arbitrary code execution possible via MQTT");
                 } else {
                     info!("custom_commands_enabled is now false");
                 }
             }
             if config.custom_command_privileges_allowed {
-                warn!("⚠️  custom_command_privileges_allowed is TRUE - commands can run with ADMIN privileges");
+                warn!("custom_command_privileges_allowed is TRUE - commands can run with ADMIN privileges");
             }
         }
         Err(e) => {
@@ -787,7 +792,7 @@ mod tests {
             intervals: IntervalConfig::default(),
             features: FeatureConfig::default(),
             games: HashMap::new(),
-            show_tray_icon: true,
+            show_tray_icon: None,
             custom_sensors_enabled: false,
             custom_commands_enabled: false,
             custom_command_privileges_allowed: false,

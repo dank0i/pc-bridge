@@ -9,9 +9,9 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "----------------------------------------------------------------------"
 echo "                    pc-bridge Quality Checks"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "----------------------------------------------------------------------"
 echo ""
 
 FAILED=0
@@ -19,9 +19,9 @@ FAILED=0
 # Formatting
 echo -e "${YELLOW}[1/6]${NC} Checking formatting..."
 if cargo fmt --check; then
-    echo -e "${GREEN}✓${NC} Formatting OK"
+    echo -e "${GREEN}OK${NC} Formatting OK"
 else
-    echo -e "${RED}✗${NC} Formatting issues found. Run: cargo fmt"
+    echo -e "${RED}FAIL${NC} Formatting issues found. Run: cargo fmt"
     FAILED=1
 fi
 echo ""
@@ -29,66 +29,67 @@ echo ""
 # Clippy
 echo -e "${YELLOW}[2/6]${NC} Running Clippy..."
 if cargo clippy -- -D warnings 2>&1 | grep -q "warning\|error"; then
-    echo -e "${RED}✗${NC} Clippy found issues"
+    echo -e "${RED}FAIL${NC} Clippy found issues"
     FAILED=1
 else
-    echo -e "${GREEN}✓${NC} Clippy OK"
+    echo -e "${GREEN}OK${NC} Clippy OK"
 fi
 echo ""
 
 # Tests
 echo -e "${YELLOW}[3/6]${NC} Running tests..."
 if cargo test 2>&1 | tail -5 | grep -q "FAILED"; then
-    echo -e "${RED}✗${NC} Tests failed"
+    echo -e "${RED}FAIL${NC} Tests failed"
     FAILED=1
 else
-    echo -e "${GREEN}✓${NC} Tests OK"
+    echo -e "${GREEN}OK${NC} Tests OK"
 fi
 echo ""
 
-# Audit (if installed)
+# Audit via cargo-deny (respects deny.toml ignore list)
 echo -e "${YELLOW}[4/6]${NC} Checking for vulnerabilities..."
-if command -v cargo-audit &> /dev/null; then
-    if cargo audit 2>&1 | grep -q "Crate:"; then
-        echo -e "${RED}✗${NC} Vulnerabilities found"
+if command -v cargo-deny &> /dev/null; then
+    if cargo deny check advisories 2>&1 | grep -q "error\["; then
+        echo -e "${RED}FAIL${NC} Vulnerabilities found"
         FAILED=1
     else
-        echo -e "${GREEN}✓${NC} No vulnerabilities"
+        echo -e "${GREEN}OK${NC} No vulnerabilities"
     fi
 else
-    echo -e "${YELLOW}⚠${NC} cargo-audit not installed. Run: cargo install cargo-audit"
+    echo -e "${YELLOW}!!${NC} cargo-deny not installed. Run: cargo install cargo-deny"
 fi
 echo ""
 
-# Deny (if installed)
+# Deny - licenses and bans
 echo -e "${YELLOW}[5/6]${NC} Checking dependency policy..."
 if command -v cargo-deny &> /dev/null; then
-    if cargo deny check 2>&1 | grep -q "error\["; then
-        echo -e "${RED}✗${NC} Dependency policy violations"
+    if cargo deny check licenses bans 2>&1 | grep -q "error\["; then
+        echo -e "${RED}FAIL${NC} Dependency policy violations"
         FAILED=1
     else
-        echo -e "${GREEN}✓${NC} Dependencies OK"
+        echo -e "${GREEN}OK${NC} Dependencies OK"
     fi
 else
-    echo -e "${YELLOW}⚠${NC} cargo-deny not installed. Run: cargo install cargo-deny"
+    echo -e "${YELLOW}!!${NC} cargo-deny not installed. Run: cargo install cargo-deny"
 fi
 echo ""
 
 # Secrets check (if installed)
 echo -e "${YELLOW}[6/6]${NC} Checking for secrets..."
 if command -v gitleaks &> /dev/null; then
-    if gitleaks detect --no-git 2>&1 | grep -q "leaks found"; then
-        echo -e "${RED}✗${NC} Secrets detected in code"
-        FAILED=1
+    LEAKS_OUTPUT=$(gitleaks detect 2>&1)
+    if echo "$LEAKS_OUTPUT" | grep -q "no leaks found"; then
+        echo -e "${GREEN}OK${NC} No secrets found"
     else
-        echo -e "${GREEN}✓${NC} No secrets found"
+        echo -e "${RED}FAIL${NC} Secrets detected in code"
+        FAILED=1
     fi
 else
-    echo -e "${YELLOW}⚠${NC} gitleaks not installed. Run: brew install gitleaks"
+    echo -e "${YELLOW}!!${NC} gitleaks not installed. Run: brew install gitleaks"
 fi
 echo ""
 
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "----------------------------------------------------------------------"
 if [ $FAILED -eq 0 ]; then
     echo -e "${GREEN}All checks passed!${NC}"
     exit 0

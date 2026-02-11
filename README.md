@@ -6,12 +6,14 @@ A lightweight cross-platform agent that bridges your PC with Home Assistant via 
 
 - **Game Detection** - Monitors running processes and reports current game
 - **Idle Tracking** - Reports last user input time
-- **Power Events** - Detects sleep/wake and publishes state
+- **Power Events** - Detects sleep/wake/display state and publishes state
 - **System Sensors** - CPU usage, memory usage, battery level, active window (native APIs)
 - **Audio Control** - Volume, mute, media keys via Home Assistant
+- **Discord** - Join/leave voice channel commands
 - **Display Wake** - Wakes display after WoL, dismisses screensaver
 - **Remote Commands** - Lock, hibernate, restart, shutdown, sleep, screensaver
 - **Notifications** - Native Windows toast notifications from Home Assistant
+- **Steam Updates** - Detect when Steam games are updating
 - **Hot-Reload** - Updates game mappings without restart
 - **First-Run Wizard** - Interactive setup for MQTT and feature selection
 
@@ -59,7 +61,10 @@ Edit `userConfig.json` next to the executable:
     "power_events": true,
     "notifications": true,
     "system_sensors": true,
-    "audio_control": true
+    "audio_control": true,
+    "steam_updates": false,
+    "discord": false,
+    "show_tray_icon": true
   },
   "intervals": {
     "game_sensor": 5,
@@ -71,7 +76,6 @@ Edit `userConfig.json` next to the executable:
     "FortniteClient-Win64-Shipping": "fortnite",
     "MarvelRivals_Shipping": "marvel_rivals"
   },
-  "show_tray_icon": true,
   "custom_sensors_enabled": false,
   "custom_commands_enabled": false,
   "custom_command_privileges_allowed": false,
@@ -82,18 +86,21 @@ Edit `userConfig.json` next to the executable:
 
 ### Feature Flags
 
-All features are opt-in via the `features` object:
+All features are opt-in via the `features` object (except `power_events` and `show_tray_icon` which default to `true`):
 
-| Feature | Description |
-|---------|-------------|
-| `game_detection` | Monitor running games |
-| `idle_tracking` | Report last user input time |
-| `power_events` | Detect sleep/wake state |
-| `notifications` | Receive toast notifications |
-| `system_sensors` | CPU, memory, battery, active window |
-| `audio_control` | Volume, mute, media key commands |
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `game_detection` | `false` | Monitor running games, register Launch button |
+| `idle_tracking` | `false` | Report last user input time, Screensaver/Wake buttons |
+| `power_events` | **`true`** | Detect sleep/wake/display state, Shutdown/Restart/Sleep/Lock/Hibernate buttons |
+| `notifications` | `false` | Receive toast notifications from HA |
+| `system_sensors` | `false` | CPU, memory, battery, active window |
+| `audio_control` | `false` | Volume, mute, media key commands |
+| `steam_updates` | `false` | Detect when Steam games are updating |
+| `discord` | `false` | Discord voice channel join/leave buttons |
+| `show_tray_icon` | **`true`** | Show system tray icon with context menu |
 
-> **Note:** Missing fields are automatically added when upgrading from older versions.
+> **Note:** Missing fields are automatically added with their defaults when upgrading.
 
 ### Tray Icon
 
@@ -101,7 +108,7 @@ A system tray icon is shown by default (Windows and Linux). Right-click for:
 - **Open configuration** - Opens `userConfig.json` in your default editor
 - **Exit** - Gracefully shuts down PC Bridge
 
-Set `"show_tray_icon": false` to disable.
+Set `features.show_tray_icon` to `false` to disable.
 
 ### Games Configuration
 
@@ -111,17 +118,17 @@ The `games` object maps process names to game IDs:
 
 ## Custom Sensors & Commands
 
-You can define custom sensors and commands for PC-specific monitoring and control.
+Custom sensors and commands are configured at the root level of `userConfig.json` (not inside `features`).
 
 ### Security Model
 
 Custom features are **disabled by default** and require explicit opt-in:
 
-| Setting | Purpose |
-|---------|---------|
-| `custom_sensors_enabled` | Enable custom sensor polling |
-| `custom_commands_enabled` | Enable custom command execution |
-| `custom_command_privileges_allowed` | Allow commands marked `admin: true` |
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `custom_sensors_enabled` | `false` | Enable custom sensor polling |
+| `custom_commands_enabled` | `false` | Enable custom command execution |
+| `custom_command_privileges_allowed` | `false` | Allow commands marked `admin: true` |
 
 ### Custom Sensors
 
@@ -272,7 +279,7 @@ automation:
     action:
       - action: notify.send_message
         data:
-          title: "🔔 Doorbell"
+          title: "Doorbell"
           message: "Someone is at the door"
         target:
           entity_id: notify.my_pc_notification
@@ -289,7 +296,7 @@ automation:
     action:
       - action: notify.send_message
         data:
-          title: "🧺 Laundry"
+          title: "Laundry"
           message: "Washer cycle complete!"
         target:
           entity_id: notify.my_pc_notification
@@ -302,7 +309,7 @@ script:
     sequence:
       - action: notify.send_message
         data:
-          title: "🎮 Game Time?"
+          title: "Game Time?"
           message: "How about playing {{ states('sensor.suggested_game') }}?"
         target:
           entity_id: notify.my_pc_notification

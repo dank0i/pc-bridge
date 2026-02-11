@@ -43,7 +43,7 @@ impl CustomSensorManager {
             }
 
             warn!(
-                "⚠️  Custom sensors ENABLED - {} sensor(s) configured",
+                "Custom sensors ENABLED - {} sensor(s) configured",
                 config.custom_sensors.len()
             );
             for sensor in &config.custom_sensors {

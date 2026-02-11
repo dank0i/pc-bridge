@@ -78,9 +78,9 @@ if $CREATE_TAG && [[ -z "$NEW_VERSION" ]]; then
     exit 1
 fi
 
-echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BLUE}--------------------------------------------------------------------------${NC}"
 echo -e "${BLUE}                         pc-bridge build                                ${NC}"
-echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BLUE}--------------------------------------------------------------------------${NC}"
 
 # Handle version bump
 if [[ -n "$NEW_VERSION" ]]; then
@@ -101,7 +101,7 @@ if [[ -n "$NEW_VERSION" ]]; then
     # Update Cargo.lock
     cargo update -p pc-bridge 2>/dev/null || true
     
-    echo -e "  ${GREEN}✓${NC} Version updated in Cargo.toml"
+    echo -e "  ${GREEN}OK${NC} Version updated in Cargo.toml"
     echo ""
 fi
 
@@ -113,9 +113,9 @@ echo ""
 # Step 1: Format check
 echo -e "${YELLOW}[1/5]${NC} Checking formatting..."
 if cargo fmt --check 2>/dev/null; then
-    echo -e "  ${GREEN}✓${NC} Formatting OK"
+    echo -e "  ${GREEN}OK${NC} Formatting OK"
 else
-    echo -e "  ${RED}✗${NC} Formatting issues found"
+    echo -e "  ${RED}FAIL${NC} Formatting issues found"
     echo -e "  Run: ${YELLOW}cargo fmt${NC} to fix"
     exit 1
 fi
@@ -123,9 +123,9 @@ fi
 # Step 2: Clippy
 echo -e "${YELLOW}[2/5]${NC} Running Clippy..."
 if cargo clippy --all-targets -- -D warnings 2>/dev/null; then
-    echo -e "  ${GREEN}✓${NC} Clippy OK"
+    echo -e "  ${GREEN}OK${NC} Clippy OK"
 else
-    echo -e "  ${RED}✗${NC} Clippy found issues"
+    echo -e "  ${RED}FAIL${NC} Clippy found issues"
     exit 1
 fi
 
@@ -133,9 +133,9 @@ fi
 echo -e "${YELLOW}[3/5]${NC} Running tests..."
 if cargo test --quiet 2>/dev/null; then
     TEST_COUNT=$(cargo test 2>&1 | grep -E "^test result:" | grep -oE "[0-9]+ passed" | head -1)
-    echo -e "  ${GREEN}✓${NC} Tests OK (${TEST_COUNT})"
+    echo -e "  ${GREEN}OK${NC} Tests OK (${TEST_COUNT})"
 else
-    echo -e "  ${RED}✗${NC} Tests failed"
+    echo -e "  ${RED}FAIL${NC} Tests failed"
     exit 1
 fi
 
@@ -143,33 +143,33 @@ fi
 echo -e "${YELLOW}[4/5]${NC} Security audit..."
 if command -v cargo-audit &> /dev/null; then
     if cargo audit --quiet 2>/dev/null; then
-        echo -e "  ${GREEN}✓${NC} No vulnerabilities"
+        echo -e "  ${GREEN}OK${NC} No vulnerabilities"
     else
-        echo -e "  ${YELLOW}⚠${NC} Warnings found (check with cargo audit)"
+        echo -e "  ${YELLOW}!!${NC} Warnings found (check with cargo audit)"
     fi
 else
-    echo -e "  ${YELLOW}⚠${NC} cargo-audit not installed"
+    echo -e "  ${YELLOW}!!${NC} cargo-audit not installed"
 fi
 
 # Step 5: Dependency policy
 echo -e "${YELLOW}[5/5]${NC} Dependency policy..."
 if command -v cargo-deny &> /dev/null; then
     if cargo deny check 2>/dev/null | tail -1 | grep -q "ok"; then
-        echo -e "  ${GREEN}✓${NC} Dependencies OK"
+        echo -e "  ${GREEN}OK${NC} Dependencies OK"
     else
-        echo -e "  ${RED}✗${NC} Dependency policy failed"
+        echo -e "  ${RED}FAIL${NC} Dependency policy failed"
         exit 1
     fi
 else
-    echo -e "  ${YELLOW}⚠${NC} cargo-deny not installed"
+    echo -e "  ${YELLOW}!!${NC} cargo-deny not installed"
 fi
 
 echo ""
 
 if $CHECK_ONLY; then
-    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}--------------------------------------------------------------------------${NC}"
     echo -e "${GREEN}All checks passed!${NC}"
-    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}--------------------------------------------------------------------------${NC}"
     exit 0
 fi
 
@@ -185,30 +185,30 @@ if $CREATE_TAG; then
     
     # Check if there are changes to commit
     if git diff --cached --quiet; then
-        echo -e "  ${YELLOW}⚠${NC} No changes to commit"
+        echo -e "  ${YELLOW}!!${NC} No changes to commit"
     else
         git commit -m "Release ${TAG}"
-        echo -e "  ${GREEN}✓${NC} Committed: Release ${TAG}"
+        echo -e "  ${GREEN}OK${NC} Committed: Release ${TAG}"
     fi
     
     # Create tag (delete if exists locally)
     if git tag -l | grep -q "^${TAG}$"; then
-        echo -e "  ${YELLOW}⚠${NC} Tag ${TAG} already exists locally, recreating..."
+        echo -e "  ${YELLOW}!!${NC} Tag ${TAG} already exists locally, recreating..."
         git tag -d "${TAG}" >/dev/null
     fi
     
     git tag -a "${TAG}" -m "Release ${TAG}"
-    echo -e "  ${GREEN}✓${NC} Created tag: ${TAG}"
+    echo -e "  ${GREEN}OK${NC} Created tag: ${TAG}"
     
     # Push
     echo -e "  Pushing to origin..."
     git push origin main --tags
-    echo -e "  ${GREEN}✓${NC} Pushed to origin"
+    echo -e "  ${GREEN}OK${NC} Pushed to origin"
     
     echo ""
-    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}--------------------------------------------------------------------------${NC}"
     echo -e "${GREEN}Release ${TAG} complete!${NC}"
-    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}--------------------------------------------------------------------------${NC}"
     echo ""
     echo -e "${YELLOW}Next steps:${NC}"
     echo -e "  1. Go to: ${BLUE}https://github.com/dank0i/pc-bridge/releases/new?tag=${TAG}${NC}"
@@ -227,18 +227,18 @@ if $RELEASE; then
     if [[ -f "$BINARY" ]]; then
         SIZE=$(du -h "$BINARY" | cut -f1)
         echo ""
-        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${GREEN}--------------------------------------------------------------------------${NC}"
         echo -e "${GREEN}Build successful!${NC}"
         echo -e "Binary: ${BLUE}${BINARY}${NC}"
         echo -e "Size:   ${BLUE}${SIZE}${NC}"
-        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${GREEN}--------------------------------------------------------------------------${NC}"
         
         # Size warning
         SIZE_BYTES=$(stat -f%z "$BINARY" 2>/dev/null || stat -c%s "$BINARY" 2>/dev/null || echo 0)
         if (( SIZE_BYTES > 25000000 )); then
-            echo -e "${RED}⚠ Warning: Binary exceeds 25MB!${NC}"
+            echo -e "${RED}!! Warning: Binary exceeds 25MB!${NC}"
         elif (( SIZE_BYTES > 15000000 )); then
-            echo -e "${YELLOW}⚠ Note: Binary exceeds 15MB${NC}"
+            echo -e "${YELLOW}!! Note: Binary exceeds 15MB${NC}"
         fi
     fi
 else
@@ -249,10 +249,10 @@ else
     if [[ -f "$BINARY" ]]; then
         SIZE=$(du -h "$BINARY" | cut -f1)
         echo ""
-        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${GREEN}--------------------------------------------------------------------------${NC}"
         echo -e "${GREEN}Build successful!${NC}"
         echo -e "Binary: ${BLUE}${BINARY}${NC}"
         echo -e "Size:   ${BLUE}${SIZE}${NC}"
-        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${GREEN}--------------------------------------------------------------------------${NC}"
     fi
 fi

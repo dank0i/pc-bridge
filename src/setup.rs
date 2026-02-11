@@ -151,7 +151,7 @@ fn run_wizard_flow() -> Option<SetupConfig> {
         if input.is_empty() {
             break; // Use default
         } else if input.contains(' ') {
-            println!("\n  ❌ Name cannot contain spaces!");
+            println!("\n  Name cannot contain spaces!");
             read_input("  Press Enter to try again...");
         } else {
             config.device_name = input;
@@ -197,44 +197,44 @@ fn run_wizard_flow() -> Option<SetupConfig> {
         println!("  Type a number to toggle, Enter when done.");
         println!();
         println!(
-            "  [1] {} Game Detection",
-            if config.game_detection { "✓" } else { "○" }
+            "  [1] [{}] Game Detection",
+            if config.game_detection { "*" } else { " " }
         );
         println!("      Detect running games, report to HA");
         println!();
         println!(
-            "  [2] {} Idle Tracking",
-            if config.idle_tracking { "✓" } else { "○" }
+            "  [2] [{}] Idle Tracking",
+            if config.idle_tracking { "*" } else { " " }
         );
         println!("      Track keyboard/mouse activity");
         println!();
         println!(
-            "  [3] {} Power Events",
-            if config.power_events { "✓" } else { "○" }
+            "  [3] [{}] Power Events",
+            if config.power_events { "*" } else { " " }
         );
         println!("      Report sleep/wake/shutdown");
         println!();
         println!(
-            "  [4] {} Notifications",
-            if config.notifications { "✓" } else { "○" }
+            "  [4] [{}] Notifications",
+            if config.notifications { "*" } else { " " }
         );
         println!("      Receive toast notifications from HA");
         println!();
         println!(
-            "  [5] {} System Sensors",
-            if config.system_sensors { "✓" } else { "○" }
+            "  [5] [{}] System Sensors",
+            if config.system_sensors { "*" } else { " " }
         );
         println!("      CPU, memory, battery, active window");
         println!();
         println!(
-            "  [6] {} Audio Control",
-            if config.audio_control { "✓" } else { "○" }
+            "  [6] [{}] Audio Control",
+            if config.audio_control { "*" } else { " " }
         );
         println!("      Volume, mute, media keys");
         println!();
         println!(
-            "  [7] {} Steam Updates",
-            if config.steam_updates { "✓" } else { "○" }
+            "  [7] [{}] Steam Updates",
+            if config.steam_updates { "*" } else { " " }
         );
         println!("      Detect when Steam games are updating");
         println!();
@@ -270,32 +270,32 @@ fn run_wizard_flow() -> Option<SetupConfig> {
     println!();
     println!("  Features:");
     println!(
-        "    {} Game Detection",
-        if config.game_detection { "✓" } else { "✗" }
+        "    [{}] Game Detection",
+        if config.game_detection { "x" } else { " " }
     );
     println!(
-        "    {} Idle Tracking",
-        if config.idle_tracking { "✓" } else { "✗" }
+        "    [{}] Idle Tracking",
+        if config.idle_tracking { "x" } else { " " }
     );
     println!(
-        "    {} Power Events",
-        if config.power_events { "✓" } else { "✗" }
+        "    [{}] Power Events",
+        if config.power_events { "x" } else { " " }
     );
     println!(
-        "    {} Notifications",
-        if config.notifications { "✓" } else { "✗" }
+        "    [{}] Notifications",
+        if config.notifications { "x" } else { " " }
     );
     println!(
-        "    {} System Sensors",
-        if config.system_sensors { "✓" } else { "✗" }
+        "    [{}] System Sensors",
+        if config.system_sensors { "x" } else { " " }
     );
     println!(
-        "    {} Audio Control",
-        if config.audio_control { "✓" } else { "✗" }
+        "    [{}] Audio Control",
+        if config.audio_control { "x" } else { " " }
     );
     println!(
-        "    {} Steam Updates",
-        if config.steam_updates { "✓" } else { "✗" }
+        "    [{}] Steam Updates",
+        if config.steam_updates { "x" } else { " " }
     );
     println!();
 
@@ -331,9 +331,10 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
             system_sensors: config.system_sensors,
             audio_control: config.audio_control,
             steam_updates: config.steam_updates,
+            ..FeatureConfig::default()
         },
         games: HashMap::new(),
-        show_tray_icon: true,
+        show_tray_icon: None,
         custom_sensors_enabled: false,
         custom_commands_enabled: false,
         custom_command_privileges_allowed: false,

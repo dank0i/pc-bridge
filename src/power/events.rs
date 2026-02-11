@@ -1,13 +1,17 @@
-//! Power event listener - detects sleep/wake events
+//! Power event listener - detects sleep/wake and display power events
 //!
 //! Uses atomic state machine to ensure exactly one sleep and one wake event
 //! per actual power state transition, regardless of how many Windows messages arrive.
+//!
+//! Also monitors display power state via GUID_CONSOLE_DISPLAY_STATE to detect
+//! when Windows turns off the monitor (separate from screensaver).
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 use windows::Win32::Foundation::*;
+use windows::Win32::System::Power::RegisterPowerSettingNotification;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use super::display::wake_display_with_retry;
@@ -17,11 +21,31 @@ const WM_POWERBROADCAST: u32 = 0x218;
 const PBT_APMSUSPEND: usize = 4;
 const PBT_APMRESUMEAUTO: usize = 0x12;
 const PBT_APMRESUMESUSPEND: usize = 7;
+const PBT_POWERSETTINGCHANGE: usize = 0x8013;
+
+/// GUID_CONSOLE_DISPLAY_STATE: {6FE69556-704A-47A0-8F24-C28D936FDA47}
+/// Data values: 0 = off, 1 = on, 2 = dimmed
+const GUID_CONSOLE_DISPLAY_STATE: windows::core::GUID = windows::core::GUID::from_values(
+    0x6FE6_9556,
+    0x704A,
+    0x47A0,
+    [0x8F, 0x24, 0xC2, 0x8D, 0x93, 0x6F, 0xDA, 0x47],
+);
+
+/// Layout of the POWERBROADCAST_SETTING structure from WM_POWERBROADCAST/PBT_POWERSETTINGCHANGE
+#[repr(C)]
+struct PowerBroadcastSetting {
+    power_setting: windows::core::GUID,
+    data_length: u32,
+    data: [u8; 1],
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PowerEvent {
     Sleep,
     Wake,
+    DisplayOff,
+    DisplayOn,
 }
 
 // State machine: 0 = awake, 1 = sleeping
@@ -87,6 +111,16 @@ impl PowerEventListener {
                             // Publish wake state with retries (network may take time)
                             self.publish_wake_with_retry().await;
                         }
+                        PowerEvent::DisplayOff => {
+                            info!("Power event: DISPLAY OFF");
+                            self.state.display_off.store(true, Ordering::SeqCst);
+                            self.state.mqtt.publish_sensor_retained("display", "off").await;
+                        }
+                        PowerEvent::DisplayOn => {
+                            info!("Power event: DISPLAY ON");
+                            self.state.display_off.store(false, Ordering::SeqCst);
+                            self.state.mqtt.publish_sensor_retained("display", "on").await;
+                        }
                     }
                 }
             }
@@ -145,6 +179,17 @@ impl PowerEventListener {
                     return;
                 }
             };
+
+            // Register for display power state notifications
+            if let Err(e) = RegisterPowerSettingNotification(
+                HANDLE(hwnd.0),
+                &GUID_CONSOLE_DISPLAY_STATE,
+                DEVICE_NOTIFY_WINDOW_HANDLE,
+            ) {
+                error!("Failed to register display power notification: {:?}", e);
+            } else {
+                info!("Registered for display power state notifications");
+            }
 
             // Store event_tx in window's user data
             let event_tx_box = Box::new(event_tx);
@@ -210,6 +255,42 @@ impl PowerEventListener {
                             let _ = event_tx.blocking_send(PowerEvent::Wake);
                         } else {
                             debug!("Ignoring duplicate wake event");
+                        }
+                    }
+                    PBT_POWERSETTINGCHANGE => {
+                        // Display power state change notification
+                        let pbs = lparam.0 as *const PowerBroadcastSetting;
+                        if !pbs.is_null() {
+                            let setting = &*pbs;
+                            if setting.power_setting == GUID_CONSOLE_DISPLAY_STATE
+                                && setting.data_length >= 1
+                            {
+                                let display_state = setting.data[0];
+                                debug!(
+                                    "Display power state change: {}",
+                                    match display_state {
+                                        0 => "off",
+                                        1 => "on",
+                                        2 => "dimmed",
+                                        _ => "unknown",
+                                    }
+                                );
+                                match display_state {
+                                    0 => {
+                                        let _ = event_tx.blocking_send(PowerEvent::DisplayOff);
+                                    }
+                                    1 => {
+                                        let _ = event_tx.blocking_send(PowerEvent::DisplayOn);
+                                    }
+                                    2 => {
+                                        // Dimmed - treat as still on (display is visible)
+                                        debug!("Display dimmed, treating as on");
+                                    }
+                                    _ => {
+                                        debug!("Unknown display state: {}", display_state);
+                                    }
+                                }
+                            }
                         }
                     }
                     _ => {}

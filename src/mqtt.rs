@@ -52,6 +52,7 @@ impl CachedTopics {
             "runninggames",
             "lastactive",
             "screensaver",
+            "display",
             "volume_level",
             "cpu_usage",
             "memory_usage",
@@ -336,6 +337,10 @@ impl MqttClient {
                 .client
                 .publish(&topic, QoS::AtLeastOnce, true, json)
                 .await;
+
+            // Display power state sensor
+            self.register_sensor(device, "display", "Display", "mdi:monitor", None, None)
+                .await;
         }
 
         // System sensors (CPU, memory, battery, active window)
@@ -400,78 +405,52 @@ impl MqttClient {
             .await;
         }
 
-        // Command buttons (always register - they're the core control interface)
-        let commands = vec![
-            ("Launch", "mdi:rocket-launch"),
-            ("Screensaver", "mdi:monitor"),
-            ("Wake", "mdi:monitor-eye"),
-            ("Shutdown", "mdi:power"),
-            ("sleep", "mdi:power-sleep"),
-            ("Lock", "mdi:lock"),
-            ("Hibernate", "mdi:power-sleep"),
-            ("Restart", "mdi:restart"),
-            ("discord_join", "mdi:discord"),
-            ("discord_leave_channel", "mdi:phone-hangup"),
-        ];
+        // Command buttons - gated by their respective features
+        // Game launch button
+        if config.features.game_detection {
+            self.register_button(device, "Launch", "mdi:rocket-launch")
+                .await;
+        }
 
-        for (name, icon) in commands {
-            let payload = HADiscoveryPayload {
-                name: name.to_string(),
-                unique_id: format!("{}_{}", self.device_id, name),
-                state_topic: None,
-                command_topic: Some(self.command_topic(name)),
-                availability_topic: Some(self.availability_topic()),
-                device: Arc::clone(device),
-                icon: Some(icon.to_string()),
-                device_class: None,
-                unit_of_measurement: None,
-                json_attributes_topic: None,
-            };
+        // Idle tracking buttons (screensaver/wake)
+        if config.features.idle_tracking {
+            self.register_button(device, "Screensaver", "mdi:monitor")
+                .await;
+            self.register_button(device, "Wake", "mdi:monitor-eye")
+                .await;
+        }
 
-            let topic = format!(
-                "{}/button/{}/{}/config",
-                DISCOVERY_PREFIX, self.device_name, name
-            );
-            let json = serde_json::to_string(&payload).unwrap();
-            let _ = self
-                .client
-                .publish(&topic, QoS::AtLeastOnce, true, json)
+        // Power control buttons
+        if config.features.power_events {
+            for (name, icon) in [
+                ("Shutdown", "mdi:power"),
+                ("sleep", "mdi:power-sleep"),
+                ("Lock", "mdi:lock"),
+                ("Hibernate", "mdi:power-sleep"),
+                ("Restart", "mdi:restart"),
+            ] {
+                self.register_button(device, name, icon).await;
+            }
+        }
+
+        // Discord buttons
+        if config.features.discord {
+            self.register_button(device, "discord_join", "mdi:discord")
+                .await;
+            self.register_button(device, "discord_leave_channel", "mdi:phone-hangup")
                 .await;
         }
 
         // Audio control commands (media keys) if enabled
         if config.features.audio_control {
-            let audio_commands = vec![
+            for (name, icon) in [
                 ("media_play_pause", "mdi:play-pause"),
                 ("media_next", "mdi:skip-next"),
                 ("media_previous", "mdi:skip-previous"),
                 ("media_stop", "mdi:stop"),
                 ("volume_mute", "mdi:volume-mute"),
-            ];
-
-            for (name, icon) in audio_commands {
-                let payload = HADiscoveryPayload {
-                    name: name.to_string(),
-                    unique_id: format!("{}_{}", self.device_id, name),
-                    state_topic: None,
-                    command_topic: Some(self.command_topic(name)),
-                    availability_topic: Some(self.availability_topic()),
-                    device: Arc::clone(device),
-                    icon: Some(icon.to_string()),
-                    device_class: None,
-                    unit_of_measurement: None,
-                    json_attributes_topic: None,
-                };
-
-                let topic = format!(
-                    "{}/button/{}/{}/config",
-                    DISCOVERY_PREFIX, self.device_name, name
-                );
-                let json = serde_json::to_string(&payload).unwrap();
-                let _ = self
-                    .client
-                    .publish(&topic, QoS::AtLeastOnce, true, json)
-                    .await;
+            ] {
+                self.register_button(device, name, icon).await;
             }
 
             // Register volume sensor
@@ -504,19 +483,26 @@ impl MqttClient {
 
         // Only unregister if feature was previously enabled and is now disabled
         if previous.game_detection && !config.features.game_detection {
-            info!("Feature disabled: game_detection - removing entity");
+            info!("Feature disabled: game_detection - removing entities");
             self.unregister_entity("sensor", "runninggames").await;
+            self.unregister_entity("button", "Launch").await;
         }
 
         if previous.idle_tracking && !config.features.idle_tracking {
-            info!("Feature disabled: idle_tracking - removing entity");
+            info!("Feature disabled: idle_tracking - removing entities");
             self.unregister_entity("sensor", "lastactive").await;
             self.unregister_entity("sensor", "screensaver").await;
+            self.unregister_entity("button", "Screensaver").await;
+            self.unregister_entity("button", "Wake").await;
         }
 
         if previous.power_events && !config.features.power_events {
-            info!("Feature disabled: power_events - removing entity");
+            info!("Feature disabled: power_events - removing entities");
             self.unregister_entity("sensor", "sleep_state").await;
+            self.unregister_entity("sensor", "display").await;
+            for name in ["Shutdown", "sleep", "Lock", "Hibernate", "Restart"] {
+                self.unregister_entity("button", name).await;
+            }
         }
 
         if previous.system_sensors && !config.features.system_sensors {
@@ -549,6 +535,13 @@ impl MqttClient {
         if previous.notifications && !config.features.notifications {
             info!("Feature disabled: notifications - removing entity");
             self.unregister_entity("notify", &self.device_name).await;
+        }
+
+        if previous.discord && !config.features.discord {
+            info!("Feature disabled: discord - removing entities");
+            self.unregister_entity("button", "discord_join").await;
+            self.unregister_entity("button", "discord_leave_channel")
+                .await;
         }
 
         // Save current feature state for next comparison
@@ -623,6 +616,32 @@ impl MqttClient {
         unit: Option<&str>,
     ) {
         self.register_sensor_internal(device, name, display_name, icon, device_class, unit, false)
+            .await;
+    }
+
+    /// Helper to register a button command
+    async fn register_button(&self, device: &Arc<HADevice>, name: &str, icon: &str) {
+        let payload = HADiscoveryPayload {
+            name: name.to_string(),
+            unique_id: format!("{}_{}", self.device_id, name),
+            state_topic: None,
+            command_topic: Some(self.command_topic(name)),
+            availability_topic: Some(self.availability_topic()),
+            device: Arc::clone(device),
+            icon: Some(icon.to_string()),
+            device_class: None,
+            unit_of_measurement: None,
+            json_attributes_topic: None,
+        };
+
+        let topic = format!(
+            "{}/button/{}/{}/config",
+            DISCOVERY_PREFIX, self.device_name, name
+        );
+        let json = serde_json::to_string(&payload).unwrap();
+        let _ = self
+            .client
+            .publish(&topic, QoS::AtLeastOnce, true, json)
             .await;
     }
 

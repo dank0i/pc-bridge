@@ -24,6 +24,7 @@ mod updater;
 #[cfg(windows)]
 mod winapi;
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 #[cfg(windows)]
 use std::time::Duration;
@@ -49,6 +50,9 @@ pub struct AppState {
     /// Provides always-up-to-date process list for game detection and screensaver
     #[cfg(windows)]
     pub process_watcher: ProcessWatcher,
+    /// Display power state: true when Windows has powered off the display
+    /// Set by PowerEventListener via GUID_CONSOLE_DISPLAY_STATE notifications
+    pub display_off: AtomicBool,
 }
 
 /// Handle for optional tasks
@@ -140,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
     // Log enabled features
     log_enabled_features(&config);
 
-    let show_tray = config.show_tray_icon;
+    let show_tray = config.features.show_tray_icon;
     let config_path = Config::config_path()?;
 
     // Create shutdown channel
@@ -155,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
         info!("Discovering Steam games...");
         if let Some(discovery) = SteamGameDiscovery::discover_async().await {
             info!(
-                "  ✓ Found {} Steam games in {}ms{}",
+                "  Found {} Steam games in {}ms{}",
                 discovery.game_count,
                 discovery.build_time_ms,
                 if discovery.from_cache {
@@ -168,17 +172,17 @@ async fn main() -> anyhow::Result<()> {
             // Merge into config and save
             match config.merge_steam_games(&discovery) {
                 Ok(added) if added > 0 => {
-                    info!("  ✓ Added {} new games to userConfig.json", added);
+                    info!("  Added {} new games to userConfig.json", added);
                 }
                 Ok(_) => {
                     // No new games to add
                 }
                 Err(e) => {
-                    warn!("  ⚠ Failed to save discovered games: {}", e);
+                    warn!("  Failed to save discovered games: {}", e);
                 }
             }
         } else {
-            info!("  ⚠ Steam not found or no games installed");
+            info!("  Steam not found or no games installed");
         }
     }
 
@@ -194,6 +198,7 @@ async fn main() -> anyhow::Result<()> {
         shutdown_tx: shutdown_tx.clone(),
         #[cfg(windows)]
         process_watcher,
+        display_off: AtomicBool::new(false),
     });
 
     // Collect task handles for cleanup
@@ -206,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
         state
             .process_watcher
             .start_background(shutdown_tx.subscribe(), poll_interval);
-        info!("  ✓ Process watcher started (WMI events with polling fallback)");
+        info!("  Process watcher started (WMI events with polling fallback)");
     }
 
     // Command executor always runs (needed for any remote control)
@@ -217,25 +222,25 @@ async fn main() -> anyhow::Result<()> {
     if config.features.game_detection {
         let sensor = GameSensor::new(Arc::clone(&state));
         handles.push(tokio::spawn(sensor.run()));
-        info!("  ✓ Game detection enabled");
+        info!("  Game detection enabled");
     }
 
     if config.features.idle_tracking {
         let sensor = IdleSensor::new(Arc::clone(&state));
         handles.push(tokio::spawn(sensor.run()));
-        info!("  ✓ Idle tracking enabled");
+        info!("  Idle tracking enabled");
     }
 
     if config.features.power_events {
         let listener = PowerEventListener::new(Arc::clone(&state));
         handles.push(tokio::spawn(listener.run()));
-        info!("  ✓ Power events enabled");
+        info!("  Power events enabled");
     }
 
     if config.features.system_sensors {
         let sensor = SystemSensor::new(Arc::clone(&state));
         handles.push(tokio::spawn(sensor.run()));
-        info!("  ✓ System sensors enabled (CPU, memory, battery, active window)");
+        info!("  System sensors enabled (CPU, memory, battery, active window)");
     }
 
     #[cfg(windows)]
@@ -243,7 +248,7 @@ async fn main() -> anyhow::Result<()> {
         use crate::sensors::SteamSensor;
         let sensor = SteamSensor::new(Arc::clone(&state));
         handles.push(tokio::spawn(sensor.run()));
-        info!("  ✓ Steam update detection enabled");
+        info!("  Steam update detection enabled");
     }
 
     // Custom sensors (if enabled and defined)
@@ -255,7 +260,7 @@ async fn main() -> anyhow::Result<()> {
             .register_custom_sensors(&config.custom_sensors)
             .await;
         info!(
-            "  ✓ Custom sensors enabled ({} defined)",
+            "  Custom sensors enabled ({} defined)",
             config.custom_sensors.len()
         );
     }
@@ -267,7 +272,7 @@ async fn main() -> anyhow::Result<()> {
             .register_custom_commands(&config.custom_commands)
             .await;
         info!(
-            "  ✓ Custom commands enabled ({} defined)",
+            "  Custom commands enabled ({} defined)",
             config.custom_commands.len()
         );
     }
@@ -293,6 +298,7 @@ async fn main() -> anyhow::Result<()> {
             .mqtt
             .publish_sensor_retained("sleep_state", "awake")
             .await;
+        state.mqtt.publish_sensor_retained("display", "on").await;
     }
 
     // Wait for shutdown signal (Ctrl+C)
