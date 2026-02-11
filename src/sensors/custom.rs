@@ -153,7 +153,7 @@ impl CustomSensorManager {
         "error: powershell not available on this platform".to_string()
     }
 
-    /// Check if a process exists
+    /// Check if a process exists (uses always-up-to-date process watcher)
     #[cfg(windows)]
     async fn poll_process_exists(&self, sensor: &CustomSensor) -> String {
         let process = match &sensor.process {
@@ -161,41 +161,12 @@ impl CustomSensorManager {
             None => return "error: no process".to_string(),
         };
 
-        use windows::Win32::Foundation::CloseHandle;
-        use windows::Win32::System::Diagnostics::ToolHelp::*;
-
-        let exists = unsafe {
-            let snapshot = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
-                Ok(s) => s,
-                Err(_) => return "error: snapshot failed".to_string(),
-            };
-
-            let mut entry = PROCESSENTRY32W {
-                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-                ..Default::default()
-            };
-
-            let mut found = false;
-            if Process32FirstW(snapshot, &mut entry).is_ok() {
-                loop {
-                    let name = String::from_utf16_lossy(&entry.szExeFile)
-                        .trim_end_matches('\0')
-                        .to_lowercase();
-
-                    if name == process || name.contains(&process) {
-                        found = true;
-                        break;
-                    }
-
-                    if Process32NextW(snapshot, &mut entry).is_err() {
-                        break;
-                    }
-                }
-            }
-
-            let _ = CloseHandle(snapshot);
-            found
-        };
+        let state = self.state.process_watcher.state();
+        let guard = state.read().await;
+        let exists = guard.names().iter().any(|name| {
+            let lower = name.to_lowercase();
+            lower == process || lower.contains(&process)
+        });
 
         if exists { "on" } else { "off" }.to_string()
     }

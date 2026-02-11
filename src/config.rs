@@ -5,6 +5,7 @@ use notify::{Event, EventKind, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -677,6 +678,8 @@ pub async fn watch_config(state: Arc<AppState>) {
         .unwrap_or_default();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let stop_clone = Arc::clone(&stop_flag);
 
     // Create watcher in a blocking task since notify isn't async
     let filename_clone = filename.clone();
@@ -695,9 +698,9 @@ pub async fn watch_config(state: Arc<AppState>) {
 
         info!("Watching for changes to {:?}", dir.join(&filename_clone));
 
-        // Keep watcher alive
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(60));
+        // Keep watcher alive until shutdown
+        while !stop_clone.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_secs(1));
         }
     });
 
@@ -707,6 +710,7 @@ pub async fn watch_config(state: Arc<AppState>) {
         tokio::select! {
             _ = shutdown_rx.recv() => {
                 info!("Config watcher shutting down");
+                stop_flag.store(true, Ordering::Relaxed);
                 break;
             }
             Some(event) = rx.recv() => {

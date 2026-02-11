@@ -236,18 +236,35 @@ fn needs_ampersand(cmd: &str) -> bool {
     !ps_cmdlets.iter().any(|prefix| cmd.starts_with(prefix))
 }
 
-/// Expand Windows-style %VAR% environment variables
+/// Expand Windows-style %VAR% environment variables (single-pass)
 fn expand_env_vars(s: &str) -> String {
-    let mut result = s.to_string();
+    if !s.contains('%') {
+        return s.to_string();
+    }
 
-    while let Some(start) = result.find('%') {
-        if let Some(end) = result[start + 1..].find('%') {
-            let end = start + 1 + end;
-            let var_name = &result[start + 1..end];
-            let value = std::env::var(var_name).unwrap_or_default();
-            result = format!("{}{}{}", &result[..start], value, &result[end + 1..]);
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.char_indices();
+
+    while let Some((i, c)) = chars.next() {
+        if c == '%' {
+            let var_start = i + 1;
+            let mut found_end = false;
+            for (j, c2) in chars.by_ref() {
+                if c2 == '%' {
+                    let var_name = &s[var_start..j];
+                    result.push_str(&std::env::var(var_name).unwrap_or_default());
+                    found_end = true;
+                    break;
+                }
+            }
+            if !found_end {
+                // No closing %, keep literal
+                result.push('%');
+                result.push_str(&s[var_start..]);
+                return result;
+            }
         } else {
-            break;
+            result.push(c);
         }
     }
 

@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::time::{interval, Duration, Instant};
+use tokio::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 use winreg::enums::*;
 use winreg::RegKey;

@@ -160,8 +160,11 @@ impl MqttClient {
         let client_for_eventloop = client.clone();
         let availability_topic_for_eventloop = availability_topic.clone();
 
+        // Pre-compute prefixes for hot path (avoid format!() per message)
+        let button_prefix = format!("{}/button/{}/", DISCOVERY_PREFIX, &device_name);
+        let notify_topic_match = format!("pc-bridge/notifications/{}", &device_name);
+
         // Spawn event loop handler
-        let device_name_clone = device_name.clone();
         tokio::spawn(async move {
             loop {
                 match eventloop.poll().await {
@@ -170,10 +173,16 @@ impl MqttClient {
                         let payload = String::from_utf8_lossy(&publish.payload).to_string();
                         debug!("MQTT message: {} = {}", topic, payload);
 
-                        // Extract command name from topic
-                        if let Some(cmd_name) =
-                            Self::extract_command_name(&topic, &device_name_clone)
-                        {
+                        // Extract command name (zero-alloc prefix check)
+                        let cmd_name = if let Some(rest) = topic.strip_prefix(&button_prefix) {
+                            rest.strip_suffix("/action").map(|s| s.to_string())
+                        } else if topic == notify_topic_match {
+                            Some("notification".to_string())
+                        } else {
+                            None
+                        };
+
+                        if let Some(cmd_name) = cmd_name {
                             let _ = command_tx
                                 .send(Command {
                                     name: cmd_name,
@@ -259,6 +268,7 @@ impl MqttClient {
         Ok((host, port))
     }
 
+    #[cfg(test)]
     fn extract_command_name(topic: &str, device_name: &str) -> Option<String> {
         // Topic format: homeassistant/button/{device_name}/{command}/action
         let prefix = format!("{}/button/{}/", DISCOVERY_PREFIX, device_name);

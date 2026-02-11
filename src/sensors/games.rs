@@ -85,27 +85,32 @@ impl GameSensor {
     }
 
     async fn detect_game(&self) -> (String, String) {
-        // Get processes from event-driven watcher (always up-to-date)
-        let processes = self.state.process_watcher.get_names().await;
+        // Access process list by reference — no HashSet clone (#5)
+        let proc_state = self.state.process_watcher.state();
+        let proc_guard = proc_state.read().await;
 
         // Check config games (includes Steam auto-discovered games)
-        // Hold read lock while checking - faster than cloning
         let config = self.state.config.read().await;
 
-        // Fix #6: SmallVec - stack-allocated for up to 4 concurrent games
-        let mut found_games: SmallVec<[(String, String); 4]> = SmallVec::new();
-        // Fix #2: Pre-allocate HashSet with expected capacity
-        let mut seen_ids: HashSet<String> = HashSet::with_capacity(config.games.len());
+        // Pre-compute lowered patterns once, not per-process (#2)
+        let lowered_games: Vec<_> = config
+            .games
+            .iter()
+            .map(|(pattern, gc)| (pattern.to_lowercase(), gc))
+            .collect();
 
-        for proc_name in &processes {
+        let mut found_games: SmallVec<[(String, String); 4]> = SmallVec::new();
+        let mut seen_ids: HashSet<String> = HashSet::with_capacity(lowered_games.len());
+
+        for proc_name in proc_guard.names() {
             let proc_lower = proc_name.to_lowercase();
             let base_name = proc_lower.trim_end_matches(".exe");
 
-            for (pattern, game_config) in &config.games {
-                let pattern_lower = pattern.to_lowercase();
-                if proc_lower.starts_with(&pattern_lower) || base_name == pattern_lower {
+            for (pattern_lower, game_config) in &lowered_games {
+                if proc_lower.starts_with(pattern_lower.as_str())
+                    || base_name == pattern_lower.as_str()
+                {
                     let game_id = game_config.game_id().to_string();
-                    // Avoid duplicates (same game matched by multiple processes)
                     if seen_ids.insert(game_id.clone()) {
                         found_games.push((game_id, game_config.display_name()));
                     }

@@ -13,7 +13,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::System::Diagnostics::ToolHelp::*;
@@ -55,6 +55,10 @@ pub struct ProcessState {
     names: HashSet<String>,
     /// Process ID to name mapping (for deletion lookup)
     pid_to_name: std::collections::HashMap<u32, String>,
+    /// Reference count per process name for O(1) removal
+    name_counts: std::collections::HashMap<String, u32>,
+    /// Count of running .scr (screensaver) processes for O(1) lookup
+    scr_count: u32,
     /// Last update time (for diagnostics)
     last_updated: Instant,
 }
@@ -64,26 +68,48 @@ impl ProcessState {
         Self {
             names: HashSet::with_capacity(256),
             pid_to_name: std::collections::HashMap::with_capacity(256),
+            name_counts: std::collections::HashMap::with_capacity(256),
+            scr_count: 0,
             last_updated: Instant::now(),
         }
     }
 
     fn add_process(&mut self, name: String, pid: u32) {
+        if name.len() >= 4 && name.as_bytes()[name.len() - 4..].eq_ignore_ascii_case(b".scr") {
+            self.scr_count += 1;
+        }
         self.pid_to_name.insert(pid, name.clone());
+        *self.name_counts.entry(name.clone()).or_insert(0) += 1;
         self.names.insert(name);
         self.last_updated = Instant::now();
     }
 
     fn remove_process(&mut self, pid: u32) {
         if let Some(name) = self.pid_to_name.remove(&pid) {
-            // Only remove from names if no other process has the same name
-            let still_exists = self.pid_to_name.values().any(|n| n == &name);
-            if !still_exists {
-                self.names.remove(&name);
+            if name.len() >= 4 && name.as_bytes()[name.len() - 4..].eq_ignore_ascii_case(b".scr") {
+                self.scr_count = self.scr_count.saturating_sub(1);
+            }
+            if let Some(count) = self.name_counts.get_mut(&name) {
+                *count -= 1;
+                if *count == 0 {
+                    self.name_counts.remove(&name);
+                    self.names.remove(&name);
+                }
             }
             self.last_updated = Instant::now();
         }
     }
+
+    /// Get process names without cloning the set
+    pub fn names(&self) -> &HashSet<String> {
+        &self.names
+    }
+}
+
+/// Event sent from WMI threads to the async event processor
+enum ProcessEvent {
+    Created(String, u32), // name, pid
+    Deleted(u32),         // pid
 }
 
 /// Event-driven process watcher
@@ -113,6 +139,7 @@ impl ProcessWatcher {
     }
 
     /// Notify subscribers that processes changed
+    #[allow(dead_code)]
     fn notify_change(&self) {
         // Ignore send errors - means no subscribers
         let _ = self.change_tx.send(ProcessChangeNotification);
@@ -126,15 +153,14 @@ impl ProcessWatcher {
     pub fn start_background(&self, shutdown_rx: broadcast::Receiver<()>, poll_interval: Duration) {
         let state = Arc::clone(&self.state);
         let change_tx = self.change_tx.clone();
+        let (event_tx, event_rx) = mpsc::channel::<ProcessEvent>(256);
 
-        // Try WMI first, fall back to polling
+        // Try WMI events first, fall back to polling
         tokio::spawn(async move {
-            match Self::setup_wmi_events(&state, change_tx.clone()).await {
+            match Self::setup_wmi_events(event_tx).await {
                 Ok(()) => {
                     info!("Process watcher using WMI events");
-                    // WMI threads are running, just wait for shutdown
-                    let mut rx = shutdown_rx;
-                    let _ = rx.recv().await;
+                    Self::run_event_processor(&state, shutdown_rx, change_tx, event_rx).await;
                 }
                 Err(e) => {
                     warn!(
@@ -187,30 +213,19 @@ impl ProcessWatcher {
     }
 
     /// Set up WMI event subscription for process changes
-    async fn setup_wmi_events(
-        state: &Arc<RwLock<ProcessState>>,
-        change_tx: broadcast::Sender<ProcessChangeNotification>,
-    ) -> anyhow::Result<()> {
-        // WMI operations are blocking, run in spawn_blocking
-        let state = Arc::clone(state);
-
+    async fn setup_wmi_events(event_tx: mpsc::Sender<ProcessEvent>) -> anyhow::Result<()> {
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            // Initialize COM for this thread
+            // Verify WMI is available
             let com = COMLibrary::new()?;
-            let wmi = WMIConnection::new(com)?;
+            let _wmi = WMIConnection::new(com)?;
 
             info!("WMI connection established, subscribing to process events");
 
-            // Create subscription queries
-            // WITHIN 1 = check every 1 second for events
             let creation_query = "SELECT * FROM __InstanceCreationEvent WITHIN 1 WHERE TargetInstance ISA 'Win32_Process'";
             let deletion_query = "SELECT * FROM __InstanceDeletionEvent WITHIN 1 WHERE TargetInstance ISA 'Win32_Process'";
 
-            // WMI uses blocking iterators, we need separate threads for each
-            let state_creation = Arc::clone(&state);
-            let state_deletion = Arc::clone(&state);
-            let change_tx_creation = change_tx.clone();
-            let change_tx_deletion = change_tx;
+            let event_tx_creation = event_tx.clone();
+            let event_tx_deletion = event_tx;
 
             // Spawn thread for creation events
             std::thread::spawn(move || {
@@ -244,27 +259,15 @@ impl ProcessWatcher {
                         Ok(event) => {
                             if let Some(name) = event.target_instance.name {
                                 let pid = event.target_instance.process_id;
-                                debug!("Process started: {} (PID {})", name, pid);
-
-                                // Use blocking lock since we're in a sync context
-                                if let Ok(mut guard) = state_creation.try_write() {
-                                    guard.add_process(name, pid);
-                                } else {
-                                    // Try again with a short wait
-                                    std::thread::sleep(Duration::from_millis(10));
-                                    let rt = tokio::runtime::Handle::try_current();
-                                    if let Ok(handle) = rt {
-                                        handle.block_on(async {
-                                            state_creation.write().await.add_process(name, pid);
-                                        });
-                                    }
+                                if event_tx_creation
+                                    .blocking_send(ProcessEvent::Created(name, pid))
+                                    .is_err()
+                                {
+                                    break; // Channel closed, shutting down
                                 }
-                                // Notify subscribers of change
-                                let _ = change_tx_creation.send(ProcessChangeNotification);
                             }
                         }
                         Err(e) => {
-                            // Connection lost or query error
                             error!("WMI creation event error: {}", e);
                             break;
                         }
@@ -303,21 +306,12 @@ impl ProcessWatcher {
                     match event_result {
                         Ok(event) => {
                             let pid = event.target_instance.process_id;
-                            debug!("Process ended: {:?} (PID {})", event.target_instance.name, pid);
-
-                            if let Ok(mut guard) = state_deletion.try_write() {
-                                guard.remove_process(pid);
-                            } else {
-                                std::thread::sleep(Duration::from_millis(10));
-                                let rt = tokio::runtime::Handle::try_current();
-                                if let Ok(handle) = rt {
-                                    handle.block_on(async {
-                                        state_deletion.write().await.remove_process(pid);
-                                    });
-                                }
+                            if event_tx_deletion
+                                .blocking_send(ProcessEvent::Deleted(pid))
+                                .is_err()
+                            {
+                                break; // Channel closed, shutting down
                             }
-                            // Notify subscribers of change
-                            let _ = change_tx_deletion.send(ProcessChangeNotification);
                         }
                         Err(e) => {
                             error!("WMI deletion event error: {}", e);
@@ -332,6 +326,116 @@ impl ProcessWatcher {
         .await??;
 
         Ok(())
+    }
+
+    /// Process WMI events and run periodic reconciliation
+    async fn run_event_processor(
+        state: &Arc<RwLock<ProcessState>>,
+        mut shutdown_rx: broadcast::Receiver<()>,
+        change_tx: broadcast::Sender<ProcessChangeNotification>,
+        mut event_rx: mpsc::Receiver<ProcessEvent>,
+    ) {
+        let mut reconcile_interval = tokio::time::interval(Duration::from_secs(60));
+        reconcile_interval.tick().await; // Skip immediate first tick
+
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    debug!("Event processor shutting down");
+                    break;
+                }
+                Some(event) = event_rx.recv() => {
+                    let mut guard = state.write().await;
+                    match event {
+                        ProcessEvent::Created(name, pid) => {
+                            debug!("Process started: {} (PID {})", name, pid);
+                            guard.add_process(name, pid);
+                        }
+                        ProcessEvent::Deleted(pid) => {
+                            debug!("Process ended: PID {}", pid);
+                            guard.remove_process(pid);
+                        }
+                    }
+                    drop(guard);
+                    let _ = change_tx.send(ProcessChangeNotification);
+                }
+                _ = reconcile_interval.tick() => {
+                    let pruned = Self::reconcile(state).await;
+                    if pruned > 0 {
+                        debug!("Reconciliation pruned {} stale entries", pruned);
+                        let _ = change_tx.send(ProcessChangeNotification);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Periodic reconciliation: full process snapshot to catch missed WMI events
+    /// and prune stale PID entries (prevents memory leak from WMI event loss)
+    async fn reconcile(state: &Arc<RwLock<ProcessState>>) -> usize {
+        let snapshot = match tokio::task::spawn_blocking(Self::snapshot_all_processes).await {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+
+        let mut guard = state.write().await;
+
+        // Remove PIDs no longer running
+        let stale: Vec<u32> = guard
+            .pid_to_name
+            .keys()
+            .filter(|pid| !snapshot.contains_key(pid))
+            .copied()
+            .collect();
+
+        let pruned = stale.len();
+        for pid in stale {
+            guard.remove_process(pid);
+        }
+
+        // Add PIDs running but not tracked
+        for (pid, name) in snapshot {
+            if !guard.pid_to_name.contains_key(&pid) {
+                guard.add_process(name, pid);
+            }
+        }
+
+        pruned
+    }
+
+    /// Take a full process snapshot using ToolHelp API
+    fn snapshot_all_processes() -> std::collections::HashMap<u32, String> {
+        let mut pids = std::collections::HashMap::with_capacity(256);
+
+        // SAFETY: CreateToolhelp32Snapshot and Process32 enumeration are
+        // standard Win32 APIs for process listing. Handle is properly closed.
+        unsafe {
+            if let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+                let mut entry = PROCESSENTRY32W {
+                    dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                    ..Default::default()
+                };
+
+                if Process32FirstW(snapshot, &mut entry).is_ok() {
+                    loop {
+                        let mut name = String::from_utf16_lossy(&entry.szExeFile);
+                        if let Some(pos) = name.find('\0') {
+                            name.truncate(pos);
+                        }
+                        if !name.is_empty() {
+                            pids.insert(entry.th32ProcessID, name);
+                        }
+                        if Process32NextW(snapshot, &mut entry).is_err() {
+                            break;
+                        }
+                    }
+                }
+
+                let _ = CloseHandle(snapshot);
+            }
+        }
+
+        pids
     }
 
     /// Polling fallback if WMI events aren't available
@@ -364,14 +468,9 @@ impl ProcessWatcher {
         self.state.read().await.names.clone()
     }
 
-    /// Check if any screensaver process is running
+    /// Check if any screensaver process is running (O(1) via tracked counter)
     pub async fn has_screensaver_running(&self) -> bool {
-        self.state
-            .read()
-            .await
-            .names
-            .iter()
-            .any(|name| name.to_lowercase().ends_with(".scr"))
+        self.state.read().await.scr_count > 0
     }
 
     /// Get the underlying shared state for direct access
@@ -434,5 +533,28 @@ mod tests {
         state.remove_process(999);
 
         assert!(state.names.contains("test.exe"));
+    }
+
+    #[test]
+    fn test_screensaver_count() {
+        let mut state = ProcessState::new();
+        assert_eq!(state.scr_count, 0);
+
+        state.add_process("Mystify.scr".to_string(), 100);
+        assert_eq!(state.scr_count, 1);
+
+        // Case-insensitive
+        state.add_process("Bubbles.SCR".to_string(), 101);
+        assert_eq!(state.scr_count, 2);
+
+        state.remove_process(100);
+        assert_eq!(state.scr_count, 1);
+
+        state.remove_process(101);
+        assert_eq!(state.scr_count, 0);
+
+        // Non-.scr files don't affect count
+        state.add_process("chrome.exe".to_string(), 200);
+        assert_eq!(state.scr_count, 0);
     }
 }

@@ -47,6 +47,7 @@ impl IdleSensor {
             .publish_sensor_retained("screensaver", screensaver_state)
             .await;
         let mut prev_screensaver_state = screensaver_active;
+        let mut prev_idle_secs: i64 = 0;
 
         loop {
             tokio::select! {
@@ -56,7 +57,11 @@ impl IdleSensor {
                 }
                 _ = tick.tick() => {
                     let last_active = self.get_last_active_time();
-                    self.state.mqtt.publish_sensor("lastactive", &last_active.to_rfc3339()).await;
+                    let secs = last_active.timestamp();
+                    if secs != prev_idle_secs {
+                        self.state.mqtt.publish_sensor("lastactive", &last_active.to_rfc3339()).await;
+                        prev_idle_secs = secs;
+                    }
                 }
                 _ = screensaver_tick.tick() => {
                     // Check screensaver state using event-driven watcher (always current)

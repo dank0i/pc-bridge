@@ -158,17 +158,21 @@ pub fn show_toast(payload: &str) -> anyhow::Result<()> {
 
 /// Escape XML special characters and strip control chars
 fn escape_xml(s: &str) -> String {
-    s.chars()
-        .filter(|&c| c >= '\x20' || c == '\t' || c == '\n' || c == '\r')
-        .map(|c| match c {
-            '&' => "&amp;".to_string(),
-            '<' => "&lt;".to_string(),
-            '>' => "&gt;".to_string(),
-            '\'' => "&apos;".to_string(),
-            '"' => "&quot;".to_string(),
-            _ => c.to_string(),
-        })
-        .collect()
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c < '\x20' && c != '\t' && c != '\n' && c != '\r' {
+            continue;
+        }
+        match c {
+            '&' => result.push_str("&amp;"),
+            '<' => result.push_str("&lt;"),
+            '>' => result.push_str("&gt;"),
+            '\'' => result.push_str("&apos;"),
+            '"' => result.push_str("&quot;"),
+            _ => result.push(c),
+        }
+    }
+    result
 }
 
 #[cfg(test)]

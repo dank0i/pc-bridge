@@ -80,18 +80,10 @@ async fn fetch_latest_release() -> anyhow::Result<Option<GitHubRelease>> {
 fn fetch_url_blocking(url: &str) -> anyhow::Result<String> {
     use std::process::Command;
 
-    // Use PowerShell to fetch URL (works on all Windows)
+    // Use curl instead of PowerShell (~10ms vs ~200-500ms startup)
     #[allow(unused_mut)]
-    let mut cmd = Command::new("powershell");
-    cmd.args([
-            "-NoProfile",
-            "-Command",
-            &format!(
-                "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; \
-                 (Invoke-WebRequest -Uri '{}' -UseBasicParsing -Headers @{{'User-Agent'='pc-agent'}}).Content",
-                url
-            ),
-        ]);
+    let mut cmd = Command::new("curl");
+    cmd.args(["-sS", "-L", "-A", "pc-agent", url]);
 
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -120,19 +112,11 @@ async fn download_update(url: &str, filename: &str) -> anyhow::Result<PathBuf> {
     let path = update_path.clone();
 
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-        // Download using PowerShell
         #[allow(unused_mut)]
-        let mut cmd = std::process::Command::new("powershell");
-        cmd.args([
-            "-NoProfile",
-            "-Command",
-            &format!(
-                "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; \
-                     Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing",
-                url,
-                path.display()
-            ),
-        ]);
+        let mut cmd = std::process::Command::new("curl");
+        cmd.args(["-sS", "-L", "-A", "pc-agent", "-o"]);
+        cmd.arg(path.as_os_str());
+        cmd.arg(&url);
 
         #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
