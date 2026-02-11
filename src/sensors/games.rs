@@ -13,6 +13,28 @@ use tracing::{debug, info};
 
 use crate::AppState;
 
+/// Cached lowered game patterns to avoid recomputing on every WMI event
+struct CachedGamePatterns {
+    /// (lowered_pattern, game_id, display_name)
+    patterns: Vec<(String, String, String)>,
+}
+
+impl CachedGamePatterns {
+    fn build(games: &std::collections::HashMap<String, crate::config::GameConfig>) -> Self {
+        let patterns = games
+            .iter()
+            .map(|(pattern, gc)| {
+                (
+                    pattern.to_lowercase(),
+                    gc.game_id().to_string(),
+                    gc.display_name(),
+                )
+            })
+            .collect();
+        Self { patterns }
+    }
+}
+
 pub struct GameSensor {
     state: Arc<AppState>,
 }
@@ -25,9 +47,15 @@ impl GameSensor {
     pub async fn run(self) {
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
         let mut process_rx = self.state.process_watcher.subscribe();
+        let mut config_rx = self.state.config_generation.subscribe();
+
+        // Build cached patterns once at startup
+        let config = self.state.config.read().await;
+        let mut cached = CachedGamePatterns::build(&config.games);
+        drop(config);
 
         // Publish initial state
-        let (game_id, display_name) = self.detect_game().await;
+        let (game_id, display_name) = self.detect_game(&cached).await;
         self.publish_game(&game_id, &display_name).await;
 
         // Track last published state to avoid duplicate MQTT messages
@@ -41,11 +69,24 @@ impl GameSensor {
                     debug!("Game sensor shutting down");
                     break;
                 }
+                // Rebuild cached patterns when config changes
+                Ok(()) = config_rx.recv() => {
+                    let config = self.state.config.read().await;
+                    cached = CachedGamePatterns::build(&config.games);
+                    drop(config);
+                    debug!("Game sensor: rebuilt cached patterns");
+                    // Re-detect with new patterns
+                    let (game_id, display_name) = self.detect_game(&cached).await;
+                    if game_id != last_game_id {
+                        self.publish_game(&game_id, &display_name).await;
+                        last_game_id = game_id;
+                    }
+                }
                 result = process_rx.recv() => {
                     match result {
                         Ok(_notification) => {
                             // Process list changed - re-detect and publish if different
-                            let (game_id, display_name) = self.detect_game().await;
+                            let (game_id, display_name) = self.detect_game(&cached).await;
                             if game_id != last_game_id {
                                 self.publish_game(&game_id, &display_name).await;
                                 last_game_id = game_id;
@@ -54,7 +95,7 @@ impl GameSensor {
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             // Missed some notifications, just re-detect
                             debug!("Game sensor lagged {} notifications, re-detecting", n);
-                            let (game_id, display_name) = self.detect_game().await;
+                            let (game_id, display_name) = self.detect_game(&cached).await;
                             if game_id != last_game_id {
                                 self.publish_game(&game_id, &display_name).await;
                                 last_game_id = game_id;
@@ -84,36 +125,24 @@ impl GameSensor {
             .await;
     }
 
-    async fn detect_game(&self) -> (String, String) {
-        // Access process list by reference — no HashSet clone (#5)
+    async fn detect_game(&self, cached: &CachedGamePatterns) -> (String, String) {
+        // Access process list by reference — no HashSet clone
         let proc_state = self.state.process_watcher.state();
         let proc_guard = proc_state.read().await;
 
-        // Check config games (includes Steam auto-discovered games)
-        let config = self.state.config.read().await;
-
-        // Pre-compute lowered patterns once, not per-process (#2)
-        let lowered_games: Vec<_> = config
-            .games
-            .iter()
-            .map(|(pattern, gc)| (pattern.to_lowercase(), gc))
-            .collect();
-
         let mut found_games: SmallVec<[(String, String); 4]> = SmallVec::new();
-        let mut seen_ids: HashSet<String> = HashSet::with_capacity(lowered_games.len());
+        let mut seen_ids: HashSet<&str> = HashSet::with_capacity(cached.patterns.len());
 
         for proc_name in proc_guard.names() {
             let proc_lower = proc_name.to_lowercase();
             let base_name = proc_lower.trim_end_matches(".exe");
 
-            for (pattern_lower, game_config) in &lowered_games {
-                if proc_lower.starts_with(pattern_lower.as_str())
-                    || base_name == pattern_lower.as_str()
+            for (pattern_lower, game_id, display_name) in &cached.patterns {
+                if (proc_lower.starts_with(pattern_lower.as_str())
+                    || base_name == pattern_lower.as_str())
+                    && seen_ids.insert(game_id.as_str())
                 {
-                    let game_id = game_config.game_id().to_string();
-                    if seen_ids.insert(game_id.clone()) {
-                        found_games.push((game_id, game_config.display_name()));
-                    }
+                    found_games.push((game_id.clone(), display_name.clone()));
                 }
             }
         }

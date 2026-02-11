@@ -2,7 +2,7 @@
 //!
 //! Adaptive polling: 30s base interval, 5s when updates are active
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
@@ -31,6 +31,8 @@ pub struct SteamSensor {
     library_folders: Vec<PathBuf>,
     updating_games: HashMap<String, GameUpdateState>,
     last_full_scan: Instant,
+    /// Cache of ACF file paths → (mtime, parsed state) to skip unchanged files
+    acf_cache: HashMap<PathBuf, (std::time::SystemTime, Option<GameUpdateState>)>,
 }
 
 impl SteamSensor {
@@ -40,6 +42,7 @@ impl SteamSensor {
             library_folders: Vec::new(),
             updating_games: HashMap::new(),
             last_full_scan: Instant::now(),
+            acf_cache: HashMap::new(),
         }
     }
 
@@ -193,6 +196,7 @@ impl SteamSensor {
 
     async fn do_full_scan(&mut self) {
         let mut new_updating: HashMap<String, GameUpdateState> = HashMap::new();
+        let mut seen_paths: HashSet<PathBuf> = HashSet::new();
 
         for lib_folder in &self.library_folders {
             // Glob for appmanifest_*.acf files
@@ -201,9 +205,37 @@ impl SteamSensor {
                 match glob::glob(pattern_str) {
                     Ok(entries) => {
                         for entry in entries.flatten() {
-                            if let Some(game_state) = parse_acf_file(&entry) {
-                                if is_updating(&game_state) {
-                                    new_updating.insert(game_state.app_id.clone(), game_state);
+                            seen_paths.insert(entry.clone());
+
+                            // Check mtime to skip unchanged files
+                            let mtime = std::fs::metadata(&entry).and_then(|m| m.modified()).ok();
+
+                            let game_state = if let Some(mt) = mtime {
+                                if let Some((cached_mt, cached_state)) = self.acf_cache.get(&entry)
+                                {
+                                    if *cached_mt == mt {
+                                        // File unchanged, use cached result
+                                        cached_state.clone()
+                                    } else {
+                                        // File changed, re-parse
+                                        let state = parse_acf_file(&entry);
+                                        self.acf_cache.insert(entry.clone(), (mt, state.clone()));
+                                        state
+                                    }
+                                } else {
+                                    // New file, parse and cache
+                                    let state = parse_acf_file(&entry);
+                                    self.acf_cache.insert(entry.clone(), (mt, state.clone()));
+                                    state
+                                }
+                            } else {
+                                // Can't get mtime, always parse
+                                parse_acf_file(&entry)
+                            };
+
+                            if let Some(gs) = game_state {
+                                if is_updating(&gs) {
+                                    new_updating.insert(gs.app_id.clone(), gs);
                                 }
                             }
                         }
@@ -214,6 +246,9 @@ impl SteamSensor {
                 }
             }
         }
+
+        // Prune cache entries for files that no longer exist
+        self.acf_cache.retain(|path, _| seen_paths.contains(path));
 
         // Check for changes
         let was_updating = !self.updating_games.is_empty();

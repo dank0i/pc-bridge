@@ -1,6 +1,5 @@
 //! Display wake functions - handles waking display after WoL
 
-use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::info;
@@ -14,7 +13,6 @@ const WM_SYSCOMMAND: u32 = 0x0112;
 const SC_MONITORPOWER: usize = 0xF170;
 const MONITOR_ON: isize = -1;
 const VK_F15: u16 = 0x7E;
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 static SLEEP_PREVENTION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -37,22 +35,57 @@ pub fn wake_display() {
     info!("WakeDisplay: Wake sequence completed");
 }
 
-/// Dismiss screensaver by killing .scr processes via PowerShell
+/// Dismiss screensaver by terminating .scr processes natively via Win32 API
 fn dismiss_screensaver() {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+
     info!("Attempting to dismiss screensaver");
 
-    // Kill all screensaver processes (.scr) with PowerShell - matches Go version exactly
-    let _ = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "Get-Process | Where-Object { $_.Path -like '*.scr' } | Stop-Process -Force -ErrorAction SilentlyContinue"
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .and_then(|mut child| child.wait());
+    unsafe {
+        let snapshot = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
 
-    info!("Screensaver dismiss attempted");
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+
+        if Process32FirstW(snapshot, &raw mut entry).is_ok() {
+            loop {
+                let name = String::from_utf16_lossy(&entry.szExeFile);
+                let name = name.trim_end_matches('\0');
+
+                // Check for .scr extension (case-insensitive)
+                if name.len() >= 4
+                    && name.as_bytes()[name.len() - 4..].eq_ignore_ascii_case(b".scr")
+                {
+                    if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, entry.th32ProcessID) {
+                        info!(
+                            "Terminating screensaver: {} (PID {})",
+                            name, entry.th32ProcessID
+                        );
+                        let _ = TerminateProcess(handle, 0);
+                        let _ = CloseHandle(handle);
+                    }
+                }
+
+                if Process32NextW(snapshot, &raw mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+
+        let _ = CloseHandle(snapshot);
+    }
+
+    info!("Screensaver dismiss completed");
 }
 
 /// Wake display with retries (useful immediately after WoL)

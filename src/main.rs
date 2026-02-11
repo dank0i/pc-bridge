@@ -46,6 +46,8 @@ pub struct AppState {
     pub config: RwLock<Config>,
     pub mqtt: MqttClient,
     pub shutdown_tx: broadcast::Sender<()>,
+    /// Notifies subscribers when config is reloaded (hot-reload)
+    pub config_generation: broadcast::Sender<()>,
     /// Event-driven process watcher using WMI (Windows only)
     /// Provides always-up-to-date process list for game detection and screensaver
     #[cfg(windows)]
@@ -191,11 +193,15 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     let process_watcher = ProcessWatcher::new().await;
 
+    // Create config generation channel for notifying sensors of hot-reload
+    let (config_generation_tx, _) = broadcast::channel::<()>(4);
+
     // Create shared state
     let state = Arc::new(AppState {
         config: RwLock::new(config.clone()),
         mqtt,
         shutdown_tx: shutdown_tx.clone(),
+        config_generation: config_generation_tx,
         #[cfg(windows)]
         process_watcher,
         display_off: AtomicBool::new(false),

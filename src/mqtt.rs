@@ -169,20 +169,28 @@ impl MqttClient {
             loop {
                 match eventloop.poll().await {
                     Ok(Event::Incoming(Packet::Publish(publish))) => {
-                        let topic = publish.topic.clone();
-                        let payload = String::from_utf8_lossy(&publish.payload).to_string();
-                        debug!("MQTT message: {} = {}", topic, payload);
+                        debug!(
+                            "MQTT message: {} = {}",
+                            publish.topic,
+                            String::from_utf8_lossy(&publish.payload)
+                        );
 
-                        // Extract command name (zero-alloc prefix check)
-                        let cmd_name = if let Some(rest) = topic.strip_prefix(&button_prefix) {
-                            rest.strip_suffix("/action").map(|s| s.to_string())
-                        } else if topic == notify_topic_match {
-                            Some("notification".to_string())
-                        } else {
-                            None
-                        };
+                        // Extract command name using references (no topic clone)
+                        let cmd_name =
+                            if let Some(rest) = publish.topic.strip_prefix(&button_prefix) {
+                                rest.strip_suffix("/action").map(|s| s.to_string())
+                            } else if publish.topic == notify_topic_match {
+                                Some("notification".to_string())
+                            } else {
+                                None
+                            };
 
                         if let Some(cmd_name) = cmd_name {
+                            // Only convert payload when we have a matching command
+                            let payload = String::from_utf8(publish.payload.to_vec())
+                                .unwrap_or_else(|e| {
+                                    String::from_utf8_lossy(e.as_bytes()).to_string()
+                                });
                             let _ = command_tx
                                 .send(Command {
                                     name: cmd_name,

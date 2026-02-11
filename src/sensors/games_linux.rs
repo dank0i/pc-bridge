@@ -32,6 +32,9 @@ impl GameSensor {
         let (game_id, display_name) = self.detect_game().await;
         self.publish_game(&game_id, &display_name).await;
 
+        // Track last published state to avoid duplicate MQTT messages
+        let mut last_game_id = game_id;
+
         loop {
             tokio::select! {
                 _ = shutdown_rx.recv() => {
@@ -40,7 +43,10 @@ impl GameSensor {
                 }
                 _ = tick.tick() => {
                     let (game_id, display_name) = self.detect_game().await;
-                    self.publish_game(&game_id, &display_name).await;
+                    if game_id != last_game_id {
+                        self.publish_game(&game_id, &display_name).await;
+                        last_game_id = game_id;
+                    }
                 }
             }
         }
@@ -73,15 +79,21 @@ impl GameSensor {
         // Check config games (includes Steam auto-discovered games)
         let config = self.state.config.read().await;
 
+        // Pre-compute lowered patterns once, not per-process
+        let lowered_games: Vec<_> = config
+            .games
+            .iter()
+            .map(|(pattern, gc)| (pattern.to_lowercase(), gc))
+            .collect();
+
         let mut found_games: Vec<(String, String)> = Vec::new();
         let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         for proc_name in &processes {
             let proc_lower = proc_name.to_lowercase();
 
-            for (pattern, game_config) in &config.games {
-                let pattern_lower = pattern.to_lowercase();
-                if proc_lower.contains(&pattern_lower) {
+            for (pattern_lower, game_config) in &lowered_games {
+                if proc_lower.contains(pattern_lower.as_str()) {
                     let game_id = game_config.game_id().to_string();
                     // Avoid duplicates (same game matched by multiple processes)
                     if !seen_ids.contains(&game_id) {

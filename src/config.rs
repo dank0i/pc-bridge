@@ -753,7 +753,18 @@ async fn reload_games(state: &AppState) {
             config.custom_sensors = new_config.custom_sensors;
             config.custom_commands = new_config.custom_commands;
 
-            info!("Reloaded games: {} (was {})", config.games.len(), old_count);
+            let new_game_count = config.games.len();
+
+            // Drop write lock before notifying subscribers
+            drop(config);
+
+            info!("Reloaded games: {} (was {})", new_game_count, old_count);
+
+            // Notify subscribers (e.g., GameSensor) that config changed
+            let _ = state.config_generation.send(());
+
+            // Re-acquire for logging checks
+            let config = state.config.read().await;
 
             // Log security-relevant changes
             if config.custom_sensors_enabled != old_sensors_enabled {

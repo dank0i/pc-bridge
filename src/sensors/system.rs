@@ -14,6 +14,27 @@ pub struct SystemSensor {
     state: Arc<AppState>,
 }
 
+/// Tracks previous sensor values to skip duplicate MQTT publishes
+struct PrevSystemValues {
+    cpu: String,
+    mem: String,
+    battery_level: String,
+    battery_charging: String,
+    active_window: String,
+}
+
+impl PrevSystemValues {
+    fn new() -> Self {
+        Self {
+            cpu: String::new(),
+            mem: String::new(),
+            battery_level: String::new(),
+            battery_charging: String::new(),
+            active_window: String::new(),
+        }
+    }
+}
+
 impl SystemSensor {
     pub fn new(state: Arc<AppState>) -> Self {
         Self { state }
@@ -25,9 +46,10 @@ impl SystemSensor {
 
         // CPU calculation needs previous sample
         let mut prev_cpu = get_cpu_times();
+        let mut prev_vals = PrevSystemValues::new();
 
-        // Initial publish
-        self.publish_all(&mut prev_cpu).await;
+        // Initial publish (force all by using empty prev_vals)
+        self.publish_all(&mut prev_cpu, &mut prev_vals).await;
 
         loop {
             tokio::select! {
@@ -36,45 +58,61 @@ impl SystemSensor {
                     break;
                 }
                 _ = tick.tick() => {
-                    self.publish_all(&mut prev_cpu).await;
+                    self.publish_all(&mut prev_cpu, &mut prev_vals).await;
                 }
             }
         }
     }
 
-    async fn publish_all(&self, prev_cpu: &mut CpuTimes) {
+    async fn publish_all(&self, prev_cpu: &mut CpuTimes, prev: &mut PrevSystemValues) {
         // CPU usage (percentage)
         let cpu = calculate_cpu_usage(prev_cpu);
-        self.state
-            .mqtt
-            .publish_sensor("cpu_usage", &format!("{:.1}", cpu))
-            .await;
+        let cpu_str = format!("{cpu:.1}");
+        if cpu_str != prev.cpu {
+            self.state.mqtt.publish_sensor("cpu_usage", &cpu_str).await;
+            prev.cpu = cpu_str;
+        }
 
         // Memory usage (percentage)
         let mem = get_memory_percent();
-        self.state
-            .mqtt
-            .publish_sensor("memory_usage", &format!("{:.1}", mem))
-            .await;
+        let mem_str = format!("{mem:.1}");
+        if mem_str != prev.mem {
+            self.state
+                .mqtt
+                .publish_sensor("memory_usage", &mem_str)
+                .await;
+            prev.mem = mem_str;
+        }
 
         // Battery (percentage and charging status)
         if let Some((percent, charging)) = get_battery_status() {
-            self.state
-                .mqtt
-                .publish_sensor("battery_level", &percent.to_string())
-                .await;
-            self.state
-                .mqtt
-                .publish_sensor("battery_charging", if charging { "true" } else { "false" })
-                .await;
+            let level_str = percent.to_string();
+            let charging_str = if charging { "true" } else { "false" };
+            if level_str != prev.battery_level {
+                self.state
+                    .mqtt
+                    .publish_sensor("battery_level", &level_str)
+                    .await;
+                prev.battery_level = level_str;
+            }
+            if charging_str != prev.battery_charging {
+                self.state
+                    .mqtt
+                    .publish_sensor("battery_charging", charging_str)
+                    .await;
+                prev.battery_charging = charging_str.to_string();
+            }
         }
 
         // Active window title
         let title = get_active_window_title();
-        self.state
-            .mqtt
-            .publish_sensor("active_window", &title)
-            .await;
+        if title != prev.active_window {
+            self.state
+                .mqtt
+                .publish_sensor("active_window", &title)
+                .await;
+            prev.active_window = title;
+        }
     }
 }
 

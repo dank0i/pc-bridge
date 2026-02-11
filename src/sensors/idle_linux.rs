@@ -25,12 +25,17 @@ impl IdleSensor {
         let mut tick = interval(Duration::from_secs(interval_secs));
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
 
+        // Track previous value to skip duplicate publishes
+        let mut prev_last_active;
+
         // Publish initial state
         let last_active = self.get_last_active_time();
+        let formatted = last_active.to_rfc3339();
         self.state
             .mqtt
-            .publish_sensor("lastactive", &last_active.to_rfc3339())
+            .publish_sensor("lastactive", &formatted)
             .await;
+        prev_last_active = formatted;
 
         loop {
             tokio::select! {
@@ -40,7 +45,11 @@ impl IdleSensor {
                 }
                 _ = tick.tick() => {
                     let last_active = self.get_last_active_time();
-                    self.state.mqtt.publish_sensor("lastactive", &last_active.to_rfc3339()).await;
+                    let formatted = last_active.to_rfc3339();
+                    if formatted != prev_last_active {
+                        self.state.mqtt.publish_sensor("lastactive", &formatted).await;
+                        prev_last_active = formatted;
+                    }
                 }
             }
         }

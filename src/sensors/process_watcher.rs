@@ -54,11 +54,11 @@ struct Win32Process {
 #[derive(Debug)]
 pub struct ProcessState {
     /// Process names (original case, with .exe suffix)
-    names: HashSet<String>,
+    names: HashSet<Arc<str>>,
     /// Process ID to name mapping (for deletion lookup)
-    pid_to_name: std::collections::HashMap<u32, String>,
+    pid_to_name: std::collections::HashMap<u32, Arc<str>>,
     /// Reference count per process name for O(1) removal
-    name_counts: std::collections::HashMap<String, u32>,
+    name_counts: std::collections::HashMap<Arc<str>, u32>,
     /// Count of running .scr (screensaver) processes for O(1) lookup
     scr_count: u32,
     /// Last update time (for diagnostics)
@@ -80,9 +80,11 @@ impl ProcessState {
         if name.len() >= 4 && name.as_bytes()[name.len() - 4..].eq_ignore_ascii_case(b".scr") {
             self.scr_count += 1;
         }
-        self.pid_to_name.insert(pid, name.clone());
-        *self.name_counts.entry(name.clone()).or_insert(0) += 1;
-        self.names.insert(name);
+        // Single Arc allocation shared across all three data structures
+        let arc_name: Arc<str> = Arc::from(name);
+        self.pid_to_name.insert(pid, Arc::clone(&arc_name));
+        *self.name_counts.entry(Arc::clone(&arc_name)).or_insert(0) += 1;
+        self.names.insert(arc_name);
         self.last_updated = Instant::now();
     }
 
@@ -103,7 +105,7 @@ impl ProcessState {
     }
 
     /// Get process names without cloning the set
-    pub fn names(&self) -> &HashSet<String> {
+    pub fn names(&self) -> &HashSet<Arc<str>> {
         &self.names
     }
 }
@@ -347,15 +349,24 @@ impl ProcessWatcher {
                     break;
                 }
                 Some(event) = event_rx.recv() => {
+                    // Batch: drain all pending events before acquiring write lock
+                    let mut batch = smallvec::SmallVec::<[ProcessEvent; 16]>::new();
+                    batch.push(event);
+                    while let Ok(e) = event_rx.try_recv() {
+                        batch.push(e);
+                    }
+
                     let mut guard = state.write().await;
-                    match event {
-                        ProcessEvent::Created(name, pid) => {
-                            debug!("Process started: {} (PID {})", name, pid);
-                            guard.add_process(name, pid);
-                        }
-                        ProcessEvent::Deleted(pid) => {
-                            debug!("Process ended: PID {}", pid);
-                            guard.remove_process(pid);
+                    for ev in batch {
+                        match ev {
+                            ProcessEvent::Created(name, pid) => {
+                                debug!("Process started: {} (PID {})", name, pid);
+                                guard.add_process(name, pid);
+                            }
+                            ProcessEvent::Deleted(pid) => {
+                                debug!("Process ended: PID {}", pid);
+                                guard.remove_process(pid);
+                            }
                         }
                     }
                     drop(guard);
@@ -466,7 +477,7 @@ impl ProcessWatcher {
     }
 
     /// Get a snapshot of current process names
-    pub async fn get_names(&self) -> HashSet<String> {
+    pub async fn get_names(&self) -> HashSet<Arc<str>> {
         self.state.read().await.names.clone()
     }
 

@@ -163,9 +163,11 @@ impl CustomSensorManager {
 
         let state = self.state.process_watcher.state();
         let guard = state.read().await;
+        // Use eq_ignore_ascii_case + case-folded contains to avoid allocating
+        // a new lowered String per process name
         let exists = guard.names().iter().any(|name| {
-            let lower = name.to_lowercase();
-            lower == process || lower.contains(&process)
+            name.eq_ignore_ascii_case(&process)
+                || name.len() >= process.len() && name.to_ascii_lowercase().contains(&*process)
         });
 
         if exists { "on" } else { "off" }.to_string()
