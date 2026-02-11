@@ -1,6 +1,6 @@
 [package]
 name = "pc-bridge"
-version = "2.8.0"
+version = "2.9.0"
 edition = "2021"
 authors = ["dank0i"]
 description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
@@ -17,7 +17,7 @@ default = []
 
 [dependencies]
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "signal", "fs"] }
 
 # MQTT
 rumqttc = "0.24"

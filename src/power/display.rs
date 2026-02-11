@@ -151,23 +151,27 @@ fn prevent_sleep_temporary(duration: Duration) {
         return;
     }
 
-    std::thread::spawn(move || {
-        unsafe {
-            // Set execution state to prevent sleep
-            let state = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED;
-            let ret = SetThreadExecutionState(state);
+    std::thread::Builder::new()
+        .name("sleep-prevent".into())
+        .stack_size(64 * 1024)
+        .spawn(move || {
+            unsafe {
+                // Set execution state to prevent sleep
+                let state = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED;
+                let ret = SetThreadExecutionState(state);
 
-            if ret == EXECUTION_STATE::default() {
+                if ret == EXECUTION_STATE::default() {
+                    SLEEP_PREVENTION_ACTIVE.store(false, Ordering::SeqCst);
+                    return;
+                }
+
+                std::thread::sleep(duration);
+
+                // Reset to allow sleep again
+                SetThreadExecutionState(ES_CONTINUOUS);
                 SLEEP_PREVENTION_ACTIVE.store(false, Ordering::SeqCst);
-                return;
+                info!("WakeDisplay: Sleep prevention ended");
             }
-
-            std::thread::sleep(duration);
-
-            // Reset to allow sleep again
-            SetThreadExecutionState(ES_CONTINUOUS);
-            SLEEP_PREVENTION_ACTIVE.store(false, Ordering::SeqCst);
-            info!("WakeDisplay: Sleep prevention ended");
-        }
-    });
+        })
+        .expect("failed to spawn sleep prevention thread");
 }

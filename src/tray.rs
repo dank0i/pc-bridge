@@ -54,18 +54,22 @@ pub fn run_tray(shutdown_tx: broadcast::Sender<()>, config_path: PathBuf) {
 
     // Handle menu events in a separate thread
     let shutdown_tx_clone = shutdown_tx.clone();
-    std::thread::spawn(move || loop {
-        if let Ok(event) = MenuEvent::receiver().recv() {
-            if event.id == open_config_id {
-                debug!("Tray: Open configuration clicked");
-                open_config_file(&config_path);
-            } else if event.id == exit_id {
-                info!("Tray: Exit clicked");
-                let _ = shutdown_tx_clone.send(());
-                break;
+    std::thread::Builder::new()
+        .name("tray-menu".into())
+        .stack_size(128 * 1024)
+        .spawn(move || loop {
+            if let Ok(event) = MenuEvent::receiver().recv() {
+                if event.id == open_config_id {
+                    debug!("Tray: Open configuration clicked");
+                    open_config_file(&config_path);
+                } else if event.id == exit_id {
+                    info!("Tray: Exit clicked");
+                    let _ = shutdown_tx_clone.send(());
+                    break;
+                }
             }
-        }
-    });
+        })
+        .expect("failed to spawn tray menu thread");
 
     // Platform-specific message loop
     run_message_loop(&shutdown_tx);
@@ -130,9 +134,13 @@ fn decode_ico(data: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
         anyhow::bail!("No images in ICO");
     }
 
-    // Find the largest image
+    // Pick the best icon for system tray: target 48x48, cap at 64x64
+    // Avoids decoding 256x256 (262KB RGBA) when tray displays at 16-48px
+    let max_dim = 64u32;
+    let target_dim = 48u32;
     let mut best_idx = 0;
-    let mut best_size = 0u32;
+    let mut best_dim = 0u32;
+    let mut best_distance = u32::MAX;
 
     for i in 0..count {
         let offset = 6 + i * 16;
@@ -150,11 +158,22 @@ fn decode_ico(data: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
         } else {
             data[offset + 1] as u32
         };
-        let size = width * height;
+        let dim = width.max(height);
 
-        if size > best_size {
-            best_size = size;
-            best_idx = i;
+        // Prefer sizes <= max_dim, closest to target_dim
+        if dim <= max_dim {
+            let distance = target_dim.abs_diff(dim);
+            if distance < best_distance || (distance == best_distance && dim > best_dim) {
+                best_distance = distance;
+                best_dim = dim;
+                best_idx = i;
+            }
+        } else if best_dim == 0 {
+            // No candidate <= max_dim yet, keep smallest oversized as fallback
+            if dim < best_distance {
+                best_distance = dim;
+                best_idx = i;
+            }
         }
     }
 

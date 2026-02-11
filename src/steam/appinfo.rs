@@ -81,7 +81,7 @@ impl AppInfoReader {
             file_size, version
         );
 
-        let mut index = HashMap::with_capacity(60000);
+        let mut index = HashMap::with_capacity(16384);
         let mut buf4 = [0u8; 4];
 
         // v29 entry format:

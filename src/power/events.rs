@@ -90,9 +90,13 @@ impl PowerEventListener {
         let stopped = Arc::new(AtomicBool::new(false));
         let stopped_clone = Arc::clone(&stopped);
 
-        std::thread::spawn(move || {
-            Self::message_pump(event_tx, stopped_clone);
-        });
+        std::thread::Builder::new()
+            .name("power-events".into())
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                Self::message_pump(event_tx, stopped_clone);
+            })
+            .expect("failed to spawn power events thread");
 
         // Handle events (no debouncing needed - state machine handles deduplication)
         loop {

@@ -74,7 +74,7 @@ unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> windows::Win32
     BOOL(0) // Not handled
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     // On Windows, attach to parent console if launched from terminal
     // This allows seeing output when run from cmd/powershell
@@ -290,9 +290,13 @@ async fn main() -> anyhow::Result<()> {
     if show_tray {
         let tray_shutdown = shutdown_tx.clone();
         let tray_config_path = config_path.clone();
-        std::thread::spawn(move || {
-            tray::run_tray(tray_shutdown, tray_config_path);
-        });
+        std::thread::Builder::new()
+            .name("tray".into())
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                tray::run_tray(tray_shutdown, tray_config_path);
+            })
+            .expect("failed to spawn tray thread");
     }
 
     // Publish initial availability
