@@ -1,10 +1,14 @@
 //! Idle time sensor - tracks last user input and screensaver state
+//!
+//! Screensaver detection is event-driven via ProcessWatcher push notifications,
+//! providing instant (~1s) MQTT updates when a .scr process starts or stops.
+//! Last-active time is polled via GetLastInputInfo.
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
-use tracing::debug;
+use tracing::{debug, info};
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 
@@ -22,13 +26,11 @@ impl IdleSensor {
     pub async fn run(self) {
         let config = self.state.config.read().await;
         let interval_secs = config.intervals.last_active.max(1); // Prevent panic on 0
-        let screensaver_interval_secs = config.intervals.screensaver.max(1);
         drop(config);
 
-        let screensaver_poll_interval = Duration::from_secs(screensaver_interval_secs);
         let mut tick = interval(Duration::from_secs(interval_secs));
-        let mut screensaver_tick = interval(screensaver_poll_interval);
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
+        let mut process_rx = self.state.process_watcher.subscribe();
 
         // Publish initial state
         let last_active = self.get_last_active_time();
@@ -38,7 +40,6 @@ impl IdleSensor {
             .await;
 
         // Publish initial screensaver state (retained so HA picks it up)
-        // Uses event-driven process watcher (always up-to-date)
         let screensaver_active = self.state.process_watcher.has_screensaver_running().await;
         let screensaver_state = if screensaver_active { "on" } else { "off" };
         debug!("Initial screensaver state: {}", screensaver_state);
@@ -48,6 +49,8 @@ impl IdleSensor {
             .await;
         let mut prev_screensaver_state = screensaver_active;
         let mut prev_idle_secs: i64 = 0;
+
+        info!("Idle sensor started (screensaver: push-based, lastactive: polled)");
 
         loop {
             tokio::select! {
@@ -64,14 +67,32 @@ impl IdleSensor {
                         prev_idle_secs = secs;
                     }
                 }
-                _ = screensaver_tick.tick() => {
-                    // Check screensaver state using event-driven watcher (always current)
-                    let screensaver_active = self.state.process_watcher.has_screensaver_running().await;
-                    if screensaver_active != prev_screensaver_state {
-                        let state_str = if screensaver_active { "on" } else { "off" };
-                        debug!("Screensaver state changed: {}", state_str);
-                        self.state.mqtt.publish_sensor_retained("screensaver", state_str).await;
-                        prev_screensaver_state = screensaver_active;
+                result = process_rx.recv() => {
+                    // Process list changed — check screensaver state immediately
+                    match result {
+                        Ok(_notification) => {
+                            let screensaver_active = self.state.process_watcher.has_screensaver_running().await;
+                            if screensaver_active != prev_screensaver_state {
+                                let state_str = if screensaver_active { "on" } else { "off" };
+                                debug!("Screensaver state changed: {}", state_str);
+                                self.state.mqtt.publish_sensor_retained("screensaver", state_str).await;
+                                prev_screensaver_state = screensaver_active;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            debug!("Idle sensor lagged {} notifications, re-checking screensaver", n);
+                            let screensaver_active = self.state.process_watcher.has_screensaver_running().await;
+                            if screensaver_active != prev_screensaver_state {
+                                let state_str = if screensaver_active { "on" } else { "off" };
+                                debug!("Screensaver state changed (post-lag): {}", state_str);
+                                self.state.mqtt.publish_sensor_retained("screensaver", state_str).await;
+                                prev_screensaver_state = screensaver_active;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            debug!("Process watcher channel closed");
+                            break;
+                        }
                     }
                 }
             }

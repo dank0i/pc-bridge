@@ -1,11 +1,15 @@
 //! System sensors - CPU, memory, battery, active window
 //!
-//! All implementations use native Win32 APIs for maximum performance.
-//! No WMI, no PowerShell, no external processes.
+//! - CPU/memory: polled (inherently sampled metrics)
+//! - Battery: event-driven via RegisterPowerSettingNotification (instant on plug/unplug/level change)
+//! - Active window: event-driven via SetWinEventHook(EVENT_SYSTEM_FOREGROUND) (instant on focus change)
 
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
-use tracing::debug;
+#[cfg(windows)]
+use tracing::error;
+use tracing::{debug, info};
 
 use crate::AppState;
 
@@ -35,6 +39,15 @@ impl PrevSystemValues {
     }
 }
 
+/// Events from background threads monitoring window focus and battery state
+#[cfg_attr(not(windows), allow(dead_code))]
+enum SystemEvent {
+    /// Foreground window changed
+    WindowFocusChanged,
+    /// Battery level or charging state changed
+    BatteryChanged,
+}
+
 impl SystemSensor {
     pub fn new(state: Arc<AppState>) -> Self {
         Self { state }
@@ -48,8 +61,32 @@ impl SystemSensor {
         let mut prev_cpu = get_cpu_times();
         let mut prev_vals = PrevSystemValues::new();
 
+        // Channel for receiving events from background threads
+        let (event_tx, mut event_rx) = mpsc::channel::<SystemEvent>(32);
+
+        // Start event-driven active window monitor
+        #[cfg(windows)]
+        {
+            let tx = event_tx.clone();
+            let shutdown = self.state.shutdown_tx.subscribe();
+            start_window_focus_monitor(tx, shutdown);
+        }
+
+        // Start event-driven battery monitor
+        #[cfg(windows)]
+        {
+            let tx = event_tx.clone();
+            let shutdown = self.state.shutdown_tx.subscribe();
+            start_battery_monitor(tx, shutdown);
+        }
+
+        // Suppress unused warning on non-Windows
+        let _ = &event_tx;
+
         // Initial publish (force all by using empty prev_vals)
         self.publish_all(&mut prev_cpu, &mut prev_vals).await;
+
+        info!("System sensor started (CPU/memory: polled, battery/active_window: event-driven)");
 
         loop {
             tokio::select! {
@@ -59,13 +96,39 @@ impl SystemSensor {
                     break;
                 }
                 _ = tick.tick() => {
-                    self.publish_all(&mut prev_cpu, &mut prev_vals).await;
+                    // Polled: CPU and memory only
+                    self.publish_cpu_mem(&mut prev_cpu, &mut prev_vals).await;
+                }
+                Some(event) = event_rx.recv() => {
+                    match event {
+                        SystemEvent::WindowFocusChanged => {
+                            let title = get_active_window_title();
+                            if title != prev_vals.active_window {
+                                self.state.mqtt.publish_sensor("active_window", &title).await;
+                                prev_vals.active_window = title;
+                            }
+                        }
+                        SystemEvent::BatteryChanged => {
+                            if let Some((percent, charging)) = get_battery_status() {
+                                let level_str = percent.to_string();
+                                let charging_str = if charging { "true" } else { "false" };
+                                if level_str != prev_vals.battery_level {
+                                    self.state.mqtt.publish_sensor("battery_level", &level_str).await;
+                                    prev_vals.battery_level = level_str;
+                                }
+                                if charging_str != prev_vals.battery_charging {
+                                    self.state.mqtt.publish_sensor("battery_charging", charging_str).await;
+                                    prev_vals.battery_charging = charging_str.to_string();
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
-    async fn publish_all(&self, prev_cpu: &mut CpuTimes, prev: &mut PrevSystemValues) {
+    async fn publish_cpu_mem(&self, prev_cpu: &mut CpuTimes, prev: &mut PrevSystemValues) {
         // CPU usage (percentage)
         let cpu = calculate_cpu_usage(prev_cpu);
         let cpu_str = format!("{cpu:.1}");
@@ -84,8 +147,13 @@ impl SystemSensor {
                 .await;
             prev.mem = mem_str;
         }
+    }
 
-        // Battery (percentage and charging status)
+    async fn publish_all(&self, prev_cpu: &mut CpuTimes, prev: &mut PrevSystemValues) {
+        // CPU and memory (polled metrics)
+        self.publish_cpu_mem(prev_cpu, prev).await;
+
+        // Battery (event-driven, but publish initial state)
         if let Some((percent, charging)) = get_battery_status() {
             let level_str = percent.to_string();
             let charging_str = if charging { "true" } else { "false" };
@@ -105,7 +173,7 @@ impl SystemSensor {
             }
         }
 
-        // Active window title
+        // Active window title (event-driven, but publish initial state)
         let title = get_active_window_title();
         if title != prev.active_window {
             self.state
@@ -115,6 +183,304 @@ impl SystemSensor {
             prev.active_window = title;
         }
     }
+}
+
+// ============================================================================
+// Active Window Monitor - Event-driven via SetWinEventHook
+// ============================================================================
+
+#[cfg(windows)]
+fn start_window_focus_monitor(
+    event_tx: mpsc::Sender<SystemEvent>,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+) {
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::Accessibility::SetWinEventHook;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+        PostMessageW, RegisterClassExW, TranslateMessage, MSG, WINDOW_EX_STYLE, WINDOW_STYLE,
+        WM_USER, WNDCLASSEXW,
+    };
+
+    // Thread-local sender for the WinEvent callback
+    thread_local! {
+        static FOCUS_TX: std::cell::RefCell<Option<mpsc::Sender<SystemEvent>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    unsafe extern "system" fn win_event_proc(
+        _h_win_event_hook: windows::Win32::UI::Accessibility::HWINEVENTHOOK,
+        _event: u32,
+        _hwnd: HWND,
+        _id_object: i32,
+        _id_child: i32,
+        _id_event_thread: u32,
+        _dwms_event_time: u32,
+    ) {
+        FOCUS_TX.with(|tx| {
+            if let Some(sender) = tx.borrow().as_ref() {
+                let _ = sender.blocking_send(SystemEvent::WindowFocusChanged);
+            }
+        });
+    }
+
+    // Spawn a thread with a message pump for SetWinEventHook
+    let (hwnd_tx, hwnd_rx) = tokio::sync::oneshot::channel::<isize>();
+
+    std::thread::Builder::new()
+        .name("window-focus".into())
+        .stack_size(256 * 1024)
+        .spawn(move || unsafe {
+            // Store sender in thread-local
+            FOCUS_TX.with(|tx| {
+                *tx.borrow_mut() = Some(event_tx);
+            });
+
+            let class_name = windows::core::w!("PCAgentFocusMonitor");
+            let wc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(DefWindowProcW),
+                lpszClassName: class_name,
+                ..Default::default()
+            };
+            RegisterClassExW(&raw const wc);
+
+            let hwnd = match CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                class_name,
+                windows::core::w!("PC Agent Focus Monitor"),
+                WINDOW_STYLE::default(),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                None,
+                None,
+            ) {
+                Ok(h) => h,
+                Err(e) => {
+                    error!("Failed to create focus monitor window: {:?}", e);
+                    let _ = hwnd_tx.send(0);
+                    return;
+                }
+            };
+
+            // EVENT_SYSTEM_FOREGROUND = 0x0003
+            let hook = SetWinEventHook(
+                0x0003, // EVENT_SYSTEM_FOREGROUND
+                0x0003, // EVENT_SYSTEM_FOREGROUND
+                None,   // No DLL
+                Some(win_event_proc),
+                0,      // All processes
+                0,      // All threads
+                0x0002, // WINEVENT_OUTOFCONTEXT
+            );
+
+            if hook.is_invalid() {
+                error!("Failed to set WinEventHook for foreground window");
+            } else {
+                debug!("WinEventHook set for EVENT_SYSTEM_FOREGROUND");
+            }
+
+            let _ = hwnd_tx.send(hwnd.0 as isize);
+
+            // Message pump
+            let mut msg = MSG::default();
+            loop {
+                let ret = GetMessageW(&raw mut msg, None, 0, 0);
+                if !ret.as_bool() || ret.0 == -1 {
+                    break;
+                }
+                if msg.message == WM_USER {
+                    break;
+                }
+                let _ = TranslateMessage(&raw const msg);
+                DispatchMessageW(&raw const msg);
+            }
+
+            let _ = DestroyWindow(hwnd);
+        })
+        .expect("failed to spawn window focus thread");
+
+    // Spawn task to post WM_QUIT on shutdown
+    tokio::spawn(async move {
+        let hwnd_val = hwnd_rx.await.unwrap_or(0);
+        if hwnd_val != 0 {
+            let _ = shutdown_rx.recv().await;
+            unsafe {
+                let hwnd = HWND(hwnd_val as *mut _);
+                let _ = PostMessageW(hwnd, WM_USER, WPARAM(0), LPARAM(0));
+            }
+        }
+    });
+}
+
+// ============================================================================
+// Battery Monitor - Event-driven via RegisterPowerSettingNotification
+// ============================================================================
+
+#[cfg(windows)]
+fn start_battery_monitor(
+    event_tx: mpsc::Sender<SystemEvent>,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+) {
+    use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::Power::RegisterPowerSettingNotification;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+        GetWindowLongPtrW, PostMessageW, RegisterClassExW, SetWindowLongPtrW, TranslateMessage,
+        DEVICE_NOTIFY_WINDOW_HANDLE, GWLP_USERDATA, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_USER,
+        WNDCLASSEXW,
+    };
+
+    const WM_POWERBROADCAST: u32 = 0x218;
+    const PBT_POWERSETTINGCHANGE: usize = 0x8013;
+
+    /// GUID_BATTERY_PERCENTAGE_REMAINING: {A7AD8041-B45A-4CAE-87A3-EECBB468A9E1}
+    const GUID_BATTERY_PERCENTAGE_REMAINING: windows::core::GUID = windows::core::GUID::from_values(
+        0xA7AD_8041,
+        0xB45A,
+        0x4CAE,
+        [0x87, 0xA3, 0xEE, 0xCB, 0xB4, 0x68, 0xA9, 0xE1],
+    );
+
+    /// GUID_ACDC_POWER_SOURCE: {5D3E9A59-E9D5-4B00-A6BD-FF34FF516548}
+    const GUID_ACDC_POWER_SOURCE: windows::core::GUID = windows::core::GUID::from_values(
+        0x5D3E_9A59,
+        0xE9D5,
+        0x4B00,
+        [0xA6, 0xBD, 0xFF, 0x34, 0xFF, 0x51, 0x65, 0x48],
+    );
+
+    #[repr(C)]
+    struct PowerBroadcastSetting {
+        power_setting: windows::core::GUID,
+        data_length: u32,
+        data: [u8; 1],
+    }
+
+    unsafe extern "system" fn battery_wnd_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if msg == WM_POWERBROADCAST && wparam.0 == PBT_POWERSETTINGCHANGE {
+            let pbs = lparam.0 as *const PowerBroadcastSetting;
+            if !pbs.is_null() {
+                let setting = &*pbs;
+                if (setting.power_setting == GUID_BATTERY_PERCENTAGE_REMAINING
+                    || setting.power_setting == GUID_ACDC_POWER_SOURCE)
+                    && setting.data_length >= 1
+                {
+                    let event_tx_ptr =
+                        GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const mpsc::Sender<SystemEvent>;
+                    if !event_tx_ptr.is_null() {
+                        let event_tx = &*event_tx_ptr;
+                        let _ = event_tx.blocking_send(SystemEvent::BatteryChanged);
+                    }
+                }
+            }
+        }
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+
+    let (hwnd_tx, hwnd_rx) = tokio::sync::oneshot::channel::<isize>();
+
+    std::thread::Builder::new()
+        .name("battery-monitor".into())
+        .stack_size(256 * 1024)
+        .spawn(move || unsafe {
+            let class_name = windows::core::w!("PCAgentBatteryMonitor");
+            let wc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(battery_wnd_proc),
+                lpszClassName: class_name,
+                ..Default::default()
+            };
+            RegisterClassExW(&raw const wc);
+
+            let hwnd = match CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                class_name,
+                windows::core::w!("PC Agent Battery Monitor"),
+                WINDOW_STYLE::default(),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                None,
+                None,
+            ) {
+                Ok(h) => h,
+                Err(e) => {
+                    error!("Failed to create battery monitor window: {:?}", e);
+                    let _ = hwnd_tx.send(0);
+                    return;
+                }
+            };
+
+            // Register for battery percentage changes
+            if let Err(e) = RegisterPowerSettingNotification(
+                HANDLE(hwnd.0),
+                &GUID_BATTERY_PERCENTAGE_REMAINING,
+                DEVICE_NOTIFY_WINDOW_HANDLE,
+            ) {
+                error!("Failed to register battery level notification: {:?}", e);
+            }
+
+            // Register for AC/DC power source changes (plug/unplug)
+            if let Err(e) = RegisterPowerSettingNotification(
+                HANDLE(hwnd.0),
+                &GUID_ACDC_POWER_SOURCE,
+                DEVICE_NOTIFY_WINDOW_HANDLE,
+            ) {
+                error!("Failed to register power source notification: {:?}", e);
+            }
+
+            // Store event_tx in window's user data
+            let event_tx_box = Box::new(event_tx);
+            let event_tx_ptr = Box::into_raw(event_tx_box);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, event_tx_ptr as isize);
+
+            debug!("Battery monitor registered for power notifications");
+            let _ = hwnd_tx.send(hwnd.0 as isize);
+
+            // Message pump
+            let mut msg = MSG::default();
+            loop {
+                let ret = GetMessageW(&raw mut msg, None, 0, 0);
+                if !ret.as_bool() || ret.0 == -1 {
+                    break;
+                }
+                if msg.message == WM_USER {
+                    break;
+                }
+                let _ = TranslateMessage(&raw const msg);
+                DispatchMessageW(&raw const msg);
+            }
+
+            // Cleanup
+            let _ = Box::from_raw(event_tx_ptr);
+            let _ = DestroyWindow(hwnd);
+        })
+        .expect("failed to spawn battery monitor thread");
+
+    // Spawn task to post WM_USER on shutdown
+    tokio::spawn(async move {
+        let hwnd_val = hwnd_rx.await.unwrap_or(0);
+        if hwnd_val != 0 {
+            let _ = shutdown_rx.recv().await;
+            unsafe {
+                let hwnd = HWND(hwnd_val as *mut _);
+                let _ = PostMessageW(hwnd, WM_USER, WPARAM(0), LPARAM(0));
+            }
+        }
+    });
 }
 
 // ============================================================================

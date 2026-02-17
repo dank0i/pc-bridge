@@ -246,7 +246,7 @@ async fn main() -> anyhow::Result<()> {
     if config.features.system_sensors {
         let sensor = SystemSensor::new(Arc::clone(&state));
         handles.push(tokio::spawn(sensor.run()));
-        info!("  System sensors enabled (CPU, memory, battery, active window)");
+        info!("  System sensors enabled (CPU/memory polled, battery/active_window event-driven)");
     }
 
     #[cfg(windows)]
@@ -254,7 +254,7 @@ async fn main() -> anyhow::Result<()> {
         use crate::sensors::SteamSensor;
         let sensor = SteamSensor::new(Arc::clone(&state));
         handles.push(tokio::spawn(sensor.run()));
-        info!("  Steam update detection enabled");
+        info!("  Steam update detection enabled (filesystem watcher)");
     }
 
     // Custom sensors (if enabled and defined)

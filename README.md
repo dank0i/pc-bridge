@@ -6,7 +6,7 @@ A lightweight cross-platform agent that bridges your PC with Home Assistant via 
 
 - **Game Detection** - Monitors running processes and reports current game
 - **Idle Tracking** - Reports last user input time
-- **Power Events** - Detects sleep/wake/display state and publishes state
+- **Power Events** - Detects sleep/wake/display state instantly via OS events
 - **System Sensors** - CPU usage, memory usage, battery level, active window (native APIs)
 - **Audio Control** - Volume, mute, media keys via Home Assistant
 - **Discord** - Join/leave voice channel commands
@@ -359,14 +359,17 @@ The `Launch` button accepts special payloads:
 PC Bridge auto-discovers via MQTT. After connecting, you'll get:
 
 **Sensors:**
-- `sensor.<device>_runninggames` - Current game (or "none")
-- `sensor.<device>_sleep_state` - "awake" or "sleeping"
-- `sensor.<device>_lastactive` - ISO timestamp of last input
-- `sensor.<device>_cpu_usage` - CPU usage percentage
-- `sensor.<device>_memory_usage` - Memory usage percentage
-- `sensor.<device>_battery_level` - Battery percentage (if available)
-- `sensor.<device>_battery_charging` - "true" or "false"
-- `sensor.<device>_active_window` - Current foreground window title
+- `sensor.<device>_runninggames` - Current game (or "none") — instant via process events
+- `sensor.<device>_sleep_state` - "awake" or "sleeping" — instant via OS power events
+- `sensor.<device>_lastactive` - ISO timestamp of last input (polled 10s)
+- `sensor.<device>_screensaver` - "on" or "off" — instant via WMI events
+- `sensor.<device>_display` - "on" or "off" — instant via OS power events
+- `sensor.<device>_cpu_usage` - CPU usage percentage (polled 10s)
+- `sensor.<device>_memory_usage` - Memory usage percentage (polled 10s)
+- `sensor.<device>_battery_level` - Battery percentage — instant via OS power events
+- `sensor.<device>_battery_charging` - "true" or "false" — instant via OS power events
+- `sensor.<device>_active_window` - Current foreground window title — instant via SetWinEventHook
+- `sensor.<device>_steam_updating` - "on"/"off" with game list — instant via filesystem watcher
 - `sensor.<device>_volume_level` - System volume percentage
 - `sensor.<device>_<custom>` - Any custom sensors you define
 

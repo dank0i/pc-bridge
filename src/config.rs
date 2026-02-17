@@ -255,14 +255,10 @@ pub struct IntervalConfig {
     pub game_sensor: u64,
     #[serde(default = "default_last_active")]
     pub last_active: u64,
-    #[serde(default = "default_screensaver")]
-    pub screensaver: u64,
     #[serde(default = "default_availability")]
     pub availability: u64,
     #[serde(default = "default_steam_check")]
     pub steam_check: u64,
-    #[serde(default = "default_steam_updating")]
-    pub steam_updating: u64,
 }
 
 impl Default for IntervalConfig {
@@ -270,10 +266,8 @@ impl Default for IntervalConfig {
         Self {
             game_sensor: default_game_sensor(),
             last_active: default_last_active(),
-            screensaver: default_screensaver(),
             availability: default_availability(),
             steam_check: default_steam_check(),
-            steam_updating: default_steam_updating(),
         }
     }
 }
@@ -284,17 +278,11 @@ fn default_game_sensor() -> u64 {
 fn default_last_active() -> u64 {
     10
 }
-fn default_screensaver() -> u64 {
-    10
-}
 fn default_availability() -> u64 {
     30
 }
 fn default_steam_check() -> u64 {
     30
-}
-fn default_steam_updating() -> u64 {
-    5
 }
 
 impl Config {
@@ -1120,10 +1108,8 @@ mod tests {
         let intervals = IntervalConfig::default();
         assert_eq!(intervals.game_sensor, 5);
         assert_eq!(intervals.last_active, 10);
-        assert_eq!(intervals.screensaver, 10);
         assert_eq!(intervals.availability, 30);
         assert_eq!(intervals.steam_check, 30);
-        assert_eq!(intervals.steam_updating, 5);
     }
 
     // ===== Full config JSON parsing =====

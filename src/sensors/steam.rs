@@ -1,10 +1,12 @@
 //! Steam update detection sensor - monitors ACF files for games being updated
 //!
-//! Adaptive polling: 30s base interval, 5s when updates are active
+//! Uses filesystem watcher (`notify` crate) for instant detection of ACF manifest changes.
+//! Falls back to periodic polling if the watcher fails.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
@@ -49,7 +51,6 @@ impl SteamSensor {
     pub async fn run(mut self) {
         let config = self.state.config.read().await;
         let base_interval = config.intervals.steam_check.max(10);
-        let fast_interval = config.intervals.steam_updating.max(2);
         drop(config);
 
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
@@ -72,16 +73,32 @@ impl SteamSensor {
             self.library_folders.len()
         );
 
+        // Set up filesystem watcher for ACF changes
+        let (fs_tx, mut fs_rx) = mpsc::channel::<()>(16);
+        let _watcher = self.setup_fs_watcher(&fs_tx);
+        let using_watcher = _watcher.is_some();
+
+        if using_watcher {
+            info!("Steam sensor using filesystem watcher (instant detection)");
+        } else {
+            warn!("Steam sensor falling back to polling ({}s)", base_interval);
+        }
+
         // Publish initial state
         self.do_full_scan().await;
         self.last_full_scan = Instant::now();
 
         loop {
-            // Dynamic interval based on whether updates are in progress
-            let sleep_duration = if self.updating_games.is_empty() {
+            // When updates are active, also poll at 5s for progress tracking
+            // (ACF files may not trigger fs events on every byte written)
+            let sleep_duration = if !self.updating_games.is_empty() {
+                Duration::from_secs(5)
+            } else if using_watcher {
+                // With fs watcher, only do periodic reconciliation scans
                 Duration::from_secs(base_interval)
             } else {
-                Duration::from_secs(fast_interval)
+                // Polling fallback
+                Duration::from_secs(base_interval)
             };
 
             tokio::select! {
@@ -90,16 +107,19 @@ impl SteamSensor {
                     debug!("Steam sensor shutting down");
                     break;
                 }
+                Some(()) = fs_rx.recv() => {
+                    // ACF file changed — re-scan immediately
+                    debug!("ACF file change detected, scanning");
+                    self.do_full_scan().await;
+                    self.last_full_scan = Instant::now();
+                }
                 () = tokio::time::sleep(sleep_duration) => {
                     if self.updating_games.is_empty() {
-                        // No updates in progress - do full scan
                         self.do_full_scan().await;
                         self.last_full_scan = Instant::now();
                     } else {
-                        // Updates in progress - just check those specific games
                         self.do_targeted_scan().await;
 
-                        // Periodic full scan even during updates (every 5 min)
                         if self.last_full_scan.elapsed() > Duration::from_secs(300) {
                             self.do_full_scan().await;
                             self.last_full_scan = Instant::now();
@@ -107,6 +127,55 @@ impl SteamSensor {
                     }
                 }
             }
+        }
+    }
+
+    /// Set up a filesystem watcher on all Steam library folders.
+    /// Returns the watcher handle (must be kept alive) or None if setup failed.
+    fn setup_fs_watcher(&self, fs_tx: &mpsc::Sender<()>) -> Option<notify::RecommendedWatcher> {
+        use notify::{Event, EventKind, RecursiveMode, Watcher};
+
+        let tx = fs_tx.clone();
+        let mut watcher =
+            match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
+                if let Ok(event) = res {
+                    // Only react to ACF file modifications/creations
+                    let is_acf_change = matches!(
+                        event.kind,
+                        EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                    ) && event.paths.iter().any(|p| {
+                        p.extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("acf"))
+                    });
+
+                    if is_acf_change {
+                        // Non-blocking send — if channel is full, skip (we'll catch it next time)
+                        let _ = tx.try_send(());
+                    }
+                }
+            }) {
+                Ok(w) => w,
+                Err(e) => {
+                    warn!("Failed to create filesystem watcher: {}", e);
+                    return None;
+                }
+            };
+
+        // Watch each Steam library folder (non-recursive — ACF files are at the top level)
+        let mut watched_any = false;
+        for folder in &self.library_folders {
+            if let Err(e) = watcher.watch(folder, RecursiveMode::NonRecursive) {
+                warn!("Failed to watch {:?}: {}", folder, e);
+            } else {
+                debug!("Watching Steam library: {:?}", folder);
+                watched_any = true;
+            }
+        }
+
+        if watched_any {
+            Some(watcher)
+        } else {
+            None
         }
     }
 
