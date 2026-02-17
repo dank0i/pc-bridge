@@ -29,7 +29,7 @@ impl IdleSensor {
         let mut prev_last_active;
 
         // Publish initial state
-        let last_active = self.get_last_active_time();
+        let last_active = self.get_last_active_time().await;
         let formatted = last_active.to_rfc3339();
         self.state
             .mqtt
@@ -39,12 +39,13 @@ impl IdleSensor {
 
         loop {
             tokio::select! {
+                biased;
                 _ = shutdown_rx.recv() => {
                     debug!("Idle sensor shutting down");
                     break;
                 }
                 _ = tick.tick() => {
-                    let last_active = self.get_last_active_time();
+                    let last_active = self.get_last_active_time().await;
                     let formatted = last_active.to_rfc3339();
                     if formatted != prev_last_active {
                         self.state.mqtt.publish_sensor("lastactive", &formatted).await;
@@ -55,7 +56,14 @@ impl IdleSensor {
         }
     }
 
-    fn get_last_active_time(&self) -> DateTime<Utc> {
+    async fn get_last_active_time(&self) -> DateTime<Utc> {
+        // Blocking subprocess calls — run off the single-threaded runtime
+        tokio::task::spawn_blocking(Self::get_last_active_time_blocking)
+            .await
+            .unwrap_or_else(|_| Utc::now())
+    }
+
+    fn get_last_active_time_blocking() -> DateTime<Utc> {
         // Try xprintidle first (X11)
         if let Ok(output) = Command::new("xprintidle").output() {
             if output.status.success() {

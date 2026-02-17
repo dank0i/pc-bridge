@@ -51,6 +51,7 @@ impl IdleSensor {
 
         loop {
             tokio::select! {
+                biased;
                 _ = shutdown_rx.recv() => {
                     debug!("Idle sensor shutting down");
                     break;

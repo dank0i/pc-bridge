@@ -5,7 +5,6 @@ use notify::{Event, EventKind, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -678,8 +677,7 @@ pub async fn watch_config(state: Arc<AppState>) {
         .unwrap_or_default();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(10);
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let stop_clone = Arc::clone(&stop_flag);
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
 
     // Create watcher in a blocking task since notify isn't async
     let filename_clone = filename.clone();
@@ -698,19 +696,18 @@ pub async fn watch_config(state: Arc<AppState>) {
 
         info!("Watching for changes to {:?}", dir.join(&filename_clone));
 
-        // Keep watcher alive until shutdown
-        while !stop_clone.load(Ordering::Relaxed) {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        }
+        // Keep watcher alive until shutdown — blocks instantly (no polling)
+        let _ = stop_rx.recv();
     });
 
     let mut shutdown_rx = state.shutdown_tx.subscribe();
 
     loop {
         tokio::select! {
+            biased;
             _ = shutdown_rx.recv() => {
                 info!("Config watcher shutting down");
-                stop_flag.store(true, Ordering::Relaxed);
+                drop(stop_tx); // Unblocks the watcher thread instantly
                 break;
             }
             Some(event) = rx.recv() => {
@@ -755,6 +752,11 @@ async fn reload_games(state: &AppState) {
 
             let new_game_count = config.games.len();
 
+            // Capture values for logging before dropping lock
+            let new_sensors_enabled = config.custom_sensors_enabled;
+            let new_commands_enabled = config.custom_commands_enabled;
+            let new_privileges_allowed = config.custom_command_privileges_allowed;
+
             // Drop write lock before notifying subscribers
             drop(config);
 
@@ -763,25 +765,22 @@ async fn reload_games(state: &AppState) {
             // Notify subscribers (e.g., GameSensor) that config changed
             let _ = state.config_generation.send(());
 
-            // Re-acquire for logging checks
-            let config = state.config.read().await;
-
-            // Log security-relevant changes
-            if config.custom_sensors_enabled != old_sensors_enabled {
-                if config.custom_sensors_enabled {
+            // Log security-relevant changes (using captured locals — no lock needed)
+            if new_sensors_enabled != old_sensors_enabled {
+                if new_sensors_enabled {
                     warn!("custom_sensors_enabled is now TRUE");
                 } else {
                     info!("custom_sensors_enabled is now false");
                 }
             }
-            if config.custom_commands_enabled != old_commands_enabled {
-                if config.custom_commands_enabled {
+            if new_commands_enabled != old_commands_enabled {
+                if new_commands_enabled {
                     warn!("custom_commands_enabled is now TRUE - arbitrary code execution possible via MQTT");
                 } else {
                     info!("custom_commands_enabled is now false");
                 }
             }
-            if config.custom_command_privileges_allowed {
+            if new_privileges_allowed {
                 warn!("custom_command_privileges_allowed is TRUE - commands can run with ADMIN privileges");
             }
         }

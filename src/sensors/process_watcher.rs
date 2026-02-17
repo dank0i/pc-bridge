@@ -175,37 +175,46 @@ impl ProcessWatcher {
         });
     }
 
-    /// Perform initial process enumeration using ToolHelp API
+    /// Perform initial process enumeration using ToolHelp API.
+    /// Win32 snapshot runs on a blocking thread to avoid stalling the async runtime.
     async fn initial_enumeration(state: &Arc<RwLock<ProcessState>>) {
-        let mut guard = state.write().await;
+        let processes = tokio::task::spawn_blocking(|| -> Vec<(String, u32)> {
+            let mut results = Vec::with_capacity(256);
+            unsafe {
+                if let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+                    let mut entry = PROCESSENTRY32W {
+                        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                        ..Default::default()
+                    };
 
-        unsafe {
-            if let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
-                let mut entry = PROCESSENTRY32W {
-                    dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-                    ..Default::default()
-                };
+                    if Process32FirstW(snapshot, &raw mut entry).is_ok() {
+                        loop {
+                            let mut name = String::from_utf16_lossy(&entry.szExeFile);
+                            if let Some(pos) = name.find('\0') {
+                                name.truncate(pos);
+                            }
 
-                if Process32FirstW(snapshot, &raw mut entry).is_ok() {
-                    loop {
-                        // Extract process name
-                        let mut name = String::from_utf16_lossy(&entry.szExeFile);
-                        if let Some(pos) = name.find('\0') {
-                            name.truncate(pos);
-                        }
+                            if !name.is_empty() {
+                                results.push((name, entry.th32ProcessID));
+                            }
 
-                        if !name.is_empty() {
-                            guard.add_process(name, entry.th32ProcessID);
-                        }
-
-                        if Process32NextW(snapshot, &raw mut entry).is_err() {
-                            break;
+                            if Process32NextW(snapshot, &raw mut entry).is_err() {
+                                break;
+                            }
                         }
                     }
-                }
 
-                let _ = CloseHandle(snapshot);
+                    let _ = CloseHandle(snapshot);
+                }
             }
+            results
+        })
+        .await
+        .unwrap_or_default();
+
+        let mut guard = state.write().await;
+        for (name, pid) in processes {
+            guard.add_process(name, pid);
         }
 
         info!(
@@ -228,7 +237,11 @@ impl ProcessWatcher {
 
             info!("WMI connection established, subscribing to process events");
 
-            // Single thread handles both creation and deletion events
+            // Single thread handles both creation and deletion events.
+            // Shutdown: when the mpsc receiver is dropped, blocking_send() returns Err
+            // and the thread breaks out of the event loop. The WMI `WITHIN 1` poll interval
+            // means at most ~1s delay before the thread notices and exits.
+            // JoinHandle is intentionally detached — the thread is cleaned up on process exit.
             std::thread::Builder::new()
                 .name("wmi-events".into())
                 .stack_size(256 * 1024)
@@ -320,6 +333,7 @@ impl ProcessWatcher {
 
         loop {
             tokio::select! {
+                biased;
                 _ = shutdown_rx.recv() => {
                     debug!("Event processor shutting down");
                     break;
@@ -389,6 +403,11 @@ impl ProcessWatcher {
             }
         }
 
+        // Reclaim excess capacity after churn (short-lived processes, installers, etc.)
+        guard.pid_to_name.shrink_to(256);
+        guard.name_counts.shrink_to(256);
+        guard.names.shrink_to(256);
+
         pruned
     }
 
@@ -439,6 +458,7 @@ impl ProcessWatcher {
 
         loop {
             tokio::select! {
+                biased;
                 _ = shutdown_rx.recv() => {
                     debug!("Process watcher (polling) shutting down");
                     break;

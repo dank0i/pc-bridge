@@ -29,8 +29,8 @@ pub fn wake_display() {
     info!("WakeDisplay: Wake sequence completed");
 }
 
-/// Wake display with retries
-pub fn wake_display_with_retry(max_attempts: usize, delay_between: std::time::Duration) {
+/// Wake display with retries (async version — uses tokio::time::sleep)
+pub async fn wake_display_with_retry(max_attempts: usize, delay_between: std::time::Duration) {
     let attempts = max_attempts.max(1);
     info!(
         "WakeDisplay: Starting wake sequence with {} attempts",
@@ -40,7 +40,7 @@ pub fn wake_display_with_retry(max_attempts: usize, delay_between: std::time::Du
     for attempt in 1..=attempts {
         wake_display();
         if attempt < attempts {
-            std::thread::sleep(delay_between);
+            tokio::time::sleep(delay_between).await;
         }
     }
 

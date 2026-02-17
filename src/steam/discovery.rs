@@ -348,6 +348,9 @@ impl SteamGameDiscovery {
             return;
         };
 
+        // Pre-compute cleaned folder name once (was recomputed per file)
+        let folder_clean = folder_name.replace(['-', '_', ' ', '.'], "").to_lowercase();
+
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_file() {
@@ -409,7 +412,6 @@ impl SteamGameDiscovery {
 
             // Check if exe name matches folder name (fuzzy)
             // bf6 matches "Battlefield 6", cs2 matches "Counter-Strike 2", etc.
-            let folder_clean = folder_name.replace(['-', '_', ' ', '.'], "").to_lowercase();
             let exe_clean = stem.replace(['-', '_', ' ', '.'], "").to_lowercase();
 
             // Match if: folder contains exe OR exe contains folder OR they share significant overlap

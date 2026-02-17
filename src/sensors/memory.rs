@@ -30,6 +30,7 @@ impl MemorySensor {
 
         loop {
             tokio::select! {
+                biased;
                 _ = shutdown_rx.recv() => {
                     debug!("Memory sensor shutting down");
                     break;

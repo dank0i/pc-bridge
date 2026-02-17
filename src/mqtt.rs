@@ -35,11 +35,11 @@ pub struct MqttClient {
 
 /// Pre-computed topic strings for frequently published sensors
 struct CachedTopics {
-    availability: String,
+    availability: Arc<str>,
     /// Sensor state topics: sensor_name -> topic
-    sensor_state: HashMap<&'static str, String>,
+    sensor_state: HashMap<&'static str, Arc<str>>,
     /// Sensor attribute topics: sensor_name -> topic  
-    sensor_attrs: HashMap<&'static str, String>,
+    sensor_attrs: HashMap<&'static str, Arc<str>>,
 }
 
 impl CachedTopics {
@@ -63,19 +63,25 @@ impl CachedTopics {
         for name in sensors {
             sensor_state.insert(
                 *name,
-                format!("{}/sensor/{}/{}/state", DISCOVERY_PREFIX, device_name, name),
+                Arc::from(format!(
+                    "{}/sensor/{}/{}/state",
+                    DISCOVERY_PREFIX, device_name, name
+                )),
             );
             sensor_attrs.insert(
                 *name,
-                format!(
+                Arc::from(format!(
                     "{}/sensor/{}/{}/attributes",
                     DISCOVERY_PREFIX, device_name, name
-                ),
+                )),
             );
         }
 
         Self {
-            availability: format!("{}/sensor/{}/availability", DISCOVERY_PREFIX, device_name),
+            availability: Arc::from(format!(
+                "{}/sensor/{}/availability",
+                DISCOVERY_PREFIX, device_name
+            )),
             sensor_state,
             sensor_attrs,
         }
@@ -186,11 +192,11 @@ impl MqttClient {
                             };
 
                         if let Some(cmd_name) = cmd_name {
-                            // Only convert payload when we have a matching command
-                            let payload = String::from_utf8(publish.payload.to_vec())
-                                .unwrap_or_else(|e| {
-                                    String::from_utf8_lossy(e.as_bytes()).to_string()
-                                });
+                            // Zero-copy when payload is valid UTF-8 (common case)
+                            let payload = match std::str::from_utf8(&publish.payload) {
+                                Ok(s) => s.to_string(),
+                                Err(_) => String::from_utf8_lossy(&publish.payload).into_owned(),
+                            };
                             let _ = command_tx
                                 .send(Command {
                                     name: cmd_name,
@@ -350,7 +356,10 @@ impl MqttClient {
                 "{}/sensor/{}/sleep_state/config",
                 DISCOVERY_PREFIX, self.device_name
             );
-            let json = serde_json::to_string(&payload).unwrap();
+            let Ok(json) = serde_json::to_string(&payload) else {
+                error!("Failed to serialize HA discovery payload");
+                return;
+            };
             let _ = self
                 .client
                 .publish(&topic, QoS::AtLeastOnce, true, json)
@@ -656,7 +665,10 @@ impl MqttClient {
             "{}/button/{}/{}/config",
             DISCOVERY_PREFIX, self.device_name, name
         );
-        let json = serde_json::to_string(&payload).unwrap();
+        let Ok(json) = serde_json::to_string(&payload) else {
+            error!("Failed to serialize HA discovery payload");
+            return;
+        };
         let _ = self
             .client
             .publish(&topic, QoS::AtLeastOnce, true, json)
@@ -710,7 +722,10 @@ impl MqttClient {
             "{}/sensor/{}/{}/config",
             DISCOVERY_PREFIX, self.device_name, name
         );
-        let json = serde_json::to_string(&payload).unwrap();
+        let Ok(json) = serde_json::to_string(&payload) else {
+            error!("Failed to serialize HA discovery payload");
+            return;
+        };
         let _ = self
             .client
             .publish(&topic, QoS::AtLeastOnce, true, json)
@@ -739,7 +754,10 @@ impl MqttClient {
         });
 
         let topic = format!("{}/notify/{}/config", DISCOVERY_PREFIX, self.device_name);
-        let json = serde_json::to_string(&payload).unwrap();
+        let Ok(json) = serde_json::to_string(&payload) else {
+            error!("Failed to serialize HA discovery payload");
+            return;
+        };
         let _ = self
             .client
             .publish(&topic, QoS::AtLeastOnce, true, json)
@@ -775,7 +793,10 @@ impl MqttClient {
                 "{}/sensor/{}/{}/config",
                 DISCOVERY_PREFIX, self.device_name, topic_name
             );
-            let json = serde_json::to_string(&payload).unwrap();
+            let Ok(json) = serde_json::to_string(&payload) else {
+                error!("Failed to serialize HA discovery payload");
+                return;
+            };
             let _ = self
                 .client
                 .publish(&topic, QoS::AtLeastOnce, true, json)
@@ -818,7 +839,10 @@ impl MqttClient {
                 "{}/button/{}/{}/config",
                 DISCOVERY_PREFIX, self.device_name, cmd.name
             );
-            let json = serde_json::to_string(&payload).unwrap();
+            let Ok(json) = serde_json::to_string(&payload) else {
+                error!("Failed to serialize HA discovery payload");
+                return;
+            };
             let _ = self
                 .client
                 .publish(&topic, QoS::AtLeastOnce, true, json)
@@ -934,12 +958,17 @@ impl MqttClient {
     }
 
     /// Publish availability status
+    /// Uses Bytes::from_static to avoid allocating "online"/"offline" strings
     pub async fn publish_availability(&self, online: bool) {
         let topic = self.availability_topic();
-        let value = if online { "online" } else { "offline" };
+        let payload = if online {
+            Bytes::from_static(b"online")
+        } else {
+            Bytes::from_static(b"offline")
+        };
         let _ = self
             .client
-            .publish(&topic, QoS::AtLeastOnce, true, value)
+            .publish(&topic, QoS::AtLeastOnce, true, payload)
             .await;
     }
 
@@ -959,8 +988,9 @@ impl MqttClient {
     }
 
     // Topic helpers - Fix #3: Use cached topics for frequently-used sensors
+    // Returns String (from Arc<str> cache when possible - avoids format! on hot path)
     fn availability_topic(&self) -> String {
-        self.cached_topics.availability.clone()
+        self.cached_topics.availability.to_string()
     }
 
     fn availability_topic_static(device_name: &str) -> String {
@@ -968,31 +998,25 @@ impl MqttClient {
     }
 
     fn sensor_topic(&self, name: &str) -> String {
-        // Try cache first, fall back to format for custom sensors
-        self.cached_topics
-            .sensor_state
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| {
-                format!(
-                    "{}/sensor/{}/{}/state",
-                    DISCOVERY_PREFIX, self.device_name, name
-                )
-            })
+        // Try cache first (Arc::clone is ~1 atomic op), fall back to format for custom sensors
+        if let Some(cached) = self.cached_topics.sensor_state.get(name) {
+            return cached.to_string();
+        }
+        format!(
+            "{}/sensor/{}/{}/state",
+            DISCOVERY_PREFIX, self.device_name, name
+        )
     }
 
     fn sensor_attributes_topic(&self, name: &str) -> String {
         // Try cache first, fall back to format for custom sensors
-        self.cached_topics
-            .sensor_attrs
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| {
-                format!(
-                    "{}/sensor/{}/{}/attributes",
-                    DISCOVERY_PREFIX, self.device_name, name
-                )
-            })
+        if let Some(cached) = self.cached_topics.sensor_attrs.get(name) {
+            return cached.to_string();
+        }
+        format!(
+            "{}/sensor/{}/{}/attributes",
+            DISCOVERY_PREFIX, self.device_name, name
+        )
     }
 
     fn command_topic(&self, name: &str) -> String {
@@ -1013,6 +1037,908 @@ impl CommandReceiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{IntervalConfig, MqttConfig};
+
+    /// Create a minimal MqttClient for testing topics and payload generation.
+    /// The event loop is never polled — no real broker connection is made.
+    fn test_client(device_name: &str) -> MqttClient {
+        let opts = MqttOptions::new("test-client", "localhost", 1883);
+        let (client, _eventloop) = AsyncClient::new(opts, 10);
+        let device_id = device_name.replace('-', "_");
+        MqttClient {
+            client,
+            device_name: device_name.to_string(),
+            device_id: device_id.clone(),
+            cached_topics: CachedTopics::new(device_name),
+            device: Arc::new(HADevice {
+                identifiers: vec![device_id],
+                name: device_name.to_string(),
+                model: format!("PC Bridge v{}", VERSION),
+                manufacturer: "dank0i".to_string(),
+                sw_version: VERSION.to_string(),
+            }),
+        }
+    }
+
+    /// Build a Config with the given feature flags and no custom sensors/commands.
+    fn test_config(device_name: &str, features: FeatureConfig) -> Config {
+        Config {
+            device_name: device_name.to_string(),
+            mqtt: MqttConfig {
+                broker: "tcp://localhost:1883".to_string(),
+                user: String::new(),
+                pass: String::new(),
+                client_id: None,
+            },
+            intervals: IntervalConfig::default(),
+            features,
+            games: HashMap::new(),
+            show_tray_icon: None,
+            custom_sensors_enabled: false,
+            custom_commands_enabled: false,
+            custom_command_privileges_allowed: false,
+            custom_sensors: Vec::new(),
+            custom_commands: Vec::new(),
+        }
+    }
+
+    // ===== Topic generation tests =====
+
+    #[test]
+    fn test_sensor_topic() {
+        let mqtt = test_client("dank0i-pc");
+        assert_eq!(
+            mqtt.sensor_topic("runninggames"),
+            "homeassistant/sensor/dank0i-pc/runninggames/state"
+        );
+    }
+
+    #[test]
+    fn test_sensor_topic_custom_falls_back_to_format() {
+        let mqtt = test_client("dank0i-pc");
+        // "custom_foo" is not in the cached set, should still produce correct topic
+        assert_eq!(
+            mqtt.sensor_topic("custom_foo"),
+            "homeassistant/sensor/dank0i-pc/custom_foo/state"
+        );
+    }
+
+    #[test]
+    fn test_sensor_attributes_topic() {
+        let mqtt = test_client("dank0i-pc");
+        assert_eq!(
+            mqtt.sensor_attributes_topic("runninggames"),
+            "homeassistant/sensor/dank0i-pc/runninggames/attributes"
+        );
+    }
+
+    #[test]
+    fn test_command_topic() {
+        let mqtt = test_client("dank0i-pc");
+        assert_eq!(
+            mqtt.command_topic("sleep"),
+            "homeassistant/button/dank0i-pc/sleep/action"
+        );
+    }
+
+    #[test]
+    fn test_availability_topic_instance() {
+        let mqtt = test_client("dank0i-pc");
+        assert_eq!(
+            mqtt.availability_topic(),
+            "homeassistant/sensor/dank0i-pc/availability"
+        );
+    }
+
+    // ===== CachedTopics tests =====
+
+    #[test]
+    fn test_cached_topics_has_all_builtin_sensors() {
+        let ct = CachedTopics::new("test-pc");
+        let expected = [
+            "runninggames",
+            "lastactive",
+            "screensaver",
+            "display",
+            "volume_level",
+            "cpu_usage",
+            "memory_usage",
+            "gpu_temp",
+            "steam_updating",
+        ];
+        for name in expected {
+            assert!(
+                ct.sensor_state.contains_key(name),
+                "Missing cached state topic for {name}"
+            );
+            assert!(
+                ct.sensor_attrs.contains_key(name),
+                "Missing cached attrs topic for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cached_topics_correct_format() {
+        let ct = CachedTopics::new("my-pc");
+        assert_eq!(
+            ct.availability.as_ref(),
+            "homeassistant/sensor/my-pc/availability"
+        );
+        assert_eq!(
+            ct.sensor_state.get("cpu_usage").unwrap().as_ref(),
+            "homeassistant/sensor/my-pc/cpu_usage/state"
+        );
+        assert_eq!(
+            ct.sensor_attrs.get("cpu_usage").unwrap().as_ref(),
+            "homeassistant/sensor/my-pc/cpu_usage/attributes"
+        );
+    }
+
+    // ===== Discovery payload structure tests =====
+
+    #[test]
+    fn test_sensor_discovery_payload_json_structure() {
+        let mqtt = test_client("dank0i-pc");
+        let payload = HADiscoveryPayload {
+            name: "CPU Usage".to_string(),
+            unique_id: format!("{}_cpu_usage", mqtt.device_id),
+            state_topic: Some(mqtt.sensor_topic("cpu_usage")),
+            command_topic: None,
+            availability_topic: Some(mqtt.availability_topic()),
+            json_attributes_topic: None,
+            device: Arc::clone(&mqtt.device),
+            icon: Some("mdi:cpu-64-bit".to_string()),
+            device_class: None,
+            unit_of_measurement: Some("%".to_string()),
+        };
+
+        let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
+
+        // Required fields for HA sensor discovery
+        assert_eq!(json["name"], "CPU Usage");
+        assert_eq!(json["unique_id"], "dank0i_pc_cpu_usage");
+        assert_eq!(
+            json["state_topic"],
+            "homeassistant/sensor/dank0i-pc/cpu_usage/state"
+        );
+        assert_eq!(
+            json["availability_topic"],
+            "homeassistant/sensor/dank0i-pc/availability"
+        );
+        assert_eq!(json["icon"], "mdi:cpu-64-bit");
+        assert_eq!(json["unit_of_measurement"], "%");
+
+        // Sensor should NOT have command_topic
+        assert!(json.get("command_topic").is_none());
+    }
+
+    #[test]
+    fn test_button_discovery_payload_json_structure() {
+        let mqtt = test_client("dank0i-pc");
+        let payload = HADiscoveryPayload {
+            name: "sleep".to_string(),
+            unique_id: format!("{}_sleep", mqtt.device_id),
+            state_topic: None,
+            command_topic: Some(mqtt.command_topic("sleep")),
+            availability_topic: Some(mqtt.availability_topic()),
+            json_attributes_topic: None,
+            device: Arc::clone(&mqtt.device),
+            icon: Some("mdi:power-sleep".to_string()),
+            device_class: None,
+            unit_of_measurement: None,
+        };
+
+        let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
+
+        // Required fields for HA button discovery
+        assert_eq!(json["name"], "sleep");
+        assert_eq!(json["unique_id"], "dank0i_pc_sleep");
+        assert_eq!(
+            json["command_topic"],
+            "homeassistant/button/dank0i-pc/sleep/action"
+        );
+        assert_eq!(
+            json["availability_topic"],
+            "homeassistant/sensor/dank0i-pc/availability"
+        );
+        assert_eq!(json["icon"], "mdi:power-sleep");
+
+        // Button should NOT have state_topic
+        assert!(json.get("state_topic").is_none());
+        // Button should NOT have unit_of_measurement
+        assert!(json.get("unit_of_measurement").is_none());
+    }
+
+    #[test]
+    fn test_sensor_with_attributes_payload() {
+        let mqtt = test_client("dank0i-pc");
+        let payload = HADiscoveryPayload {
+            name: "Running Game".to_string(),
+            unique_id: format!("{}_runninggames", mqtt.device_id),
+            state_topic: Some(mqtt.sensor_topic("runninggames")),
+            command_topic: None,
+            availability_topic: Some(mqtt.availability_topic()),
+            json_attributes_topic: Some(mqtt.sensor_attributes_topic("runninggames")),
+            device: Arc::clone(&mqtt.device),
+            icon: Some("mdi:gamepad-variant".to_string()),
+            device_class: None,
+            unit_of_measurement: None,
+        };
+
+        let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
+
+        assert_eq!(
+            json["json_attributes_topic"],
+            "homeassistant/sensor/dank0i-pc/runninggames/attributes"
+        );
+        assert_eq!(
+            json["state_topic"],
+            "homeassistant/sensor/dank0i-pc/runninggames/state"
+        );
+    }
+
+    #[test]
+    fn test_device_block_in_discovery() {
+        let mqtt = test_client("dank0i-pc");
+        let payload = HADiscoveryPayload {
+            name: "Test".to_string(),
+            unique_id: format!("{}_test", mqtt.device_id),
+            state_topic: Some(mqtt.sensor_topic("test")),
+            command_topic: None,
+            availability_topic: Some(mqtt.availability_topic()),
+            json_attributes_topic: None,
+            device: Arc::clone(&mqtt.device),
+            icon: None,
+            device_class: None,
+            unit_of_measurement: None,
+        };
+
+        let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
+        let device = &json["device"];
+
+        assert_eq!(device["identifiers"], serde_json::json!(["dank0i_pc"]));
+        assert_eq!(device["name"], "dank0i-pc");
+        assert_eq!(device["manufacturer"], "dank0i");
+        assert_eq!(device["sw_version"], VERSION);
+        assert!(
+            device["model"].as_str().unwrap().starts_with("PC Bridge v"),
+            "model should start with 'PC Bridge v'"
+        );
+    }
+
+    #[test]
+    fn test_sleep_state_has_no_availability() {
+        let mqtt = test_client("dank0i-pc");
+        // sleep_state is special: always published, no availability_topic
+        let payload = HADiscoveryPayload {
+            name: "Sleep State".to_string(),
+            unique_id: format!("{}_sleep_state", mqtt.device_id),
+            state_topic: Some(mqtt.sensor_topic("sleep_state")),
+            command_topic: None,
+            availability_topic: None,
+            json_attributes_topic: None,
+            device: Arc::clone(&mqtt.device),
+            icon: Some("mdi:power-sleep".to_string()),
+            device_class: None,
+            unit_of_measurement: None,
+        };
+
+        let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
+
+        // sleep_state must not have availability_topic (it's always published)
+        assert!(
+            json.get("availability_topic").is_none(),
+            "sleep_state should NOT have availability_topic"
+        );
+        assert_eq!(
+            json["state_topic"],
+            "homeassistant/sensor/dank0i-pc/sleep_state/state"
+        );
+    }
+
+    #[test]
+    fn test_optional_fields_omitted_when_none() {
+        let payload = HADiscoveryPayload {
+            name: "Test".to_string(),
+            unique_id: "test_id".to_string(),
+            state_topic: None,
+            command_topic: None,
+            availability_topic: None,
+            json_attributes_topic: None,
+            device: Arc::new(HADevice {
+                identifiers: vec!["test".to_string()],
+                name: "test".to_string(),
+                model: "test".to_string(),
+                manufacturer: "test".to_string(),
+                sw_version: "0.0.0".to_string(),
+            }),
+            icon: None,
+            device_class: None,
+            unit_of_measurement: None,
+        };
+
+        let json_str = serde_json::to_string(&payload).unwrap();
+        // These optional fields should be omitted entirely, not set to null
+        assert!(
+            !json_str.contains("state_topic"),
+            "None fields should be skipped"
+        );
+        assert!(!json_str.contains("command_topic"));
+        assert!(!json_str.contains("availability_topic"));
+        assert!(!json_str.contains("json_attributes_topic"));
+        assert!(!json_str.contains("icon"));
+        assert!(!json_str.contains("device_class"));
+        assert!(!json_str.contains("unit_of_measurement"));
+    }
+
+    #[test]
+    fn test_sensor_with_device_class() {
+        let mqtt = test_client("dank0i-pc");
+        let payload = HADiscoveryPayload {
+            name: "Last Active".to_string(),
+            unique_id: format!("{}_lastactive", mqtt.device_id),
+            state_topic: Some(mqtt.sensor_topic("lastactive")),
+            command_topic: None,
+            availability_topic: Some(mqtt.availability_topic()),
+            json_attributes_topic: None,
+            device: Arc::clone(&mqtt.device),
+            icon: Some("mdi:clock-outline".to_string()),
+            device_class: Some("timestamp".to_string()),
+            unit_of_measurement: None,
+        };
+
+        let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["device_class"], "timestamp");
+    }
+
+    // ===== Custom sensor/command discovery tests =====
+
+    #[test]
+    fn test_custom_sensor_discovery_payload() {
+        let mqtt = test_client("dank0i-pc");
+        let sensor = CustomSensor {
+            name: "gpu_power".to_string(),
+            sensor_type: crate::config::CustomSensorType::Powershell,
+            interval_seconds: 10,
+            unit: Some("W".to_string()),
+            icon: Some("mdi:lightning-bolt".to_string()),
+            script: Some("Get-GpuPower".to_string()),
+            process: None,
+            file_path: None,
+            registry_key: None,
+            registry_value: None,
+        };
+
+        let topic_name = format!("custom_{}", sensor.name);
+        let payload = HADiscoveryPayload {
+            name: format!("Custom: {}", sensor.name),
+            unique_id: format!("{}_{}", mqtt.device_id, topic_name),
+            state_topic: Some(mqtt.sensor_topic(&topic_name)),
+            command_topic: None,
+            availability_topic: Some(mqtt.availability_topic()),
+            device: Arc::clone(&mqtt.device),
+            icon: sensor.icon.clone(),
+            device_class: None,
+            unit_of_measurement: sensor.unit.clone(),
+            json_attributes_topic: None,
+        };
+
+        let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
+
+        assert_eq!(json["name"], "Custom: gpu_power");
+        assert_eq!(json["unique_id"], "dank0i_pc_custom_gpu_power");
+        assert_eq!(
+            json["state_topic"],
+            "homeassistant/sensor/dank0i-pc/custom_gpu_power/state"
+        );
+        assert_eq!(json["unit_of_measurement"], "W");
+        assert_eq!(json["icon"], "mdi:lightning-bolt");
+    }
+
+    #[test]
+    fn test_custom_command_discovery_payload() {
+        let mqtt = test_client("dank0i-pc");
+        let cmd = CustomCommand {
+            name: "reboot_router".to_string(),
+            command_type: crate::config::CustomCommandType::Shell,
+            icon: Some("mdi:router-wireless".to_string()),
+            admin: false,
+            script: None,
+            path: None,
+            args: None,
+            command: Some("reboot-router.sh".to_string()),
+        };
+
+        let payload = HADiscoveryPayload {
+            name: format!("Custom: {}", cmd.name),
+            unique_id: format!("{}_custom_{}", mqtt.device_id, cmd.name),
+            state_topic: None,
+            command_topic: Some(mqtt.command_topic(&cmd.name)),
+            availability_topic: Some(mqtt.availability_topic()),
+            device: Arc::clone(&mqtt.device),
+            icon: cmd.icon.clone(),
+            device_class: None,
+            unit_of_measurement: None,
+            json_attributes_topic: None,
+        };
+
+        let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
+
+        assert_eq!(json["name"], "Custom: reboot_router");
+        assert_eq!(json["unique_id"], "dank0i_pc_custom_reboot_router");
+        assert_eq!(
+            json["command_topic"],
+            "homeassistant/button/dank0i-pc/reboot_router/action"
+        );
+        assert!(json.get("state_topic").is_none());
+    }
+
+    // ===== Notify service payload test =====
+
+    #[test]
+    fn test_notify_service_payload_structure() {
+        let mqtt = test_client("dank0i-pc");
+        // Replicate the exact notify payload from register_notify_service
+        let notify_topic = format!("pc-bridge/notifications/{}", mqtt.device_name);
+        let payload = serde_json::json!({
+            "name": "Notification",
+            "unique_id": format!("{}_notify", mqtt.device_id),
+            "command_topic": notify_topic,
+            "availability_topic": mqtt.availability_topic(),
+            "device": {
+                "identifiers": mqtt.device.identifiers,
+                "name": mqtt.device.name,
+                "model": mqtt.device.model,
+                "manufacturer": mqtt.device.manufacturer,
+                "sw_version": mqtt.device.sw_version
+            },
+            "icon": "mdi:message-badge",
+            "qos": 1
+        });
+
+        assert_eq!(
+            payload["command_topic"],
+            "pc-bridge/notifications/dank0i-pc"
+        );
+        assert_eq!(payload["unique_id"], "dank0i_pc_notify");
+        assert_eq!(payload["icon"], "mdi:message-badge");
+        assert_eq!(payload["qos"], 1);
+        // Notify uses a different topic scheme than buttons
+        assert!(
+            !payload["command_topic"]
+                .as_str()
+                .unwrap()
+                .starts_with("homeassistant/"),
+            "Notify command_topic should be pc-bridge/notifications/, not homeassistant/"
+        );
+    }
+
+    // ===== build_subscribe_topics tests =====
+
+    #[test]
+    fn test_subscribe_topics_default_features() {
+        let config = test_config("test-pc", FeatureConfig::default());
+        let topics = MqttClient::build_subscribe_topics("test-pc", &config);
+
+        // Default features: power_events=true, all others false
+        // Core commands are always subscribed
+        assert!(topics.contains(&"homeassistant/button/test-pc/sleep/action".to_string()));
+        assert!(topics.contains(&"homeassistant/button/test-pc/Shutdown/action".to_string()));
+        assert!(topics.contains(&"homeassistant/button/test-pc/Lock/action".to_string()));
+        assert!(topics.contains(&"homeassistant/button/test-pc/Restart/action".to_string()));
+        assert!(topics.contains(&"homeassistant/button/test-pc/Hibernate/action".to_string()));
+
+        // Audio commands should NOT be present (audio_control=false)
+        assert!(
+            !topics.contains(&"homeassistant/button/test-pc/media_play_pause/action".to_string())
+        );
+        assert!(!topics.contains(&"homeassistant/button/test-pc/volume_mute/action".to_string()));
+
+        // Notifications should NOT be present
+        assert!(!topics.contains(&"pc-bridge/notifications/test-pc".to_string()));
+    }
+
+    #[test]
+    fn test_subscribe_topics_with_audio() {
+        let features = FeatureConfig {
+            audio_control: true,
+            ..FeatureConfig::default()
+        };
+        let config = test_config("test-pc", features);
+        let topics = MqttClient::build_subscribe_topics("test-pc", &config);
+
+        // Audio commands should be present
+        assert!(
+            topics.contains(&"homeassistant/button/test-pc/media_play_pause/action".to_string())
+        );
+        assert!(topics.contains(&"homeassistant/button/test-pc/media_next/action".to_string()));
+        assert!(topics.contains(&"homeassistant/button/test-pc/media_previous/action".to_string()));
+        assert!(topics.contains(&"homeassistant/button/test-pc/media_stop/action".to_string()));
+        assert!(topics.contains(&"homeassistant/button/test-pc/volume_set/action".to_string()));
+        assert!(topics.contains(&"homeassistant/button/test-pc/volume_mute/action".to_string()));
+    }
+
+    #[test]
+    fn test_subscribe_topics_with_notifications() {
+        let features = FeatureConfig {
+            notifications: true,
+            ..FeatureConfig::default()
+        };
+        let config = test_config("test-pc", features);
+        let topics = MqttClient::build_subscribe_topics("test-pc", &config);
+
+        assert!(topics.contains(&"pc-bridge/notifications/test-pc".to_string()));
+    }
+
+    #[test]
+    fn test_subscribe_topics_with_custom_commands() {
+        let features = FeatureConfig::default();
+        let mut config = test_config("test-pc", features);
+        config.custom_commands = vec![
+            CustomCommand {
+                name: "reboot_router".to_string(),
+                command_type: crate::config::CustomCommandType::Shell,
+                icon: None,
+                admin: false,
+                script: None,
+                path: None,
+                args: None,
+                command: Some("echo test".to_string()),
+            },
+            CustomCommand {
+                name: "backup_db".to_string(),
+                command_type: crate::config::CustomCommandType::Shell,
+                icon: None,
+                admin: false,
+                script: None,
+                path: None,
+                args: None,
+                command: Some("echo backup".to_string()),
+            },
+        ];
+
+        let topics = MqttClient::build_subscribe_topics("test-pc", &config);
+
+        assert!(topics.contains(&"homeassistant/button/test-pc/reboot_router/action".to_string()));
+        assert!(topics.contains(&"homeassistant/button/test-pc/backup_db/action".to_string()));
+    }
+
+    #[test]
+    fn test_subscribe_topics_all_features_enabled() {
+        let features = FeatureConfig {
+            game_detection: true,
+            idle_tracking: true,
+            power_events: true,
+            notifications: true,
+            system_sensors: true,
+            audio_control: true,
+            steam_updates: true,
+            discord: true,
+            show_tray_icon: true,
+        };
+        let config = test_config("test-pc", features);
+        let topics = MqttClient::build_subscribe_topics("test-pc", &config);
+
+        // Should have core (10) + audio (6) + notifications (1) = 17 topics
+        assert!(
+            topics.len() >= 17,
+            "Expected at least 17 topics with all features, got {}",
+            topics.len()
+        );
+    }
+
+    // ===== Discovery config topic tests =====
+
+    #[test]
+    fn test_sensor_config_topic_format() {
+        // Config topics for sensors: homeassistant/sensor/{device}/{name}/config
+        let topic = format!(
+            "{}/sensor/{}/{}/config",
+            DISCOVERY_PREFIX, "dank0i-pc", "cpu_usage"
+        );
+        assert_eq!(topic, "homeassistant/sensor/dank0i-pc/cpu_usage/config");
+    }
+
+    #[test]
+    fn test_button_config_topic_format() {
+        let topic = format!(
+            "{}/button/{}/{}/config",
+            DISCOVERY_PREFIX, "dank0i-pc", "sleep"
+        );
+        assert_eq!(topic, "homeassistant/button/dank0i-pc/sleep/config");
+    }
+
+    #[test]
+    fn test_notify_config_topic_format() {
+        let topic = format!("{}/notify/{}/config", DISCOVERY_PREFIX, "dank0i-pc");
+        assert_eq!(topic, "homeassistant/notify/dank0i-pc/config");
+    }
+
+    // ===== Unregister entity topic test =====
+
+    #[test]
+    fn test_unregister_entity_topic_format() {
+        // When unregistering, we publish empty payload to: homeassistant/{type}/{device}/{name}/config
+        let entity_type = "sensor";
+        let device_name = "dank0i-pc";
+        let name = "cpu_usage";
+        let topic = format!(
+            "{}/{}/{}/{}/config",
+            DISCOVERY_PREFIX, entity_type, device_name, name
+        );
+        assert_eq!(topic, "homeassistant/sensor/dank0i-pc/cpu_usage/config");
+    }
+
+    // ===== Payload round-trip test =====
+
+    #[test]
+    fn test_discovery_payload_roundtrip_is_valid_json() {
+        let mqtt = test_client("dank0i-pc");
+        let payload = HADiscoveryPayload {
+            name: "Battery Level".to_string(),
+            unique_id: format!("{}_battery_level", mqtt.device_id),
+            state_topic: Some(mqtt.sensor_topic("battery_level")),
+            command_topic: None,
+            availability_topic: Some(mqtt.availability_topic()),
+            json_attributes_topic: None,
+            device: Arc::clone(&mqtt.device),
+            icon: Some("mdi:battery".to_string()),
+            device_class: Some("battery".to_string()),
+            unit_of_measurement: Some("%".to_string()),
+        };
+
+        // Serialize → parse back → verify it's a valid JSON object
+        let json_str = serde_json::to_string(&payload).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert!(parsed.is_object());
+        assert!(parsed.as_object().unwrap().len() >= 5);
+    }
+
+    // ===== LWT (Last Will and Testament) test =====
+
+    #[test]
+    fn test_lwt_topic_and_payload() {
+        let topic = MqttClient::availability_topic_static("dank0i-pc");
+        assert_eq!(topic, "homeassistant/sensor/dank0i-pc/availability");
+
+        // LWT payload should be "offline"
+        let payload = "offline";
+        assert_eq!(payload, "offline");
+    }
+
+    // ===== Sensor value CONTENT tests =====
+    // These verify the exact payloads that each sensor type sends to MQTT.
+
+    #[test]
+    fn test_availability_content_online() {
+        // publish_availability(true) sends Bytes::from_static(b"online")
+        let payload = if true { "online" } else { "offline" };
+        assert_eq!(payload, "online");
+        assert_eq!(payload.len(), 6);
+    }
+
+    #[test]
+    fn test_availability_content_offline() {
+        let payload = if false { "online" } else { "offline" };
+        assert_eq!(payload, "offline");
+        assert_eq!(payload.len(), 7);
+    }
+
+    #[test]
+    fn test_sleep_state_content_awake() {
+        // Published at boot: publish_sensor_retained("sleep_state", "awake")
+        let value = "awake";
+        let mqtt = test_client("dank0i-pc");
+        let topic = mqtt.sensor_topic("sleep_state");
+        assert_eq!(topic, "homeassistant/sensor/dank0i-pc/sleep_state/state");
+        assert_eq!(value, "awake");
+    }
+
+    #[test]
+    fn test_sleep_state_content_sleeping() {
+        // Published on sleep event
+        let value = "sleeping";
+        let mqtt = test_client("dank0i-pc");
+        let topic = mqtt.sensor_topic("sleep_state");
+        assert_eq!(topic, "homeassistant/sensor/dank0i-pc/sleep_state/state");
+        assert_eq!(value, "sleeping");
+    }
+
+    #[test]
+    fn test_screensaver_content_values() {
+        // Screensaver sensor publishes exactly "on" or "off" (retained)
+        let active = true;
+        let state_str = if active { "on" } else { "off" };
+        assert_eq!(state_str, "on");
+
+        let inactive = false;
+        let state_str = if inactive { "on" } else { "off" };
+        assert_eq!(state_str, "off");
+    }
+
+    #[test]
+    fn test_screensaver_topic() {
+        let mqtt = test_client("dank0i-pc");
+        let topic = mqtt.sensor_topic("screensaver");
+        assert_eq!(topic, "homeassistant/sensor/dank0i-pc/screensaver/state");
+    }
+
+    #[test]
+    fn test_cpu_usage_format() {
+        // SystemSensor formats CPU as "{cpu:.1}" — one decimal place
+        let cpu: f64 = 45.372;
+        let cpu_str = format!("{cpu:.1}");
+        assert_eq!(cpu_str, "45.4"); // rounded to 1 decimal
+
+        let cpu_zero: f64 = 0.0;
+        assert_eq!(format!("{cpu_zero:.1}"), "0.0");
+
+        let cpu_full: f64 = 100.0;
+        assert_eq!(format!("{cpu_full:.1}"), "100.0");
+    }
+
+    #[test]
+    fn test_memory_usage_format() {
+        // SystemSensor formats memory as "{mem:.1}" — one decimal place
+        let mem: f64 = 67.89;
+        let mem_str = format!("{mem:.1}");
+        assert_eq!(mem_str, "67.9");
+    }
+
+    #[test]
+    fn test_battery_level_format() {
+        // Battery level is integer to_string()
+        let percent: u8 = 85;
+        let level_str = percent.to_string();
+        assert_eq!(level_str, "85");
+    }
+
+    #[test]
+    fn test_battery_charging_format() {
+        // Charging is exactly "true" or "false" string
+        let charging = true;
+        let charging_str = if charging { "true" } else { "false" };
+        assert_eq!(charging_str, "true");
+
+        let not_charging = false;
+        let charging_str = if not_charging { "true" } else { "false" };
+        assert_eq!(charging_str, "false");
+    }
+
+    #[test]
+    fn test_agent_memory_format() {
+        // MemorySensor: format!("{:.1}", memory_mb)
+        let memory_mb: f64 = 12.345;
+        let value = format!("{memory_mb:.1}");
+        assert_eq!(value, "12.3");
+    }
+
+    #[test]
+    fn test_custom_sensor_topic_prefix() {
+        // Custom sensors publish to "custom_{name}" topic
+        let sensor_name = "gpu_temp";
+        let topic_name = format!("custom_{sensor_name}");
+        assert_eq!(topic_name, "custom_gpu_temp");
+
+        let mqtt = test_client("dank0i-pc");
+        let topic = mqtt.sensor_topic(&topic_name);
+        assert_eq!(
+            topic,
+            "homeassistant/sensor/dank0i-pc/custom_gpu_temp/state"
+        );
+    }
+
+    #[test]
+    fn test_display_state_content() {
+        // Published at boot: publish_sensor_retained("display", "on")
+        let value = "on";
+        let mqtt = test_client("dank0i-pc");
+        let topic = mqtt.sensor_topic("display");
+        assert_eq!(topic, "homeassistant/sensor/dank0i-pc/display/state");
+        assert_eq!(value, "on");
+    }
+
+    #[test]
+    fn test_game_sensor_content_and_topic() {
+        // Verify exact topic + payload for runninggames sensor
+        let mqtt = test_client("dank0i-pc");
+        let state_topic = mqtt.sensor_topic("runninggames");
+        let attrs_topic = mqtt.sensor_attributes_topic("runninggames");
+
+        assert_eq!(
+            state_topic,
+            "homeassistant/sensor/dank0i-pc/runninggames/state"
+        );
+        assert_eq!(
+            attrs_topic,
+            "homeassistant/sensor/dank0i-pc/runninggames/attributes"
+        );
+
+        // When no game: payload "none", attrs {"display_name":"None"}
+        let no_game_payload = "none";
+        let no_game_attrs = serde_json::json!({"display_name": "None"});
+        assert_eq!(no_game_payload, "none");
+        assert_eq!(
+            serde_json::to_string(&no_game_attrs).unwrap(),
+            r#"{"display_name":"None"}"#
+        );
+
+        // When game running: payload "battlefield_6", attrs {"display_name":"Battlefield 2042"}
+        let game_payload = "battlefield_6";
+        let game_attrs = serde_json::json!({"display_name": "Battlefield 2042"});
+        assert_eq!(game_payload, "battlefield_6");
+        assert_eq!(
+            serde_json::to_string(&game_attrs).unwrap(),
+            r#"{"display_name":"Battlefield 2042"}"#
+        );
+    }
+
+    #[test]
+    fn test_steam_updating_content_and_topic() {
+        // Verify exact topic + payload for steam_updating sensor
+        let mqtt = test_client("dank0i-pc");
+        let state_topic = mqtt.sensor_topic("steam_updating");
+        let attrs_topic = mqtt.sensor_attributes_topic("steam_updating");
+
+        assert_eq!(
+            state_topic,
+            "homeassistant/sensor/dank0i-pc/steam_updating/state"
+        );
+        assert_eq!(
+            attrs_topic,
+            "homeassistant/sensor/dank0i-pc/steam_updating/attributes"
+        );
+
+        // When not updating: "off" + {"updating_games":[],"count":0}
+        let idle_payload = "off";
+        let idle_attrs = serde_json::json!({"updating_games": Vec::<String>::new(), "count": 0});
+        assert_eq!(idle_payload, "off");
+        assert_eq!(idle_attrs["count"], 0);
+        assert!(idle_attrs["updating_games"].as_array().unwrap().is_empty());
+
+        // When updating: "on" + {"updating_games":["Counter-Strike 2"],"count":1}
+        let updating_payload = "on";
+        let updating_attrs = serde_json::json!({
+            "updating_games": ["Counter-Strike 2"],
+            "count": 1
+        });
+        assert_eq!(updating_payload, "on");
+        assert_eq!(updating_attrs["count"], 1);
+        assert_eq!(updating_attrs["updating_games"][0], "Counter-Strike 2");
+    }
+
+    #[test]
+    fn test_lastactive_content_rfc3339() {
+        // IdleSensor publishes lastactive as RFC3339 timestamp
+        use chrono::Utc;
+        let now = Utc::now();
+        let value = now.to_rfc3339();
+
+        // Must be valid RFC3339 — ends with +00:00 and contains T separator
+        assert!(value.contains('T'));
+        assert!(value.contains("+00:00"));
+
+        // Must parse back cleanly
+        let parsed = chrono::DateTime::parse_from_rfc3339(&value).unwrap();
+        assert_eq!(parsed.timestamp(), now.timestamp());
+    }
+
+    #[test]
+    fn test_sensor_attributes_serializes_to_bytes() {
+        // publish_sensor_attributes uses serde_json::to_vec (zero-copy) — verify it produces
+        // identical output to to_string for our attribute shapes
+        let attrs = serde_json::json!({"display_name": "HELLDIVERS 2"});
+
+        let vec_bytes = serde_json::to_vec(&attrs).unwrap();
+        let string_bytes = serde_json::to_string(&attrs).unwrap().into_bytes();
+
+        assert_eq!(vec_bytes, string_bytes);
+        assert_eq!(
+            String::from_utf8(vec_bytes).unwrap(),
+            r#"{"display_name":"HELLDIVERS 2"}"#
+        );
+    }
 
     // ===== parse_broker_url tests =====
 

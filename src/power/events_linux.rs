@@ -28,12 +28,13 @@ impl PowerEventListener {
 
         loop {
             tokio::select! {
+                biased;
                 _ = shutdown_rx.recv() => {
                     debug!("Power listener shutting down");
                     break;
                 }
                 _ = tick.tick() => {
-                    let is_sleeping = self.check_sleep_state();
+                    let is_sleeping = self.check_sleep_state().await;
 
                     if is_sleeping && !was_sleeping {
                         info!("Power event: SLEEP");
@@ -49,7 +50,14 @@ impl PowerEventListener {
         }
     }
 
-    fn check_sleep_state(&self) -> bool {
+    async fn check_sleep_state(&self) -> bool {
+        // Blocking subprocess call — run off the single-threaded runtime
+        tokio::task::spawn_blocking(Self::check_sleep_state_blocking)
+            .await
+            .unwrap_or(false)
+    }
+
+    fn check_sleep_state_blocking() -> bool {
         // Check via systemctl if the system is preparing to sleep
         // This is a basic check - for real-time events, dbus-monitor would be better
         if let Ok(output) = Command::new("systemctl")

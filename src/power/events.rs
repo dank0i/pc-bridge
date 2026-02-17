@@ -13,10 +13,10 @@ use tracing::{debug, error, info};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Power::RegisterPowerSettingNotification;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetWindowLongPtrW,
-    PeekMessageW, RegisterClassExW, SetWindowLongPtrW, TranslateMessage,
-    DEVICE_NOTIFY_WINDOW_HANDLE, GWLP_USERDATA, MSG, PM_REMOVE, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_QUIT, WNDCLASSEXW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+    GetWindowLongPtrW, PostMessageW, RegisterClassExW, SetWindowLongPtrW, TranslateMessage,
+    DEVICE_NOTIFY_WINDOW_HANDLE, GWLP_USERDATA, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_QUIT,
+    WM_USER, WNDCLASSEXW,
 };
 
 use super::display::wake_display_with_retry;
@@ -87,23 +87,33 @@ impl PowerEventListener {
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
 
         // Spawn blocking thread for Windows message pump
-        let stopped = Arc::new(AtomicBool::new(false));
-        let stopped_clone = Arc::clone(&stopped);
+        // Store hwnd so we can post WM_QUIT on shutdown
+        let (hwnd_tx, hwnd_rx) = tokio::sync::oneshot::channel::<isize>();
 
         std::thread::Builder::new()
             .name("power-events".into())
             .stack_size(256 * 1024)
             .spawn(move || {
-                Self::message_pump(event_tx, stopped_clone);
+                Self::message_pump(event_tx, hwnd_tx);
             })
             .expect("failed to spawn power events thread");
+
+        // Wait for hwnd from the message pump thread
+        let pump_hwnd = hwnd_rx.await.ok();
 
         // Handle events (no debouncing needed - state machine handles deduplication)
         loop {
             tokio::select! {
+                biased;
                 _ = shutdown_rx.recv() => {
                     debug!("Power listener shutting down");
-                    stopped.store(true, Ordering::SeqCst);
+                    // Post WM_QUIT to unblock GetMessageW
+                    if let Some(hwnd_val) = pump_hwnd {
+                        unsafe {
+                            let hwnd = HWND(hwnd_val as *mut _);
+                            let _ = PostMessageW(hwnd, WM_USER, WPARAM(0), LPARAM(0));
+                        }
+                    }
                     break;
                 }
                 Some(event) = event_rx.recv() => {
@@ -114,11 +124,23 @@ impl PowerEventListener {
                         }
                         PowerEvent::Wake => {
                             info!("Power event: WAKE");
-                            // Wake display first
-                            wake_display_with_retry(3, std::time::Duration::from_millis(500));
+                            // Wake display on blocking thread to avoid stalling async runtime
+                            tokio::task::spawn_blocking(|| {
+                                wake_display_with_retry(3, std::time::Duration::from_millis(500));
+                            });
 
-                            // Publish wake state with retries (network may take time)
-                            self.publish_wake_with_retry().await;
+                            // Publish wake state with retries in background task
+                            // so the event handler stays responsive to new events
+                            let mqtt = &self.state.mqtt;
+                            mqtt.publish_sensor_retained("sleep_state", "awake").await;
+                            info!("Published awake state");
+                            let state = Arc::clone(&self.state);
+                            tokio::spawn(async move {
+                                for delay_secs in [2, 5, 10] {
+                                    tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+                                    state.mqtt.publish_sensor_retained("sleep_state", "awake").await;
+                                }
+                            });
                         }
                         PowerEvent::DisplayOff => {
                             info!("Power event: DISPLAY OFF");
@@ -136,25 +158,10 @@ impl PowerEventListener {
         }
     }
 
-    async fn publish_wake_with_retry(&self) {
-        // Publish immediately
-        self.state
-            .mqtt
-            .publish_sensor_retained("sleep_state", "awake")
-            .await;
-        info!("Published awake state");
-
-        // Also publish after delays in case network was slow to reconnect
-        for delay_secs in [2, 5, 10] {
-            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
-            self.state
-                .mqtt
-                .publish_sensor_retained("sleep_state", "awake")
-                .await;
-        }
-    }
-
-    fn message_pump(event_tx: mpsc::Sender<PowerEvent>, stopped: Arc<AtomicBool>) {
+    fn message_pump(
+        event_tx: mpsc::Sender<PowerEvent>,
+        hwnd_tx: tokio::sync::oneshot::Sender<isize>,
+    ) {
         unsafe {
             let class_name = windows::core::w!("PCAgentPowerMonitor");
 
@@ -207,23 +214,23 @@ impl PowerEventListener {
 
             info!("Power event listener started (hwnd: {:?})", hwnd);
 
-            // Message loop
+            // Send hwnd back so async side can post WM_USER to unblock GetMessageW
+            let _ = hwnd_tx.send(hwnd.0 as isize);
+
+            // Message loop - blocks on GetMessageW (zero CPU when idle)
             let mut msg = MSG::default();
             loop {
-                if stopped.load(Ordering::SeqCst) {
+                let ret = GetMessageW(&raw mut msg, None, 0, 0);
+                if !ret.as_bool() || ret.0 == -1 {
+                    // WM_QUIT received or error
                     break;
                 }
-
-                let ret = PeekMessageW(&raw mut msg, None, 0, 0, PM_REMOVE);
-                if ret.as_bool() {
-                    if msg.message == WM_QUIT {
-                        break;
-                    }
-                    let _ = TranslateMessage(&raw const msg);
-                    DispatchMessageW(&raw const msg);
-                } else {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                // WM_USER is our custom shutdown signal
+                if msg.message == WM_USER {
+                    break;
                 }
+                let _ = TranslateMessage(&raw const msg);
+                DispatchMessageW(&raw const msg);
             }
 
             // Cleanup

@@ -42,6 +42,7 @@ impl CommandExecutor {
 
         loop {
             tokio::select! {
+                biased;
                 _ = shutdown_rx.recv() => {
                     debug!("Command executor shutting down");
                     break;

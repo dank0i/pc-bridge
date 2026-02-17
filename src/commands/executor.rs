@@ -50,6 +50,7 @@ impl CommandExecutor {
 
         loop {
             tokio::select! {
+                biased;
                 _ = shutdown_rx.recv() => {
                     debug!("Command executor shutting down");
                     break;
@@ -93,7 +94,7 @@ impl CommandExecutor {
 
         match name {
             "discord_leave_channel" => {
-                send_ctrl_f6();
+                tokio::task::spawn_blocking(send_ctrl_f6);
                 return Ok(());
             }
             "Wake" => {

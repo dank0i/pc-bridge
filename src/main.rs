@@ -61,9 +61,6 @@ pub struct AppState {
 type TaskHandle = tokio::task::JoinHandle<()>;
 
 #[cfg(windows)]
-static SHUTDOWN_FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-#[cfg(windows)]
 unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> windows::Win32::Foundation::BOOL {
     use windows::Win32::Foundation::BOOL;
     // CTRL_C_EVENT = 0, CTRL_BREAK_EVENT = 1, CTRL_CLOSE_EVENT = 2
@@ -314,18 +311,14 @@ async fn main() -> anyhow::Result<()> {
         state.mqtt.publish_sensor_retained("display", "on").await;
     }
 
-    // Wait for shutdown signal (Ctrl+C)
+    // Wait for shutdown signal (Ctrl+C or tray exit)
     info!("PC Bridge running. Press Ctrl+C to stop.");
 
     #[cfg(windows)]
     {
-        // On Windows, poll custom flag (tokio signal doesn't work with attached console)
-        loop {
-            if SHUTDOWN_FLAG.load(std::sync::atomic::Ordering::SeqCst) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
+        // Wait for tray or broadcast shutdown signal (no polling — blocks on recv)
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        let _ = shutdown_rx.recv().await;
     }
 
     #[cfg(not(windows))]

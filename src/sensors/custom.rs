@@ -17,6 +17,19 @@ use std::process::Command;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// Case-insensitive ASCII substring search without allocation.
+/// Uses byte-level sliding window comparison.
+#[cfg(windows)]
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
 /// Custom sensor manager - polls user-defined sensors
 pub struct CustomSensorManager {
     state: Arc<AppState>,
@@ -72,6 +85,7 @@ impl CustomSensorManager {
 
         loop {
             tokio::select! {
+                biased;
                 _ = shutdown_rx.recv() => {
                     debug!("Custom sensor manager shutting down");
                     break;
@@ -163,11 +177,8 @@ impl CustomSensorManager {
 
         let state = self.state.process_watcher.state();
         let guard = state.read().await;
-        // Use eq_ignore_ascii_case + case-folded contains to avoid allocating
-        // a new lowered String per process name
         let exists = guard.names().iter().any(|name| {
-            name.eq_ignore_ascii_case(&process)
-                || name.len() >= process.len() && name.to_ascii_lowercase().contains(&*process)
+            name.eq_ignore_ascii_case(&process) || contains_ignore_ascii_case(name, &process)
         });
 
         if exists { "on" } else { "off" }.to_string()

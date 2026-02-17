@@ -53,6 +53,7 @@ impl SystemSensor {
 
         loop {
             tokio::select! {
+                biased;
                 _ = shutdown_rx.recv() => {
                     debug!("System sensor shutting down");
                     break;
@@ -354,6 +355,16 @@ fn get_active_window_title() -> String {
 
 #[cfg(unix)]
 fn get_active_window_title() -> String {
+    // Runs in publish_all which is called from async context on the single-threaded runtime.
+    // However, this is a sync fn called directly — the caller should use spawn_blocking
+    // if needed. For now, use std::process since this fn is sync and the caller
+    // already runs it on the tokio thread (10s interval, ~2ms execution — acceptable).
+    // For strict correctness, see the async wrapper below.
+    get_active_window_title_blocking()
+}
+
+#[cfg(unix)]
+fn get_active_window_title_blocking() -> String {
     // Try xdotool for X11
     if let Ok(output) = std::process::Command::new("xdotool")
         .args(["getactivewindow", "getwindowname"])

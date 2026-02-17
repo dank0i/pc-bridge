@@ -5,6 +5,8 @@
 #![allow(dead_code)] // Used on Windows only
 
 #[cfg(windows)]
+use std::cell::RefCell;
+#[cfg(windows)]
 use std::sync::OnceLock;
 #[cfg(windows)]
 use windows::{
@@ -16,6 +18,13 @@ use windows::{
 #[cfg(windows)]
 static COM_INITIALIZED: OnceLock<()> = OnceLock::new();
 
+#[cfg(windows)]
+thread_local! {
+    /// Cached audio endpoint volume interface — avoids recreating 3 COM objects per call.
+    /// Invalidated on any COM error (e.g., default audio device changed).
+    static CACHED_ENDPOINT: RefCell<Option<IAudioEndpointVolume>> = const { RefCell::new(None) };
+}
+
 /// Initialize COM once for the thread
 #[cfg(windows)]
 fn ensure_com_init() {
@@ -24,89 +33,91 @@ fn ensure_com_init() {
     });
 }
 
+/// Get (or create and cache) the default audio endpoint volume interface.
+/// Clone just increments the COM reference count — effectively free.
+#[cfg(windows)]
+fn get_endpoint_volume() -> Option<IAudioEndpointVolume> {
+    ensure_com_init();
+    CACHED_ENDPOINT.with(|cell| {
+        let cached = cell.borrow();
+        if let Some(ref vol) = *cached {
+            return Some(vol.clone());
+        }
+        drop(cached);
+
+        unsafe {
+            let enumerator: IMMDeviceEnumerator =
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+            let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
+            let volume: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None).ok()?;
+            *cell.borrow_mut() = Some(volume.clone());
+            Some(volume)
+        }
+    })
+}
+
+/// Invalidate the cached endpoint (called on COM errors so next call creates fresh).
+#[cfg(windows)]
+fn invalidate_endpoint_cache() {
+    CACHED_ENDPOINT.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
+
 /// Get current system volume (0-100)
 #[cfg(windows)]
 pub fn get_volume() -> Option<f32> {
-    ensure_com_init();
-    unsafe {
-        let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-
-        let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
-        let volume: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None).ok()?;
-
-        let level = volume.GetMasterVolumeLevelScalar().ok()?;
-        Some(level * 100.0)
-        // COM objects dropped here via windows crate's Drop impl
+    let volume = get_endpoint_volume()?;
+    match unsafe { volume.GetMasterVolumeLevelScalar() } {
+        Ok(level) => Some(level * 100.0),
+        Err(_) => {
+            invalidate_endpoint_cache();
+            None
+        }
     }
 }
 
 /// Set system volume (0-100)
 #[cfg(windows)]
 pub fn set_volume(level: f32) -> bool {
-    ensure_com_init();
-    unsafe {
-        let enumerator: IMMDeviceEnumerator =
-            match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
-                Ok(e) => e,
-                Err(_) => return false,
-            };
-
-        let device = match enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
-            Ok(d) => d,
-            Err(_) => return false,
-        };
-
-        let volume: IAudioEndpointVolume = match device.Activate(CLSCTX_ALL, None) {
-            Ok(v) => v,
-            Err(_) => return false,
-        };
-
-        let scalar = (level / 100.0).clamp(0.0, 1.0);
-        volume
-            .SetMasterVolumeLevelScalar(scalar, std::ptr::null())
-            .is_ok()
+    let Some(volume) = get_endpoint_volume() else {
+        return false;
+    };
+    let scalar = (level / 100.0).clamp(0.0, 1.0);
+    match unsafe { volume.SetMasterVolumeLevelScalar(scalar, std::ptr::null()) } {
+        Ok(()) => true,
+        Err(_) => {
+            invalidate_endpoint_cache();
+            false
+        }
     }
 }
 
 /// Get mute status
 #[cfg(windows)]
 pub fn get_mute() -> Option<bool> {
-    ensure_com_init();
-    unsafe {
-        let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-
-        let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
-        let volume: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None).ok()?;
-
-        let muted = volume.GetMute().ok()?;
-        Some(muted.as_bool())
+    let volume = get_endpoint_volume()?;
+    match unsafe { volume.GetMute() } {
+        Ok(muted) => Some(muted.as_bool()),
+        Err(_) => {
+            invalidate_endpoint_cache();
+            None
+        }
     }
 }
 
 /// Set mute status
 #[cfg(windows)]
 pub fn set_mute(mute: bool) -> bool {
-    ensure_com_init();
-    unsafe {
-        let enumerator: IMMDeviceEnumerator =
-            match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
-                Ok(e) => e,
-                Err(_) => return false,
-            };
-
-        let device = match enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
-            Ok(d) => d,
-            Err(_) => return false,
-        };
-
-        let volume: IAudioEndpointVolume = match device.Activate(CLSCTX_ALL, None) {
-            Ok(v) => v,
-            Err(_) => return false,
-        };
-
-        volume.SetMute(mute, std::ptr::null()).is_ok()
+    let Some(volume) = get_endpoint_volume() else {
+        return false;
+    };
+    match unsafe { volume.SetMute(mute, std::ptr::null()) } {
+        Ok(()) => true,
+        Err(_) => {
+            invalidate_endpoint_cache();
+            false
+        }
     }
 }
 

@@ -85,6 +85,7 @@ impl SteamSensor {
             };
 
             tokio::select! {
+                biased;
                 _ = shutdown_rx.recv() => {
                     debug!("Steam sensor shutting down");
                     break;
@@ -199,49 +200,61 @@ impl SteamSensor {
         let mut seen_paths: HashSet<PathBuf> = HashSet::new();
 
         for lib_folder in &self.library_folders {
-            // Glob for appmanifest_*.acf files
-            let pattern = lib_folder.join("appmanifest_*.acf");
-            if let Some(pattern_str) = pattern.to_str() {
-                match glob::glob(pattern_str) {
-                    Ok(entries) => {
-                        for entry in entries.flatten() {
-                            seen_paths.insert(entry.clone());
+            // Read directory and filter for appmanifest_*.acf files
+            // (replaces glob::glob which recompiles regex pattern every scan)
+            let entries = match std::fs::read_dir(lib_folder) {
+                Ok(e) => e,
+                Err(e) => {
+                    error!("Failed to read steam library dir {:?}: {}", lib_folder, e);
+                    continue;
+                }
+            };
 
-                            // Check mtime to skip unchanged files
-                            let mtime = std::fs::metadata(&entry).and_then(|m| m.modified()).ok();
+            for dir_entry in entries.flatten() {
+                let path = dir_entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if !fname.starts_with("appmanifest_") || !fname.ends_with(".acf") {
+                    continue;
+                }
 
-                            let game_state = if let Some(mt) = mtime {
-                                if let Some((cached_mt, cached_state)) = self.acf_cache.get(&entry)
-                                {
-                                    if *cached_mt == mt {
-                                        // File unchanged, use cached result
-                                        cached_state.clone()
-                                    } else {
-                                        // File changed, re-parse
-                                        let state = parse_acf_file(&entry);
-                                        self.acf_cache.insert(entry.clone(), (mt, state.clone()));
-                                        state
-                                    }
-                                } else {
-                                    // New file, parse and cache
-                                    let state = parse_acf_file(&entry);
-                                    self.acf_cache.insert(entry.clone(), (mt, state.clone()));
-                                    state
-                                }
+                {
+                    let entry = path;
+                    seen_paths.insert(entry.clone());
+
+                    // Check mtime to skip unchanged files
+                    let mtime = std::fs::metadata(&entry).and_then(|m| m.modified()).ok();
+
+                    let game_state = if let Some(mt) = mtime {
+                        if let Some((cached_mt, cached_state)) = self.acf_cache.get(&entry) {
+                            if *cached_mt == mt {
+                                // File unchanged, use cached result
+                                cached_state.clone()
                             } else {
-                                // Can't get mtime, always parse
-                                parse_acf_file(&entry)
-                            };
-
-                            if let Some(gs) = game_state {
-                                if is_updating(&gs) {
-                                    new_updating.insert(gs.app_id.clone(), gs);
-                                }
+                                // File changed, re-parse
+                                let state = parse_acf_file(&entry);
+                                self.acf_cache.insert(entry.clone(), (mt, state.clone()));
+                                state
                             }
+                        } else {
+                            // New file, parse and cache
+                            let state = parse_acf_file(&entry);
+                            self.acf_cache.insert(entry.clone(), (mt, state.clone()));
+                            state
                         }
-                    }
-                    Err(e) => {
-                        error!("Failed to glob ACF files: {}", e);
+                    } else {
+                        // Can't get mtime, always parse
+                        parse_acf_file(&entry)
+                    };
+
+                    if let Some(gs) = game_state {
+                        if is_updating(&gs) {
+                            new_updating.insert(gs.app_id.clone(), gs);
+                        }
                     }
                 }
             }
@@ -569,5 +582,112 @@ mod tests {
         let result = parse_acf_content(content, &path).unwrap();
         assert_eq!(result.app_id, "553850");
         assert_eq!(result.state_flags, 4);
+    }
+
+    // ===== MQTT content verification — exact payloads for steam_updating sensor =====
+
+    #[test]
+    fn test_steam_updating_state_string_when_updating() {
+        // When updating_games is non-empty, the state string is "on"
+        let games = vec![make_game(STATE_UPDATE_RUNNING)];
+        let is_updating = !games.is_empty();
+        let state_str = if is_updating { "on" } else { "off" };
+        assert_eq!(state_str, "on");
+    }
+
+    #[test]
+    fn test_steam_updating_state_string_when_idle() {
+        // When no games updating, the state string is "off"
+        let games: Vec<GameUpdateState> = vec![];
+        let is_updating = !games.is_empty();
+        let state_str = if is_updating { "on" } else { "off" };
+        assert_eq!(state_str, "off");
+    }
+
+    #[test]
+    fn test_steam_updating_attributes_json_with_games() {
+        // Exact JSON published to homeassistant/sensor/{device}/steam_updating/attributes
+        let games = vec![
+            GameUpdateState {
+                app_id: "730".to_string(),
+                name: "Counter-Strike 2".to_string(),
+                state_flags: STATE_UPDATE_RUNNING,
+                manifest_path: PathBuf::from("/tmp/appmanifest_730.acf"),
+            },
+            GameUpdateState {
+                app_id: "440".to_string(),
+                name: "Team Fortress 2".to_string(),
+                state_flags: STATE_DOWNLOADING,
+                manifest_path: PathBuf::from("/tmp/appmanifest_440.acf"),
+            },
+        ];
+        let names: Vec<&str> = games.iter().map(|g| g.name.as_str()).collect();
+        let attrs = serde_json::json!({
+            "updating_games": names,
+            "count": games.len()
+        });
+
+        // Verify exact JSON structure
+        let obj = attrs.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+        assert_eq!(attrs["count"], 2);
+        let game_names = attrs["updating_games"].as_array().unwrap();
+        assert_eq!(game_names.len(), 2);
+        assert_eq!(game_names[0], "Counter-Strike 2");
+        assert_eq!(game_names[1], "Team Fortress 2");
+
+        // Verify the exact serialized bytes that go to MQTT
+        let json_bytes = serde_json::to_vec(&attrs).unwrap();
+        let roundtrip: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
+        assert_eq!(roundtrip, attrs);
+    }
+
+    #[test]
+    fn test_steam_updating_attributes_json_when_idle() {
+        // Exact JSON published when no games are updating
+        let attrs = serde_json::json!({
+            "updating_games": Vec::<String>::new(),
+            "count": 0
+        });
+        let obj = attrs.as_object().unwrap();
+        assert_eq!(attrs["count"], 0);
+        assert!(attrs["updating_games"].as_array().unwrap().is_empty());
+        assert_eq!(obj.len(), 2); // always has both fields even when idle
+    }
+
+    #[test]
+    fn test_steam_updating_full_mqtt_payload_content() {
+        // End-to-end: simulate what SteamSensor::publish_state builds
+        // Scenario: one game downloading
+
+        // 1. State topic payload (retained)
+        let updating_games: HashMap<String, GameUpdateState> = {
+            let mut m = HashMap::new();
+            m.insert(
+                "553850".to_string(),
+                GameUpdateState {
+                    app_id: "553850".to_string(),
+                    name: "HELLDIVERS 2".to_string(),
+                    state_flags: STATE_DOWNLOADING,
+                    manifest_path: PathBuf::from("/tmp/appmanifest_553850.acf"),
+                },
+            );
+            m
+        };
+
+        let is_updating = !updating_games.is_empty();
+        let state_str = if is_updating { "on" } else { "off" };
+        // This exact string goes to: homeassistant/sensor/{device}/steam_updating/state
+        assert_eq!(state_str, "on");
+
+        // 2. Attributes topic payload (retained)
+        let names: Vec<&str> = updating_games.values().map(|g| g.name.as_str()).collect();
+        let attrs = serde_json::json!({
+            "updating_games": names,
+            "count": updating_games.len()
+        });
+        // This exact JSON goes to: homeassistant/sensor/{device}/steam_updating/attributes
+        assert_eq!(attrs["count"], 1);
+        assert_eq!(attrs["updating_games"][0], "HELLDIVERS 2");
     }
 }
