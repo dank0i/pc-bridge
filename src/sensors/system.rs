@@ -237,9 +237,20 @@ fn start_window_focus_monitor(
             });
 
             let class_name = windows::core::w!("PCAgentFocusMonitor");
+            // Wrapper needed because DefWindowProcW is generic and doesn't
+            // match the extern "system" fn pointer expected by WNDCLASSEXW.
+            unsafe extern "system" fn focus_wnd_proc(
+                hwnd: HWND,
+                msg: u32,
+                wparam: WPARAM,
+                lparam: LPARAM,
+            ) -> windows::Win32::Foundation::LRESULT {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+
             let wc = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-                lpfnWndProc: Some(DefWindowProcW),
+                lpfnWndProc: Some(focus_wnd_proc),
                 lpszClassName: class_name,
                 ..Default::default()
             };

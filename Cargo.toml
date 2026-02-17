@@ -1,6 +1,6 @@
 [package]
 name = "pc-bridge"
-version = "2.10.1"
+version = "2.10.2"
 edition = "2021"
 authors = ["dank0i"]
 description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
@@ -79,6 +79,7 @@ windows = { version = "0.58", features = [
     "Win32_System_Com",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Accessibility",
     "Win32_UI_Shell",
     "Win32_UI_Controls",
     "Win32_Graphics_Gdi",
