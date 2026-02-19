@@ -4,10 +4,10 @@
 //! 1. Steam auto-discovery (if Steam installed) - uses process name → app_id lookup
 //! 2. Manual config `games` map (pattern → game_id)
 
+use log::{debug, error};
 use std::fs;
 use std::sync::Arc;
-use tokio::time::{interval, Duration};
-use tracing::{debug, error};
+use tokio::time::{Duration, interval};
 
 use crate::AppState;
 
@@ -156,17 +156,16 @@ impl GameSensor {
             let path = entry.path();
 
             // Only process numeric directories (PIDs)
-            if let Some(name) = path.file_name() {
-                if let Some(name_str) = name.to_str() {
-                    if name_str.chars().all(|c| c.is_ascii_digit()) {
-                        // Read the process command line or comm
-                        let comm_path = path.join("comm");
-                        if let Ok(comm) = fs::read_to_string(&comm_path) {
-                            let comm = comm.trim().to_string();
-                            if !comm.is_empty() {
-                                names.push(comm);
-                            }
-                        }
+            if let Some(name) = path.file_name()
+                && let Some(name_str) = name.to_str()
+                && name_str.chars().all(|c| c.is_ascii_digit())
+            {
+                // Read the process command line or comm
+                let comm_path = path.join("comm");
+                if let Ok(comm) = fs::read_to_string(&comm_path) {
+                    let comm = comm.trim().to_string();
+                    if !comm.is_empty() {
+                        names.push(comm);
                     }
                 }
             }

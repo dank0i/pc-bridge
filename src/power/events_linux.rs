@@ -1,9 +1,9 @@
 //! Power event listener for Linux - detects sleep/wake via systemd/dbus
 
+use log::{debug, info};
 use std::process::Command;
 use std::sync::Arc;
-use tokio::time::{interval, Duration};
-use tracing::{debug, info};
+use tokio::time::{Duration, interval};
 
 use crate::AppState;
 
@@ -63,10 +63,9 @@ impl PowerEventListener {
         if let Ok(output) = Command::new("systemctl")
             .args(["is-active", "sleep.target"])
             .output()
+            && let Ok(state) = String::from_utf8(output.stdout)
         {
-            if let Ok(state) = String::from_utf8(output.stdout) {
-                return state.trim() == "active";
-            }
+            return state.trim() == "active";
         }
         false
     }

@@ -1,18 +1,18 @@
 //! Command executor - handles commands from Home Assistant
 
+use log::{debug, error, info, warn};
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::{debug, error, info, warn};
 
 use super::custom::execute_custom_command;
 use super::launcher::expand_launcher_shortcut;
+use crate::AppState;
 use crate::audio::{self, MediaKey};
 use crate::mqtt::CommandReceiver;
 use crate::notification;
 use crate::power::wake_display;
-use crate::AppState;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const MAX_CONCURRENT_COMMANDS: usize = 5;
@@ -283,7 +283,7 @@ fn expand_env_vars(s: &str) -> String {
 /// Send Ctrl+F6 keypress (Discord leave channel hotkey)
 fn send_ctrl_f6() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        keybd_event, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+        KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, keybd_event,
     };
 
     const VK_CONTROL: u8 = 0x11;
@@ -326,15 +326,15 @@ fn hibernate() {
 
 /// Restart system (native, no PowerShell)
 fn restart() {
-    use windows::core::w;
     use windows::Win32::Foundation::{HANDLE, LUID};
     use windows::Win32::Security::{
-        AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
+        AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
         TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
     };
-    use windows::Win32::System::Shutdown::{ExitWindowsEx, EWX_REBOOT, SHUTDOWN_REASON};
+    use windows::Win32::System::Shutdown::{EWX_REBOOT, ExitWindowsEx, SHUTDOWN_REASON};
     use windows::Win32::System::Threading::GetCurrentProcess;
     use windows::Win32::System::Threading::OpenProcessToken;
+    use windows::core::w;
 
     unsafe {
         // Get shutdown privilege

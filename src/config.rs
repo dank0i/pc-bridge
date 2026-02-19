@@ -1,12 +1,12 @@
 //! Configuration loading and hot-reload support
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
+use log::{error, info, warn};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{error, info, warn};
 
 use crate::AppState;
 
@@ -23,11 +23,6 @@ pub struct Config {
     /// Can be simple string (game_id) or object with app_id
     #[serde(default)]
     pub games: HashMap<String, GameConfig>,
-
-    // Legacy field - read during deserialization for migration, then discarded
-    #[serde(default, skip_serializing)]
-    #[allow(dead_code)]
-    pub(crate) show_tray_icon: Option<bool>,
 
     /// Allow custom sensor polling via PowerShell/WMI/registry
     #[serde(default)]
@@ -153,8 +148,6 @@ pub struct FeatureConfig {
     pub steam_updates: bool,
     #[serde(default)]
     pub discord: bool,
-    #[serde(default = "default_true")]
-    pub show_tray_icon: bool,
 }
 
 impl Default for FeatureConfig {
@@ -168,7 +161,6 @@ impl Default for FeatureConfig {
             audio_control: false,
             steam_updates: false,
             discord: false,
-            show_tray_icon: true,
         }
     }
 }
@@ -355,22 +347,13 @@ impl Config {
             migrated = true;
         }
 
-        // Migrate legacy top-level show_tray_icon into features (preserving user's value)
-        let show_tray_icon_val = obj.get("show_tray_icon").and_then(|v| v.as_bool());
-
-        if let Some(val) = show_tray_icon_val {
-            let features = obj
-                .get_mut("features")
-                .and_then(|v| v.as_object_mut())
-                .expect("features must exist after insert above");
-            if !features.contains_key("show_tray_icon") {
-                features.insert("show_tray_icon".to_string(), serde_json::Value::Bool(val));
-                migrated = true;
-            }
-        }
-
-        // Remove legacy top-level show_tray_icon (now in features)
+        // Remove legacy show_tray_icon fields (tray feature removed)
         if obj.remove("show_tray_icon").is_some() {
+            migrated = true;
+        }
+        if let Some(features) = obj.get_mut("features").and_then(|v| v.as_object_mut())
+            && features.remove("show_tray_icon").is_some()
+        {
             migrated = true;
         }
 
@@ -767,13 +750,17 @@ async fn reload_games(state: &AppState) {
             }
             if new_commands_enabled != old_commands_enabled {
                 if new_commands_enabled {
-                    warn!("custom_commands_enabled is now TRUE - arbitrary code execution possible via MQTT");
+                    warn!(
+                        "custom_commands_enabled is now TRUE - arbitrary code execution possible via MQTT"
+                    );
                 } else {
                     info!("custom_commands_enabled is now false");
                 }
             }
             if new_privileges_allowed {
-                warn!("custom_command_privileges_allowed is TRUE - commands can run with ADMIN privileges");
+                warn!(
+                    "custom_command_privileges_allowed is TRUE - commands can run with ADMIN privileges"
+                );
             }
         }
         Err(e) => {
@@ -798,7 +785,6 @@ mod tests {
             intervals: IntervalConfig::default(),
             features: FeatureConfig::default(),
             games: HashMap::new(),
-            show_tray_icon: None,
             custom_sensors_enabled: false,
             custom_commands_enabled: false,
             custom_command_privileges_allowed: false,

@@ -1,13 +1,13 @@
 //! Command executor for Linux
 
+use log::{debug, error, info, warn};
 use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::{debug, error, info, warn};
 
+use crate::AppState;
 use crate::mqtt::CommandReceiver;
 use crate::power::wake_display;
-use crate::AppState;
 
 const MAX_CONCURRENT_COMMANDS: usize = 5;
 

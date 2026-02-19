@@ -7,7 +7,7 @@
 //! - lnk:PATH        → launches shortcut
 //! - close:NAME      → gracefully closes process
 
-use tracing::{info, warn};
+use log::{info, warn};
 
 /// Expand a launcher shortcut to a full PowerShell command.
 /// Returns None if not a launcher shortcut.

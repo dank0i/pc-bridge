@@ -48,7 +48,6 @@ fn test_complete_config_parses() {
                 "app_id": 553850
             }
         },
-        "show_tray_icon": true,
         "custom_sensors_enabled": false,
         "custom_commands_enabled": false,
         "custom_command_privileges_allowed": false,
@@ -137,9 +136,11 @@ fn test_config_with_custom_commands() {
     let config: serde_json::Value = parse_config_json(json).expect("Failed to parse");
 
     assert!(config["custom_commands_enabled"].as_bool().unwrap());
-    assert!(!config["custom_command_privileges_allowed"]
-        .as_bool()
-        .unwrap());
+    assert!(
+        !config["custom_command_privileges_allowed"]
+            .as_bool()
+            .unwrap()
+    );
     assert_eq!(config["custom_commands"].as_array().unwrap().len(), 2);
 }
 
@@ -173,9 +174,11 @@ fn test_config_game_variants() {
     assert_eq!(games["steam_game.exe"]["game_id"], "steam_game");
     assert_eq!(games["steam_game.exe"]["app_id"], 12345);
     assert_eq!(games["steam_game.exe"]["name"], "Steam Game: The Game");
-    assert!(games["steam_game.exe"]["auto_discovered"]
-        .as_bool()
-        .unwrap());
+    assert!(
+        games["steam_game.exe"]["auto_discovered"]
+            .as_bool()
+            .unwrap()
+    );
 
     // Full variant without name
     assert_eq!(games["no_name.exe"]["game_id"], "no_name_game");

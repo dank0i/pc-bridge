@@ -7,12 +7,12 @@
 #![allow(dead_code)] // Used on Windows only
 
 #[cfg(windows)]
-use tracing::debug;
+use log::debug;
 #[cfg(windows)]
 use windows::{
-    core::HSTRING,
     Data::Xml::Dom::XmlDocument,
     UI::Notifications::{ToastNotification, ToastNotificationManager},
+    core::HSTRING,
 };
 
 /// Notification payload received from MQTT
@@ -115,7 +115,7 @@ pub fn show_toast(payload: &str) -> anyhow::Result<()> {
 
     match result {
         Ok(_) => {
-            tracing::debug!("Notification sent via notify-send: {} - {}", title, message);
+            log::debug!("Notification sent via notify-send: {} - {}", title, message);
             Ok(())
         }
         Err(e) => {
@@ -140,11 +140,11 @@ pub fn show_toast(payload: &str) -> anyhow::Result<()> {
 
             match gdbus_result {
                 Ok(_) => {
-                    tracing::debug!("Notification sent via gdbus: {} - {}", title, message);
+                    log::debug!("Notification sent via gdbus: {} - {}", title, message);
                     Ok(())
                 }
                 Err(_) => {
-                    tracing::warn!(
+                    log::warn!(
                         "Could not send notification (install notify-send): {} - {}",
                         title,
                         message

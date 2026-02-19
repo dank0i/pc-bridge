@@ -2,9 +2,9 @@
 //!
 //! Guides users through initial configuration with a clean text UI.
 
+use log::info;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use tracing::info;
 
 /// Configuration collected from setup wizard
 #[derive(Debug)]
@@ -42,20 +42,29 @@ impl Default for SetupConfig {
 
 /// Get default device name from hostname
 fn get_default_device_name() -> String {
-    hostname::get()
-        .ok()
-        .and_then(|h| h.into_string().ok())
-        .unwrap_or_else(|| "my-pc".to_string())
-        .to_lowercase()
-        .replace(' ', "-")
+    #[cfg(windows)]
+    {
+        std::env::var("COMPUTERNAME")
+            .unwrap_or_else(|_| "my-pc".to_string())
+            .to_lowercase()
+            .replace(' ', "-")
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("NAME"))
+            .unwrap_or_else(|_| "my-pc".to_string())
+            .to_lowercase()
+            .replace(' ', "-")
+    }
 }
 
 /// Clear screen (Windows)
 #[cfg(windows)]
 fn clear_screen() {
     use windows::Win32::System::Console::{
-        FillConsoleOutputCharacterA, GetConsoleScreenBufferInfo, GetStdHandle,
-        SetConsoleCursorPosition, COORD, STD_OUTPUT_HANDLE,
+        COORD, FillConsoleOutputCharacterA, GetConsoleScreenBufferInfo, GetStdHandle,
+        STD_OUTPUT_HANDLE, SetConsoleCursorPosition,
     };
     unsafe {
         let handle = GetStdHandle(STD_OUTPUT_HANDLE).unwrap_or_default();
@@ -107,8 +116,8 @@ fn read_input(prompt: &str) -> String {
 /// Run the setup wizard (Windows)
 #[cfg(windows)]
 pub fn run_setup_wizard() -> Option<SetupConfig> {
-    use windows::core::w;
     use windows::Win32::System::Console::{AllocConsole, FreeConsole, SetConsoleTitleW};
+    use windows::core::w;
 
     // Allocate console for input (we're a GUI app)
     unsafe {
@@ -305,11 +314,7 @@ fn run_wizard_flow() -> Option<SetupConfig> {
     let input = read_input("  Save configuration? [Y/n]: ");
     let confirmed = input.is_empty() || input.to_lowercase().starts_with('y');
 
-    if confirmed {
-        Some(config)
-    } else {
-        None
-    }
+    if confirmed { Some(config) } else { None }
 }
 
 /// Save the setup configuration to disk
@@ -337,7 +342,6 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
             ..FeatureConfig::default()
         },
         games: HashMap::new(),
-        show_tray_icon: None,
         custom_sensors_enabled: false,
         custom_commands_enabled: false,
         custom_command_privileges_allowed: false,

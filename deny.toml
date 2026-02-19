@@ -9,19 +9,6 @@ ignore = [
     # rustls-pemfile is unmaintained but is a transitive dep from rumqttc
     # Waiting for rumqttc to update their dependencies
     "RUSTSEC-2025-0134",
-    
-    # GTK3 bindings are unmaintained - transitive deps from tray-icon
-    # These are Linux-only and we primarily target Windows
-    "RUSTSEC-2024-0412",  # atk
-    "RUSTSEC-2024-0413",  # cairo-rs
-    "RUSTSEC-2024-0415",  # gdk
-    "RUSTSEC-2024-0416",  # gdk-pixbuf
-    "RUSTSEC-2024-0418",  # gio
-    "RUSTSEC-2024-0419",  # glib
-    "RUSTSEC-2024-0420",  # gtk
-    
-    # proc-macro-error is unmaintained - transitive dep
-    "RUSTSEC-2024-0370",
 ]
 
 [licenses]

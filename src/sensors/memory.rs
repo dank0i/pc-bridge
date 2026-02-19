@@ -1,9 +1,9 @@
 //! Memory usage sensor - reports process memory consumption
 #![allow(dead_code)] // Used on Windows only
 
+use log::debug;
 use std::sync::Arc;
-use tokio::time::{interval, Duration};
-use tracing::debug;
+use tokio::time::{Duration, interval};
 
 use crate::AppState;
 
@@ -77,12 +77,12 @@ fn get_memory_usage_mb() -> f64 {
     // Read from /proc/self/statm
     if let Ok(statm) = std::fs::read_to_string("/proc/self/statm") {
         let parts: Vec<&str> = statm.split_whitespace().collect();
-        if let Some(rss_pages) = parts.get(1) {
-            if let Ok(pages) = rss_pages.parse::<u64>() {
-                // Pages are typically 4KB
-                let page_size = 4096u64;
-                return (pages * page_size) as f64 / (1024.0 * 1024.0);
-            }
+        if let Some(rss_pages) = parts.get(1)
+            && let Ok(pages) = rss_pages.parse::<u64>()
+        {
+            // Pages are typically 4KB
+            let page_size = 4096u64;
+            return (pages * page_size) as f64 / (1024.0 * 1024.0);
         }
     }
     0.0

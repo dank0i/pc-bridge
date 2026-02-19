@@ -5,12 +5,12 @@
 //! - Cached run: ~5-10ms (load cache + verify mtime)
 //! - Per-game lookup: O(1) hash lookup
 
+use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, UNIX_EPOCH};
-use tracing::{debug, info, warn};
 
 use super::appinfo::AppInfoReader;
 use super::vdf;
@@ -156,13 +156,12 @@ impl SteamGameDiscovery {
             }
 
             // Try appinfo.vdf first (fast)
-            if let Some((name, executable)) = appinfo.get_game_info(app_id) {
-                if let Some(_key) =
+            if let Some((name, executable)) = appinfo.get_game_info(app_id)
+                && let Some(_key) =
                     Self::add_game(&mut games, app_id, name, executable, &library_path)
-                {
-                    from_appinfo += 1;
-                    continue;
-                }
+            {
+                from_appinfo += 1;
+                continue;
             }
 
             // Fallback: read appmanifest_<appid>.acf directly
@@ -170,19 +169,19 @@ impl SteamGameDiscovery {
                 .join("steamapps")
                 .join(format!("appmanifest_{}.acf", app_id));
 
-            if let Ok(content) = fs::read_to_string(&manifest_path) {
-                if let Some((_, name, installdir)) = vdf::extract_appmanifest_fields(&content) {
-                    // Try to find executable in game folder
-                    let game_path = library_path
-                        .join("steamapps")
-                        .join("common")
-                        .join(&installdir);
+            if let Ok(content) = fs::read_to_string(&manifest_path)
+                && let Some((_, name, installdir)) = vdf::extract_appmanifest_fields(&content)
+            {
+                // Try to find executable in game folder
+                let game_path = library_path
+                    .join("steamapps")
+                    .join("common")
+                    .join(&installdir);
 
-                    if let Some(exe) = Self::find_game_executable(&game_path) {
-                        if Self::add_game(&mut games, app_id, name, exe, &library_path).is_some() {
-                            from_manifest += 1;
-                        }
-                    }
+                if let Some(exe) = Self::find_game_executable(&game_path)
+                    && Self::add_game(&mut games, app_id, name, exe, &library_path).is_some()
+                {
+                    from_manifest += 1;
                 }
             }
         }
@@ -647,8 +646,8 @@ impl SteamGameDiscovery {
     /// Find Steam installation path
     #[cfg(windows)]
     fn find_steam_path() -> Option<PathBuf> {
-        use winreg::enums::HKEY_LOCAL_MACHINE;
         use winreg::RegKey;
+        use winreg::enums::HKEY_LOCAL_MACHINE;
 
         // Try registry first (most reliable)
         if let Ok(hklm) =

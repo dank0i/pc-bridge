@@ -3,14 +3,14 @@
 //! Uses filesystem watcher (`notify` crate) for instant detection of ACF manifest changes.
 //! Falls back to periodic polling if the watcher fails.
 
+use log::{debug, error, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
-use tracing::{debug, error, info, warn};
-use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 use winreg::RegKey;
+use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 
 use crate::AppState;
 
@@ -172,11 +172,7 @@ impl SteamSensor {
             }
         }
 
-        if watched_any {
-            Some(watcher)
-        } else {
-            None
-        }
+        if watched_any { Some(watcher) } else { None }
     }
 
     fn discover_library_folders(&mut self) {

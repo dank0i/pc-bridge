@@ -1,7 +1,7 @@
 [package]
 name = "pc-bridge"
-version = "2.11.1"
-edition = "2021"
+version = "2.12.0"
+edition = "2024"
 authors = ["dank0i"]
 description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
 repository = "https://github.com/dank0i/pc-bridge"
@@ -29,27 +29,17 @@ serde_json = "1"
 # Error handling
 anyhow = "1"
 
-# Performance optimizations
-smallvec = "1.13"
-bytes = "1"
-
 # Date/time
-chrono = { version = "0.4", features = ["serde"] }
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 
 # File watching for config hot-reload
 notify = "6"
 
 # Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+log = "0.4"
+env_logger = "0.11"
 
-# System info
-hostname = "0.3"
 
-# System tray (cross-platform)
-tray-icon = "0.19"
-muda = "0.15"
-png = "0.17"
 
 # Windows registry
 [target.'cfg(windows)'.dependencies.winreg]
@@ -94,7 +84,7 @@ tokio-test = "0.4"
 pretty_assertions = "1"
 
 [profile.release]
-opt-level = 3
+opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true

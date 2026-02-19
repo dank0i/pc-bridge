@@ -6,10 +6,9 @@
 //!
 //! Uses push notifications from ProcessWatcher for instant detection.
 
-use smallvec::SmallVec;
+use log::{debug, info};
 use std::collections::HashSet;
 use std::sync::Arc;
-use tracing::{debug, info};
 
 use crate::AppState;
 
@@ -141,7 +140,7 @@ fn match_games_in_processes(
     process_names: &HashSet<Arc<str>>,
     cached: &CachedGamePatterns,
 ) -> (String, String) {
-    let mut found_games: SmallVec<[(String, String); 4]> = SmallVec::new();
+    let mut found_games: Vec<(String, String)> = Vec::new();
     let mut seen_ids: HashSet<&str> = HashSet::with_capacity(cached.patterns.len());
 
     for proc_name in process_names {
@@ -164,9 +163,8 @@ fn match_games_in_processes(
     if found_games.is_empty() {
         ("none".to_string(), "None".to_string())
     } else {
-        let ids: SmallVec<[&str; 4]> = found_games.iter().map(|(id, _)| id.as_str()).collect();
-        let names: SmallVec<[&str; 4]> =
-            found_games.iter().map(|(_, name)| name.as_str()).collect();
+        let ids: Vec<&str> = found_games.iter().map(|(id, _)| id.as_str()).collect();
+        let names: Vec<&str> = found_games.iter().map(|(_, name)| name.as_str()).collect();
         (ids.join(","), names.join(","))
     }
 }

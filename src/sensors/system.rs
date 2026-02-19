@@ -4,12 +4,12 @@
 //! - Battery: event-driven via RegisterPowerSettingNotification (instant on plug/unplug/level change)
 //! - Active window: event-driven via SetWinEventHook(EVENT_SYSTEM_FOREGROUND) (instant on focus change)
 
+#[cfg(windows)]
+use log::error;
+use log::{debug, info};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::time::{interval, Duration};
-#[cfg(windows)]
-use tracing::error;
-use tracing::{debug, info};
+use tokio::time::{Duration, interval};
 
 use crate::AppState;
 
@@ -200,9 +200,9 @@ fn start_window_focus_monitor(
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows::Win32::UI::Accessibility::SetWinEventHook;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-        PostMessageW, RegisterClassExW, TranslateMessage, MSG, WINDOW_EX_STYLE, WINDOW_STYLE,
-        WM_USER, WNDCLASSEXW,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, MSG,
+        PostMessageW, RegisterClassExW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_USER,
+        WNDCLASSEXW,
     };
 
     // Thread-local sender for the WinEvent callback
@@ -343,10 +343,10 @@ fn start_battery_monitor(
     use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::Power::RegisterPowerSettingNotification;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-        GetWindowLongPtrW, PostMessageW, RegisterClassExW, SetWindowLongPtrW, TranslateMessage,
-        DEVICE_NOTIFY_WINDOW_HANDLE, GWLP_USERDATA, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_USER,
-        WNDCLASSEXW,
+        CreateWindowExW, DEVICE_NOTIFY_WINDOW_HANDLE, DefWindowProcW, DestroyWindow,
+        DispatchMessageW, GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, MSG, PostMessageW,
+        RegisterClassExW, SetWindowLongPtrW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE,
+        WM_USER, WNDCLASSEXW,
     };
 
     const WM_POWERBROADCAST: u32 = 0x218;
@@ -544,21 +544,21 @@ fn filetime_to_u64(ft: windows::Win32::Foundation::FILETIME) -> u64 {
 #[cfg(unix)]
 fn get_cpu_times() -> CpuTimes {
     // Read /proc/stat
-    if let Ok(stat) = std::fs::read_to_string("/proc/stat") {
-        if let Some(line) = stat.lines().next() {
-            let parts: Vec<u64> = line
-                .split_whitespace()
-                .skip(1) // Skip "cpu"
-                .filter_map(|s| s.parse().ok())
-                .collect();
+    if let Ok(stat) = std::fs::read_to_string("/proc/stat")
+        && let Some(line) = stat.lines().next()
+    {
+        let parts: Vec<u64> = line
+            .split_whitespace()
+            .skip(1) // Skip "cpu"
+            .filter_map(|s| s.parse().ok())
+            .collect();
 
-            if parts.len() >= 4 {
-                // user, nice, system, idle
-                let user = parts[0] + parts[1]; // user + nice
-                let kernel = parts[2]; // system
-                let idle = parts[3];
-                return CpuTimes { idle, kernel, user };
-            }
+        if parts.len() >= 4 {
+            // user, nice, system, idle
+            let user = parts[0] + parts[1]; // user + nice
+            let kernel = parts[2]; // system
+            let idle = parts[3];
+            return CpuTimes { idle, kernel, user };
         }
     }
     CpuTimes::default()
@@ -754,10 +754,9 @@ fn get_active_window_title_blocking() -> String {
     if let Ok(output) = std::process::Command::new("xdotool")
         .args(["getactivewindow", "getwindowname"])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            return String::from_utf8_lossy(&output.stdout).trim().to_string();
-        }
+        return String::from_utf8_lossy(&output.stdout).trim().to_string();
     }
     String::new()
 }

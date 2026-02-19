@@ -1,13 +1,13 @@
 //! Display wake functions - handles waking display after WoL
 
+use log::info;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tracing::info;
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    keybd_event, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, keybd_event,
 };
-use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, HWND_BROADCAST};
+use windows::Win32::UI::WindowsAndMessaging::{HWND_BROADCAST, SendMessageW};
 
 const WM_SYSCOMMAND: u32 = 0x0112;
 const SC_MONITORPOWER: usize = 0xF170;
@@ -39,10 +39,10 @@ pub fn wake_display() {
 fn dismiss_screensaver() {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
     };
-    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 
     info!("Attempting to dismiss screensaver");
 
@@ -139,8 +139,8 @@ fn send_benign_keypress() {
 /// Temporarily prevent system sleep using SetThreadExecutionState
 fn prevent_sleep_temporary(duration: Duration) {
     use windows::Win32::System::Power::{
-        SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
-        EXECUTION_STATE,
+        ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, EXECUTION_STATE,
+        SetThreadExecutionState,
     };
 
     // Only spawn one prevention goroutine at a time

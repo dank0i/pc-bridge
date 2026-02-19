@@ -57,7 +57,7 @@ pub fn extract_library_paths(content: &str) -> Vec<String> {
 /// }
 /// ```
 pub fn extract_library_info(content: &str) -> Vec<(String, Vec<u32>)> {
-    use tracing::debug;
+    use log::debug;
 
     let mut libraries = Vec::new();
     let mut current_path: Option<String> = None;
@@ -118,10 +118,10 @@ pub fn extract_library_info(content: &str) -> Vec<(String, Vec<u32>)> {
         if in_apps_block && brace_depth == 3 {
             // Lines look like: "730"  "62017550958" (app_id, size_on_disk)
             // We want the first quoted string (the key/app_id)
-            if let Some(app_id_str) = extract_first_quoted(line) {
-                if let Ok(app_id) = app_id_str.parse::<u32>() {
-                    current_apps.push(app_id);
-                }
+            if let Some(app_id_str) = extract_first_quoted(line)
+                && let Ok(app_id) = app_id_str.parse::<u32>()
+            {
+                current_apps.push(app_id);
             }
         }
     }

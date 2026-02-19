@@ -4,15 +4,21 @@
 //! providing instant (~1s) MQTT updates when a .scr process starts or stops.
 //! Last-active time is polled via GetLastInputInfo.
 
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use log::{debug, info};
 use std::sync::Arc;
 use std::time::Duration;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio::time::interval;
-use tracing::{debug, info};
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 
 use crate::AppState;
+
+/// Format an OffsetDateTime as RFC 3339 string
+fn format_rfc3339(dt: OffsetDateTime) -> String {
+    dt.format(&Rfc3339).unwrap_or_else(|_| dt.to_string())
+}
 
 pub struct IdleSensor {
     state: Arc<AppState>,
@@ -36,7 +42,7 @@ impl IdleSensor {
         let last_active = self.get_last_active_time();
         self.state
             .mqtt
-            .publish_sensor("lastactive", &last_active.to_rfc3339())
+            .publish_sensor("lastactive", &format_rfc3339(last_active))
             .await;
 
         // Publish initial screensaver state (retained so HA picks it up)
@@ -61,9 +67,9 @@ impl IdleSensor {
                 }
                 _ = tick.tick() => {
                     let last_active = self.get_last_active_time();
-                    let secs = last_active.timestamp();
+                    let secs = last_active.unix_timestamp();
                     if secs != prev_idle_secs {
-                        self.state.mqtt.publish_sensor("lastactive", &last_active.to_rfc3339()).await;
+                        self.state.mqtt.publish_sensor("lastactive", &format_rfc3339(last_active)).await;
                         prev_idle_secs = secs;
                     }
                 }
@@ -99,7 +105,7 @@ impl IdleSensor {
         }
     }
 
-    fn get_last_active_time(&self) -> DateTime<Utc> {
+    fn get_last_active_time(&self) -> OffsetDateTime {
         unsafe {
             let mut lii = LASTINPUTINFO {
                 cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
@@ -112,9 +118,9 @@ impl IdleSensor {
                 let current_tick_32 = current_tick as u32;
                 let idle_ms = current_tick_32.wrapping_sub(lii.dwTime) as i64;
 
-                Utc::now() - ChronoDuration::milliseconds(idle_ms)
+                OffsetDateTime::now_utc() - time::Duration::milliseconds(idle_ms)
             } else {
-                Utc::now()
+                OffsetDateTime::now_utc()
             }
         }
     }

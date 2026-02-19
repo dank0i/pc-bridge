@@ -38,7 +38,7 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+          sudo apt-get install -y libssl-dev pkg-config libxdo-dev
       - run: cargo clippy -- -D warnings
 
   test:
@@ -50,7 +50,7 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+          sudo apt-get install -y libssl-dev pkg-config libxdo-dev
       - run: cargo test --all-features
 
   # ============================================

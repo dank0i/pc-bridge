@@ -1,8 +1,8 @@
 //! Display wake functions for Linux
 #![allow(dead_code)] // Used on Linux only
 
+use log::{debug, info};
 use std::process::Command;
-use tracing::{debug, info};
 
 /// Wake display using xdotool or dbus
 pub fn wake_display() {

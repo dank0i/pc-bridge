@@ -9,15 +9,15 @@
 //!
 //! Falls back to polling if WMI subscription fails.
 
+use log::{debug, error, info, warn};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, mpsc, RwLock};
-use tracing::{debug, error, info, warn};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use wmi::{COMLibrary, WMIConnection};
 
@@ -340,7 +340,7 @@ impl ProcessWatcher {
                 }
                 Some(event) = event_rx.recv() => {
                     // Batch: drain all pending events before acquiring write lock
-                    let mut batch = smallvec::SmallVec::<[ProcessEvent; 16]>::new();
+                    let mut batch = Vec::new();
                     batch.push(event);
                     while let Ok(e) = event_rx.try_recv() {
                         batch.push(e);

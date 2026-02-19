@@ -1,13 +1,13 @@
 //! Custom sensor polling - user-defined sensors from config
 
+use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
-use tracing::{debug, info, warn};
 
-use crate::config::{CustomSensor, CustomSensorType};
 use crate::AppState;
+use crate::config::{CustomSensor, CustomSensorType};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -241,8 +241,8 @@ impl CustomSensorManager {
         };
 
         let result = tokio::task::spawn_blocking(move || {
-            use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
             use winreg::RegKey;
+            use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 
             // Parse key path (e.g., "HKEY_LOCAL_MACHINE\\SOFTWARE\\...")
             let (hive, subkey) = if let Some(rest) = key.strip_prefix("HKEY_LOCAL_MACHINE\\") {

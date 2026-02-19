@@ -51,7 +51,7 @@ impl AppInfoReader {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "Unknown appinfo.vdf version",
-                ))
+                ));
             }
         };
 
@@ -72,7 +72,7 @@ impl AppInfoReader {
     /// This is the hot path. We read sequentially (cache-friendly) and only
     /// store app_id -> offset mapping. No parsing of actual content yet.
     fn build_index(file: &mut File, version: u32) -> io::Result<HashMap<u32, AppInfoEntry>> {
-        use tracing::info;
+        use log::info;
 
         let file_size = file.seek(SeekFrom::End(0))?;
         file.seek(SeekFrom::Start(8))?; // Back to after header
@@ -231,15 +231,14 @@ impl AppInfoReader {
                     depth -= 1;
                     if depth == 0 {
                         // End of a launch config - check if it's valid
-                        if let Some(exe) = current_exe.take() {
-                            if (is_windows || is_default)
-                                && !exe.contains("linux")
-                                && !exe.contains("osx")
-                            {
-                                // Found a Windows executable
-                                if exe.ends_with(".exe") || !exe.contains('.') {
-                                    return Some(exe);
-                                }
+                        if let Some(exe) = current_exe.take()
+                            && (is_windows || is_default)
+                            && !exe.contains("linux")
+                            && !exe.contains("osx")
+                        {
+                            // Found a Windows executable
+                            if exe.ends_with(".exe") || !exe.contains('.') {
+                                return Some(exe);
                             }
                         }
                     }

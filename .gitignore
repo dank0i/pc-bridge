@@ -32,3 +32,6 @@ rsrc_windows_*.syso
 
 /target/
 Cargo.lock
+
+# Signing certificates (private keys)
+/certs/

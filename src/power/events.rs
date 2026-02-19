@@ -6,17 +6,16 @@
 //! Also monitors display power state via GUID_CONSOLE_DISPLAY_STATE to detect
 //! when Windows turns off the monitor (separate from screensaver).
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use log::{debug, error, info};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Power::RegisterPowerSettingNotification;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-    GetWindowLongPtrW, PostMessageW, RegisterClassExW, SetWindowLongPtrW, TranslateMessage,
-    DEVICE_NOTIFY_WINDOW_HANDLE, GWLP_USERDATA, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_USER,
-    WNDCLASSEXW,
+    CreateWindowExW, DEVICE_NOTIFY_WINDOW_HANDLE, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, MSG, PostMessageW, RegisterClassExW,
+    SetWindowLongPtrW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_USER, WNDCLASSEXW,
 };
 
 use super::display::wake_display_with_retry;

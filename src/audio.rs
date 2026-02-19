@@ -11,8 +11,8 @@ use std::sync::OnceLock;
 #[cfg(windows)]
 use windows::{
     Win32::Media::Audio::Endpoints::IAudioEndpointVolume,
-    Win32::Media::Audio::{eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator},
-    Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_APARTMENTTHREADED},
+    Win32::Media::Audio::{IMMDeviceEnumerator, MMDeviceEnumerator, eConsole, eRender},
+    Win32::System::Com::{CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx},
 };
 
 #[cfg(windows)]
@@ -135,7 +135,7 @@ pub fn toggle_mute() -> bool {
 #[cfg(windows)]
 pub fn send_media_key(key: MediaKey) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
         VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK, VK_MEDIA_STOP,
         VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
     };

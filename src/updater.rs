@@ -4,10 +4,10 @@
 //! deleted. So we rename ourselves to `.old`, move the update into place,
 //! spawn the new exe, and exit. The new instance cleans up `.old` on startup.
 
+use log::{info, warn};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use tracing::{info, warn};
 
 const GITHUB_OWNER: &str = "dank0i";
 const GITHUB_REPO: &str = "pc-bridge";

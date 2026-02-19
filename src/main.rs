@@ -18,16 +18,14 @@ mod power;
 mod sensors;
 mod setup;
 mod steam;
-mod tray;
 mod updater;
 
-use std::sync::atomic::AtomicBool;
+use log::{error, info, warn};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 #[cfg(windows)]
 use std::time::Duration;
-use tokio::sync::{broadcast, RwLock};
-use tracing::{error, info, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tokio::sync::{RwLock, broadcast};
 
 use crate::commands::CommandExecutor;
 use crate::config::Config;
@@ -75,8 +73,8 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     {
         use windows::Win32::System::Console::{
-            AttachConsole, GetStdHandle, SetConsoleCtrlHandler, SetConsoleMode,
-            ENABLE_PROCESSED_INPUT, STD_INPUT_HANDLE,
+            AttachConsole, ENABLE_PROCESSED_INPUT, GetStdHandle, STD_INPUT_HANDLE,
+            SetConsoleCtrlHandler, SetConsoleMode,
         };
         unsafe {
             // ATTACH_PARENT_PROCESS = -1 (0xFFFFFFFF)
@@ -92,11 +90,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Initialize logging
-    FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .with_target(false)
-        .with_thread_ids(false)
-        .compact()
+    env_logger::Builder::from_default_env()
+        .filter_level(log::LevelFilter::Info)
+        .format_target(false)
+        .format_timestamp_secs()
         .init();
 
     info!("PC Bridge starting...");
@@ -118,8 +115,8 @@ async fn main() -> anyhow::Result<()> {
             error!("Setup cancelled by user");
             #[cfg(windows)]
             {
+                use windows::Win32::UI::WindowsAndMessaging::{MB_ICONWARNING, MB_OK, MessageBoxW};
                 use windows::core::w;
-                use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK};
                 unsafe {
                     MessageBoxW(
                         None,
@@ -142,9 +139,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Log enabled features
     log_enabled_features(&config);
-
-    let show_tray = config.features.show_tray_icon;
-    let config_path = Config::config_path()?;
 
     // Create shutdown channel
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
@@ -283,19 +277,6 @@ async fn main() -> anyhow::Result<()> {
     // Config file watcher for hot-reload
     handles.push(tokio::spawn(config::watch_config(Arc::clone(&state))));
 
-    // Start tray icon (Windows only, runs on separate thread)
-    if show_tray {
-        let tray_shutdown = shutdown_tx.clone();
-        let tray_config_path = config_path.clone();
-        std::thread::Builder::new()
-            .name("tray".into())
-            .stack_size(256 * 1024)
-            .spawn(move || {
-                tray::run_tray(tray_shutdown, tray_config_path);
-            })
-            .expect("failed to spawn tray thread");
-    }
-
     // Publish initial availability
     state.mqtt.publish_availability(true).await;
 
@@ -308,12 +289,12 @@ async fn main() -> anyhow::Result<()> {
         state.mqtt.publish_sensor_retained("display", "on").await;
     }
 
-    // Wait for shutdown signal (Ctrl+C or tray exit)
+    // Wait for shutdown signal (Ctrl+C)
     info!("PC Bridge running. Press Ctrl+C to stop.");
 
     #[cfg(windows)]
     {
-        // Wait for tray or broadcast shutdown signal (no polling — blocks on recv)
+        // Wait for broadcast shutdown signal (no polling — blocks on recv)
         let mut shutdown_rx = shutdown_tx.subscribe();
         let _ = shutdown_rx.recv().await;
     }
@@ -370,10 +351,10 @@ fn log_enabled_features(config: &Config) {
 fn kill_existing_instances() {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
     };
-    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 
     let my_pid = std::process::id();
 

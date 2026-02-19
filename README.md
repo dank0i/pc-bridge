@@ -64,7 +64,6 @@ Edit `userConfig.json` next to the executable:
     "audio_control": true,
     "steam_updates": false,
     "discord": false,
-    "show_tray_icon": true
   },
   "intervals": {
     "game_sensor": 5,
@@ -87,7 +86,7 @@ Edit `userConfig.json` next to the executable:
 
 ### Feature Flags
 
-All features are opt-in via the `features` object (except `power_events` and `show_tray_icon` which default to `true`):
+All features are opt-in via the `features` object (except `power_events` which defaults to `true`):
 
 | Feature | Default | Description |
 |---------|---------|-------------|
@@ -99,17 +98,8 @@ All features are opt-in via the `features` object (except `power_events` and `sh
 | `audio_control` | `false` | Volume, mute, media key commands |
 | `steam_updates` | `false` | Detect when Steam games are updating |
 | `discord` | `false` | Discord voice channel join/leave buttons |
-| `show_tray_icon` | **`true`** | Show system tray icon with context menu |
 
 > **Note:** Missing fields are automatically added with their defaults when upgrading.
-
-### Tray Icon
-
-A system tray icon is shown by default (Windows and Linux). Right-click for:
-- **Open configuration** - Opens `userConfig.json` in your default editor
-- **Exit** - Gracefully shuts down PC Bridge
-
-Set `features.show_tray_icon` to `false` to disable.
 
 ### Games Configuration
 

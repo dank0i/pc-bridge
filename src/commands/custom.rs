@@ -1,11 +1,11 @@
 //! Custom command execution - user-defined commands from config
 #![allow(dead_code)] // Platform-specific execution
 
+use log::{debug, error, info};
 use std::sync::Arc;
-use tracing::{debug, error, info};
 
-use crate::config::{CustomCommand, CustomCommandType};
 use crate::AppState;
+use crate::config::{CustomCommand, CustomCommandType};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;

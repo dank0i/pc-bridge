@@ -1,6 +1,6 @@
 //! MQTT client for Home Assistant communication
 
-use bytes::Bytes;
+use log::{debug, error, info, warn};
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
 
 use crate::config::{Config, CustomCommand, CustomSensor, FeatureConfig};
 
@@ -958,14 +957,9 @@ impl MqttClient {
     }
 
     /// Publish availability status
-    /// Uses Bytes::from_static to avoid allocating "online"/"offline" strings
     pub async fn publish_availability(&self, online: bool) {
         let topic = self.availability_topic();
-        let payload = if online {
-            Bytes::from_static(b"online")
-        } else {
-            Bytes::from_static(b"offline")
-        };
+        let payload: &[u8] = if online { b"online" } else { b"offline" };
         let _ = self
             .client
             .publish(&topic, QoS::AtLeastOnce, true, payload)
@@ -973,12 +967,10 @@ impl MqttClient {
     }
 
     /// Publish sensor attributes as JSON
-    /// Fix #9: Zero-copy - serialize directly to Vec, wrap in Bytes
     pub async fn publish_sensor_attributes(&self, name: &str, attributes: &serde_json::Value) {
         let topic = self.sensor_attributes_topic(name);
-        // Serialize directly to Vec, avoiding intermediate String allocation
         let payload = match serde_json::to_vec(attributes) {
-            Ok(v) => Bytes::from(v),
+            Ok(v) => v,
             Err(_) => return,
         };
         let _ = self
@@ -1073,7 +1065,6 @@ mod tests {
             intervals: IntervalConfig::default(),
             features,
             games: HashMap::new(),
-            show_tray_icon: None,
             custom_sensors_enabled: false,
             custom_commands_enabled: false,
             custom_command_privileges_allowed: false,
@@ -1616,7 +1607,6 @@ mod tests {
             audio_control: true,
             steam_updates: true,
             discord: true,
-            show_tray_icon: true,
         };
         let config = test_config("test-pc", features);
         let topics = MqttClient::build_subscribe_topics("test-pc", &config);
@@ -1912,17 +1902,18 @@ mod tests {
     #[test]
     fn test_lastactive_content_rfc3339() {
         // IdleSensor publishes lastactive as RFC3339 timestamp
-        use chrono::Utc;
-        let now = Utc::now();
-        let value = now.to_rfc3339();
+        use time::OffsetDateTime;
+        use time::format_description::well_known::Rfc3339;
+        let now = OffsetDateTime::now_utc();
+        let value = now.format(&Rfc3339).unwrap();
 
-        // Must be valid RFC3339 — ends with +00:00 and contains T separator
+        // Must be valid RFC3339 — contains T separator and Z (UTC)
         assert!(value.contains('T'));
-        assert!(value.contains("+00:00"));
+        assert!(value.ends_with('Z'));
 
         // Must parse back cleanly
-        let parsed = chrono::DateTime::parse_from_rfc3339(&value).unwrap();
-        assert_eq!(parsed.timestamp(), now.timestamp());
+        let parsed = OffsetDateTime::parse(&value, &Rfc3339).unwrap();
+        assert_eq!(parsed.unix_timestamp(), now.unix_timestamp());
     }
 
     #[test]
