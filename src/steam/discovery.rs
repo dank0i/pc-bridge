@@ -579,7 +579,11 @@ impl SteamGameDiscovery {
             let _ = fs::create_dir_all(parent);
         }
 
-        let Ok(file) = File::create(&cache_path) else {
+        // Write to a temporary file first, then atomically rename into place.
+        // This prevents corruption if the process crashes mid-write.
+        let tmp_path = cache_path.with_extension("tmp");
+
+        let Ok(file) = File::create(&tmp_path) else {
             return;
         };
         let mut writer = BufWriter::new(file);
@@ -600,7 +604,18 @@ impl SteamGameDiscovery {
             Self::write_game(&mut writer, game);
         }
 
-        let _ = writer.flush();
+        if writer.flush().is_err() {
+            let _ = fs::remove_file(&tmp_path);
+            return;
+        }
+        // Drop the writer/file handle before renaming
+        drop(writer);
+
+        if fs::rename(&tmp_path, &cache_path).is_err() {
+            let _ = fs::remove_file(&tmp_path);
+            return;
+        }
+
         debug!("Saved Steam cache to {:?}", cache_path);
     }
 

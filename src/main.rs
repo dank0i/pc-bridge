@@ -21,9 +21,6 @@ mod steam;
 mod tray;
 mod updater;
 
-#[cfg(windows)]
-mod winapi;
-
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 #[cfg(windows)]

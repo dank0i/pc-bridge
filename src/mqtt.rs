@@ -987,8 +987,8 @@ impl MqttClient {
             .await;
     }
 
-    // Topic helpers - Fix #3: Use cached topics for frequently-used sensors
-    // Returns String (from Arc<str> cache when possible - avoids format! on hot path)
+    // Topic helpers - Use cached topics for frequently-used sensors
+    // Returns String from Arc<str> cache — callers need owned String for HA discovery payloads
     fn availability_topic(&self) -> String {
         self.cached_topics.availability.to_string()
     }
@@ -1077,6 +1077,7 @@ mod tests {
             custom_sensors_enabled: false,
             custom_commands_enabled: false,
             custom_command_privileges_allowed: false,
+            allow_raw_commands: false,
             custom_sensors: Vec::new(),
             custom_commands: Vec::new(),
         }

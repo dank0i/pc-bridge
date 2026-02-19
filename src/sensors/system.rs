@@ -174,7 +174,10 @@ impl SystemSensor {
         }
 
         // Active window title (event-driven, but publish initial state)
+        #[cfg(windows)]
         let title = get_active_window_title();
+        #[cfg(unix)]
+        let title = get_active_window_title_async().await;
         if title != prev.active_window {
             self.state
                 .mqtt
@@ -732,12 +735,17 @@ fn get_active_window_title() -> String {
 
 #[cfg(unix)]
 fn get_active_window_title() -> String {
-    // Runs in publish_all which is called from async context on the single-threaded runtime.
-    // However, this is a sync fn called directly — the caller should use spawn_blocking
-    // if needed. For now, use std::process since this fn is sync and the caller
-    // already runs it on the tokio thread (10s interval, ~2ms execution — acceptable).
-    // For strict correctness, see the async wrapper below.
+    // Blocking subprocess — must not run directly on the single-threaded async runtime.
+    // Callers that need async should use spawn_blocking(get_active_window_title).
     get_active_window_title_blocking()
+}
+
+/// Async wrapper for use from tokio tasks on Linux
+#[cfg(unix)]
+pub async fn get_active_window_title_async() -> String {
+    tokio::task::spawn_blocking(get_active_window_title_blocking)
+        .await
+        .unwrap_or_default()
 }
 
 #[cfg(unix)]

@@ -2,53 +2,6 @@
 //!
 //! Parses libraryfolders.vdf and appmanifest_*.acf files.
 
-#![allow(dead_code)]
-
-use std::collections::HashMap;
-
-/// Parse a text VDF file into nested key-value pairs
-/// Zero-copy: returns string slices into the input
-pub fn parse_vdf(input: &str) -> HashMap<&str, VdfValue<'_>> {
-    let mut result = HashMap::new();
-    let mut chars = input.chars().peekable();
-    parse_block(&mut chars, &mut result);
-    result
-}
-
-#[derive(Debug)]
-pub enum VdfValue<'a> {
-    String(&'a str),
-    Block(HashMap<&'a str, VdfValue<'a>>),
-}
-
-impl<'a> VdfValue<'a> {
-    pub fn as_str(&self) -> Option<&'a str> {
-        match self {
-            VdfValue::String(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    pub fn as_block(&self) -> Option<&HashMap<&'a str, VdfValue<'a>>> {
-        match self {
-            VdfValue::Block(b) => Some(b),
-            _ => None,
-        }
-    }
-
-    pub fn get(&self, key: &str) -> Option<&VdfValue<'a>> {
-        self.as_block()?.get(key)
-    }
-}
-
-fn parse_block<'a>(
-    _chars: &mut std::iter::Peekable<std::str::Chars<'a>>,
-    _map: &mut HashMap<&'a str, VdfValue<'a>>,
-) {
-    // This is a simplified parser - in practice we'd use the input slice directly
-    // For now, this works for the small VDF files we're parsing
-}
-
 /// Fast path: extract specific keys from appmanifest without full parse
 #[inline]
 pub fn extract_appmanifest_fields(content: &str) -> Option<(u32, String, String)> {
@@ -76,6 +29,7 @@ pub fn extract_appmanifest_fields(content: &str) -> Option<(u32, String, String)
 }
 
 /// Extract library paths from libraryfolders.vdf
+#[cfg(test)]
 pub fn extract_library_paths(content: &str) -> Vec<String> {
     extract_library_info(content)
         .into_iter()

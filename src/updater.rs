@@ -158,8 +158,12 @@ async fn download_update(url: &str, filename: &str) -> anyhow::Result<PathBuf> {
 }
 
 fn is_newer_version(remote: &str, current: &str) -> bool {
-    let parse =
-        |v: &str| -> Vec<u32> { v.split(['.', '-']).filter_map(|s| s.parse().ok()).collect() };
+    let parse = |v: &str| -> Vec<u32> {
+        v.trim_start_matches('v')
+            .split(['.', '-'])
+            .filter_map(|s| s.parse().ok())
+            .collect()
+    };
 
     let remote_parts = parse(remote);
     let current_parts = parse(current);
@@ -314,10 +318,11 @@ mod tests {
 
     #[test]
     fn test_is_newer_version_with_v_prefix() {
-        // "v" prefix causes first segment to fail parse, so "v3.0.0" → [0,0] vs "v2.7.0" → [0,0]
-        // Both parse equally — this tests that the function doesn't panic on non-numeric input
-        assert!(!is_newer_version("v3.0.0", "v2.7.0"));
-        // Without "v" prefix, it works correctly
+        // "v" prefix is stripped before parsing
+        assert!(is_newer_version("v3.0.0", "v2.7.0"));
+        assert!(is_newer_version("v3.0.0", "2.7.0"));
+        assert!(is_newer_version("3.0.0", "v2.7.0"));
+        // Without "v" prefix still works
         assert!(is_newer_version("3.0.0", "2.7.0"));
     }
 

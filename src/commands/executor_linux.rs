@@ -57,9 +57,10 @@ impl CommandExecutor {
                         }
                     };
 
+                    let state_clone = self.state.clone();
                     tokio::spawn(async move {
                         let _permit = permit;
-                        if let Err(e) = Self::execute_command(&cmd.name, &cmd.payload).await {
+                        if let Err(e) = Self::execute_command(&cmd.name, &cmd.payload, &state_clone).await {
                             error!("Command error: {}", e);
                         }
                     });
@@ -68,7 +69,11 @@ impl CommandExecutor {
         }
     }
 
-    async fn execute_command(name: &str, payload: &str) -> anyhow::Result<()> {
+    async fn execute_command(
+        name: &str,
+        payload: &str,
+        state: &Arc<AppState>,
+    ) -> anyhow::Result<()> {
         let payload = payload.trim();
         let payload = if payload.eq_ignore_ascii_case("PRESS") {
             ""
@@ -98,7 +103,15 @@ impl CommandExecutor {
         // Get command string
         let cmd_str = match get_predefined_command(name) {
             Some(cmd) => cmd.to_string(),
-            None if !payload.is_empty() => payload.to_string(),
+            None if !payload.is_empty() => {
+                // Raw payload execution: only allowed if configured
+                let config = state.config.read().await;
+                if !config.allow_raw_commands {
+                    warn!("Raw command blocked (allow_raw_commands=false): {}", name);
+                    return Ok(());
+                }
+                payload.to_string()
+            }
             None => {
                 warn!("No command configured for: {}", name);
                 return Ok(());

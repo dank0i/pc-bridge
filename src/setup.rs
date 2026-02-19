@@ -341,6 +341,7 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
         custom_sensors_enabled: false,
         custom_commands_enabled: false,
         custom_command_privileges_allowed: false,
+        allow_raw_commands: false,
         custom_sensors: Vec::new(),
         custom_commands: Vec::new(),
     };

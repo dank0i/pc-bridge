@@ -38,6 +38,10 @@ pub struct Config {
     /// Allow custom commands to run with elevated privileges
     #[serde(default)]
     pub custom_command_privileges_allowed: bool,
+    /// Allow raw MQTT payloads to be executed as shell commands
+    /// When false (default), only predefined and custom commands are allowed
+    #[serde(default)]
+    pub allow_raw_commands: bool,
 
     #[serde(default)]
     pub custom_sensors: Vec<CustomSensor>,
@@ -798,6 +802,7 @@ mod tests {
             custom_sensors_enabled: false,
             custom_commands_enabled: false,
             custom_command_privileges_allowed: false,
+            allow_raw_commands: false,
             custom_sensors: vec![],
             custom_commands: vec![],
         }

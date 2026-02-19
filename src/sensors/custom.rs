@@ -42,45 +42,44 @@ impl CustomSensorManager {
 
     pub async fn run(self) {
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
+        let mut config_rx = self.state.config_generation.subscribe();
 
-        // Check if custom sensors are enabled
-        {
+        // Snapshot config at startup
+        let (mut sensors, mut enabled) = {
             let config = self.state.config.read().await;
-            if !config.custom_sensors_enabled {
-                info!("Custom sensors disabled (custom_sensors_enabled=false)");
-                return;
-            }
-            if config.custom_sensors.is_empty() {
-                info!("No custom sensors configured");
-                return;
-            }
+            (config.custom_sensors.clone(), config.custom_sensors_enabled)
+        };
 
-            warn!(
-                "Custom sensors ENABLED - {} sensor(s) configured",
-                config.custom_sensors.len()
+        if !enabled {
+            info!("Custom sensors disabled (custom_sensors_enabled=false)");
+            return;
+        }
+        if sensors.is_empty() {
+            info!("No custom sensors configured");
+            return;
+        }
+
+        warn!(
+            "Custom sensors ENABLED - {} sensor(s) configured",
+            sensors.len()
+        );
+        for sensor in &sensors {
+            info!(
+                "  - {} ({:?}, {}s interval)",
+                sensor.name, sensor.sensor_type, sensor.interval_seconds
             );
-            for sensor in &config.custom_sensors {
-                info!(
-                    "  - {} ({:?}, {}s interval)",
-                    sensor.name, sensor.sensor_type, sensor.interval_seconds
-                );
-            }
         }
 
         // Track last poll time per sensor
         let mut last_poll: HashMap<String, tokio::time::Instant> = HashMap::new();
 
         // Use minimum sensor interval for tick (avoids waking every 1s)
-        let min_interval = {
-            let config = self.state.config.read().await;
-            config
-                .custom_sensors
-                .iter()
-                .map(|s| s.interval_seconds)
-                .min()
-                .unwrap_or(30)
-                .max(1) // At least 1 second
-        };
+        let min_interval = sensors
+            .iter()
+            .map(|s| s.interval_seconds)
+            .min()
+            .unwrap_or(30)
+            .max(1);
         let mut tick = interval(Duration::from_secs(min_interval));
 
         loop {
@@ -90,16 +89,21 @@ impl CustomSensorManager {
                     debug!("Custom sensor manager shutting down");
                     break;
                 }
-                _ = tick.tick() => {
+                _ = config_rx.recv() => {
+                    // Hot-reload: re-snapshot config
                     let config = self.state.config.read().await;
-
-                    if !config.custom_sensors_enabled {
+                    sensors.clone_from(&config.custom_sensors);
+                    enabled = config.custom_sensors_enabled;
+                    info!("Custom sensors config reloaded ({} sensors, enabled={})", sensors.len(), enabled);
+                }
+                _ = tick.tick() => {
+                    if !enabled {
                         continue;
                     }
 
                     let now = tokio::time::Instant::now();
 
-                    for sensor in &config.custom_sensors {
+                    for sensor in &sensors {
                         let should_poll = match last_poll.get(&sensor.name) {
                             Some(last) => now.duration_since(*last) >= Duration::from_secs(sensor.interval_seconds),
                             None => true,

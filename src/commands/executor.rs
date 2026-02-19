@@ -167,7 +167,15 @@ impl CommandExecutor {
         // Get command string
         let cmd_str = match get_predefined_command(name) {
             Some(cmd) => cmd.to_string(),
-            None if !payload.is_empty() => payload.to_string(),
+            None if !payload.is_empty() => {
+                // Raw payload execution: only allowed if configured
+                let config = state.config.read().await;
+                if !config.allow_raw_commands {
+                    warn!("Raw command blocked (allow_raw_commands=false): {}", name);
+                    return Ok(());
+                }
+                payload.to_string()
+            }
             None => {
                 warn!("No command configured for: {}", name);
                 return Ok(());

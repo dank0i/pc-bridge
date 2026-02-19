@@ -1,6 +1,6 @@
 [package]
 name = "pc-bridge"
-version = "2.10.2"
+version = "2.11.0"
 edition = "2021"
 authors = ["dank0i"]
 description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
@@ -45,12 +45,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # System info
 hostname = "0.3"
-
-# File globbing
-glob = "0.3"
-
-# Process/command execution
-which = "6"
 
 # System tray (cross-platform)
 tray-icon = "0.19"

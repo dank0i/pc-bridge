@@ -105,16 +105,9 @@ fn run_message_loop(shutdown_tx: &broadcast::Sender<()>) {
 /// Linux/Unix message loop (GTK-based via tray-icon)
 #[cfg(unix)]
 fn run_message_loop(shutdown_tx: &broadcast::Sender<()>) {
-    // On Linux, tray-icon uses GTK which requires a main loop
-    // For now, just sleep and check for shutdown
-    use std::time::Duration;
-
-    loop {
-        std::thread::sleep(Duration::from_millis(100));
-        if shutdown_tx.receiver_count() == 0 {
-            break;
-        }
-    }
+    // Block until shutdown signal instead of busy-waiting
+    let mut shutdown_rx = shutdown_tx.subscribe();
+    let _ = shutdown_rx.blocking_recv();
 }
 
 fn load_icon() -> anyhow::Result<Icon> {

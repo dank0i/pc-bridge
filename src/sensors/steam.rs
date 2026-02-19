@@ -265,80 +265,81 @@ impl SteamSensor {
     }
 
     async fn do_full_scan(&mut self) {
-        let mut new_updating: HashMap<String, GameUpdateState> = HashMap::new();
-        let mut seen_paths: HashSet<PathBuf> = HashSet::new();
+        // Move blocking filesystem I/O off the single-threaded async runtime
+        let library_folders = self.library_folders.clone();
+        let mut acf_cache = std::mem::take(&mut self.acf_cache);
 
-        for lib_folder in &self.library_folders {
-            // Read directory and filter for appmanifest_*.acf files
-            // (replaces glob::glob which recompiles regex pattern every scan)
-            let entries = match std::fs::read_dir(lib_folder) {
-                Ok(e) => e,
-                Err(e) => {
-                    error!("Failed to read steam library dir {:?}: {}", lib_folder, e);
-                    continue;
-                }
-            };
+        let (new_updating, returned_cache) = tokio::task::spawn_blocking(move || {
+            Self::full_scan_blocking(&library_folders, &mut acf_cache);
+            let mut updating: HashMap<String, GameUpdateState> = HashMap::new();
+            let mut seen_paths: HashSet<PathBuf> = HashSet::new();
 
-            for dir_entry in entries.flatten() {
-                let path = dir_entry.path();
-                if !path.is_file() {
-                    continue;
-                }
-                let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
-                    continue;
+            for lib_folder in &library_folders {
+                let entries = match std::fs::read_dir(lib_folder) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        error!("Failed to read steam library dir {:?}: {}", lib_folder, e);
+                        continue;
+                    }
                 };
-                if !fname.starts_with("appmanifest_") || !fname.ends_with(".acf") {
-                    continue;
-                }
 
-                {
-                    let entry = path;
-                    seen_paths.insert(entry.clone());
+                for dir_entry in entries.flatten() {
+                    let path = dir_entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
+                        continue;
+                    };
+                    if !fname.starts_with("appmanifest_") || !fname.ends_with(".acf") {
+                        continue;
+                    }
 
-                    // Check mtime to skip unchanged files
-                    let mtime = std::fs::metadata(&entry).and_then(|m| m.modified()).ok();
+                    seen_paths.insert(path.clone());
+
+                    let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
 
                     let game_state = if let Some(mt) = mtime {
-                        if let Some((cached_mt, cached_state)) = self.acf_cache.get(&entry) {
+                        if let Some((cached_mt, cached_state)) = acf_cache.get(&path) {
                             if *cached_mt == mt {
-                                // File unchanged, use cached result
                                 cached_state.clone()
                             } else {
-                                // File changed, re-parse
-                                let state = parse_acf_file(&entry);
-                                self.acf_cache.insert(entry.clone(), (mt, state.clone()));
+                                let state = parse_acf_file(&path);
+                                acf_cache.insert(path.clone(), (mt, state.clone()));
                                 state
                             }
                         } else {
-                            // New file, parse and cache
-                            let state = parse_acf_file(&entry);
-                            self.acf_cache.insert(entry.clone(), (mt, state.clone()));
+                            let state = parse_acf_file(&path);
+                            acf_cache.insert(path.clone(), (mt, state.clone()));
                             state
                         }
                     } else {
-                        // Can't get mtime, always parse
-                        parse_acf_file(&entry)
+                        parse_acf_file(&path)
                     };
 
                     if let Some(gs) = game_state {
                         if is_updating(&gs) {
-                            new_updating.insert(gs.app_id.clone(), gs);
+                            updating.insert(gs.app_id.clone(), gs);
                         }
                     }
                 }
             }
-        }
 
-        // Prune cache entries for files that no longer exist
-        self.acf_cache.retain(|path, _| seen_paths.contains(path));
+            acf_cache.retain(|path, _| seen_paths.contains(path));
+            (updating, acf_cache)
+        })
+        .await
+        .unwrap_or_default();
+
+        self.acf_cache = returned_cache;
 
         // Check for changes
         let was_updating = !self.updating_games.is_empty();
-        let is_updating = !new_updating.is_empty();
+        let is_updating_now = !new_updating.is_empty();
 
         // Log changes
-        if was_updating != is_updating || self.updating_games.len() != new_updating.len() {
-            if is_updating {
+        if was_updating != is_updating_now || self.updating_games.len() != new_updating.len() {
+            if is_updating_now {
                 let names: Vec<&str> = new_updating.values().map(|g| g.name.as_str()).collect();
                 info!("Steam games updating: {:?}", names);
             } else if was_updating {
@@ -351,18 +352,28 @@ impl SteamSensor {
     }
 
     async fn do_targeted_scan(&mut self) {
-        // Only check games that were updating
-        let mut still_updating: HashMap<String, GameUpdateState> = HashMap::new();
+        // Move blocking filesystem I/O off the async runtime
+        let updating_snapshot: Vec<(String, GameUpdateState)> = self
+            .updating_games
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
-        for (app_id, game_state) in &self.updating_games {
-            if let Some(new_state) = parse_acf_file(&game_state.manifest_path) {
-                if is_updating(&new_state) {
-                    still_updating.insert(app_id.clone(), new_state);
-                } else {
-                    info!("Steam game finished updating: {}", game_state.name);
+        let still_updating = tokio::task::spawn_blocking(move || {
+            let mut result: HashMap<String, GameUpdateState> = HashMap::new();
+            for (app_id, game_state) in &updating_snapshot {
+                if let Some(new_state) = parse_acf_file(&game_state.manifest_path) {
+                    if is_updating(&new_state) {
+                        result.insert(app_id.clone(), new_state);
+                    } else {
+                        info!("Steam game finished updating: {}", game_state.name);
+                    }
                 }
             }
-        }
+            result
+        })
+        .await
+        .unwrap_or_default();
 
         let changed = still_updating.len() != self.updating_games.len();
         self.updating_games = still_updating;
