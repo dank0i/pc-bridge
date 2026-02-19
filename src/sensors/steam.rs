@@ -270,7 +270,6 @@ impl SteamSensor {
         let mut acf_cache = std::mem::take(&mut self.acf_cache);
 
         let (new_updating, returned_cache) = tokio::task::spawn_blocking(move || {
-            Self::full_scan_blocking(&library_folders, &mut acf_cache);
             let mut updating: HashMap<String, GameUpdateState> = HashMap::new();
             let mut seen_paths: HashSet<PathBuf> = HashSet::new();
 
