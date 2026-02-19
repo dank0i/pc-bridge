@@ -79,6 +79,7 @@ Edit `userConfig.json` next to the executable:
   "custom_sensors_enabled": false,
   "custom_commands_enabled": false,
   "custom_command_privileges_allowed": false,
+  "allow_raw_commands": false,
   "custom_sensors": [],
   "custom_commands": []
 }
@@ -129,6 +130,9 @@ Custom features are **disabled by default** and require explicit opt-in:
 | `custom_sensors_enabled` | `false` | Enable custom sensor polling |
 | `custom_commands_enabled` | `false` | Enable custom command execution |
 | `custom_command_privileges_allowed` | `false` | Allow commands marked `admin: true` |
+| `allow_raw_commands` | `false` | Allow arbitrary MQTT payloads to be executed as shell commands |
+
+> **⚠️ `allow_raw_commands`**: When `false` (default), only predefined commands (Shutdown, Sleep, Wake, etc.) and configured custom commands can be executed. Unknown command topics with a non-empty payload are silently dropped. Set to `true` only if you need to send ad-hoc shell commands via MQTT — this is a security risk if your MQTT broker is not properly secured.
 
 ### Custom Sensors
 
@@ -186,6 +190,7 @@ Execute custom actions from Home Assistant:
 {
   "custom_commands_enabled": true,
   "custom_command_privileges_allowed": true,
+  "allow_raw_commands": false,
   "custom_commands": [
     {
       "name": "flush_dns",
