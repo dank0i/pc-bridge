@@ -165,9 +165,14 @@ impl CommandExecutor {
         }
 
         // Get command string
-        let cmd_str = match get_predefined_command(name) {
-            Some(cmd) => cmd.to_string(),
-            None if !payload.is_empty() => {
+        let cmd_str = if let Some(predefined) = get_predefined_command(name) {
+            predefined.to_string()
+        } else if !payload.is_empty() {
+            // Launcher shortcuts (steam:, epic:, exe:, lnk:, close:) are always
+            // allowed - they're validated and safe, no raw shell execution.
+            if let Some(expanded) = expand_launcher_shortcut(payload) {
+                expanded
+            } else {
                 // Raw payload execution: only allowed if configured
                 let config = state.config.read().await;
                 if !config.allow_raw_commands {
@@ -176,14 +181,10 @@ impl CommandExecutor {
                 }
                 payload.to_string()
             }
-            None => {
-                warn!("No command configured for: {}", name);
-                return Ok(());
-            }
+        } else {
+            warn!("No command configured for: {}", name);
+            return Ok(());
         };
-
-        // Expand launcher shortcuts (steam:, epic:, exe:, etc.)
-        let cmd_str = expand_launcher_shortcut(&cmd_str).unwrap_or(cmd_str);
 
         // Expand environment variables
         let cmd_str = expand_env_vars(&cmd_str);
