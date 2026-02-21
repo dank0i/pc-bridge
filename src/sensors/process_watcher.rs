@@ -230,95 +230,102 @@ impl ProcessWatcher {
     /// The `__CLASS` system property distinguishes event types.
     /// Falls back to polling if WMI setup fails.
     async fn setup_wmi_events(event_tx: mpsc::Sender<ProcessEvent>) -> anyhow::Result<()> {
-        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            // Verify WMI is available
-            let com = COMLibrary::new()?;
-            let _wmi = WMIConnection::new(com)?;
+        // Use a oneshot channel so the WMI thread can report whether
+        // raw_notification() succeeded before we commit to event mode.
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
 
-            info!("WMI connection established, subscribing to process events");
+        // Single thread handles both creation and deletion events.
+        // Shutdown: when the mpsc receiver is dropped, blocking_send() returns Err
+        // and the thread breaks out of the event loop. The WMI `WITHIN 1` poll interval
+        // means at most ~1s delay before the thread notices and exits.
+        // JoinHandle is intentionally detached — the thread is cleaned up on process exit.
+        std::thread::Builder::new()
+            .name("wmi-events".into())
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                let com = match COMLibrary::new() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let msg = format!("Failed to init COM for process events thread: {}", e);
+                        error!("{}", msg);
+                        let _ = ready_tx.send(Err(msg));
+                        return;
+                    }
+                };
+                let wmi = match WMIConnection::new(com) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        let msg = format!("Failed to create WMI connection: {}", e);
+                        error!("{}", msg);
+                        let _ = ready_tx.send(Err(msg));
+                        return;
+                    }
+                };
 
-            // Single thread handles both creation and deletion events.
-            // Shutdown: when the mpsc receiver is dropped, blocking_send() returns Err
-            // and the thread breaks out of the event loop. The WMI `WITHIN 1` poll interval
-            // means at most ~1s delay before the thread notices and exits.
-            // JoinHandle is intentionally detached — the thread is cleaned up on process exit.
-            std::thread::Builder::new()
-                .name("wmi-events".into())
-                .stack_size(256 * 1024)
-                .spawn(move || {
-                    let com = match COMLibrary::new() {
-                        Ok(c) => c,
-                        Err(e) => {
-                            error!("Failed to init COM for process events thread: {}", e);
-                            return;
-                        }
-                    };
-                    let wmi = match WMIConnection::new(com) {
-                        Ok(w) => w,
-                        Err(e) => {
-                            error!("Failed to create WMI connection: {}", e);
-                            return;
-                        }
-                    };
+                debug!("WMI process event thread started (creation + deletion)");
 
-                    debug!("WMI process event thread started (creation + deletion)");
+                // __InstanceOperationEvent is the parent of both __InstanceCreationEvent
+                // and __InstanceDeletionEvent, so one query captures both types.
+                let query = "SELECT * FROM __InstanceOperationEvent WITHIN 1 \
+                             WHERE TargetInstance ISA 'Win32_Process'";
+                let events = match wmi.raw_notification::<ProcessOperationEvent>(query) {
+                    Ok(iter) => {
+                        info!("WMI process event subscription established");
+                        let _ = ready_tx.send(Ok(()));
+                        iter
+                    }
+                    Err(e) => {
+                        let msg = format!("Failed to subscribe to process events: {}", e);
+                        error!("{}", msg);
+                        let _ = ready_tx.send(Err(msg));
+                        return;
+                    }
+                };
 
-                    // __InstanceOperationEvent is the parent of both __InstanceCreationEvent
-                    // and __InstanceDeletionEvent, so one query captures both types.
-                    let query = "SELECT * FROM __InstanceOperationEvent WITHIN 1 \
-                                 WHERE TargetInstance ISA 'Win32_Process'";
-                    let events = match wmi.raw_notification::<ProcessOperationEvent>(query) {
-                        Ok(iter) => iter,
-                        Err(e) => {
-                            error!("Failed to subscribe to process events: {}", e);
-                            return;
-                        }
-                    };
-
-                    for event_result in events {
-                        match event_result {
-                            Ok(event) => {
-                                let pid = event.target_instance.process_id;
-                                match event.class.as_deref() {
-                                    Some(c) if c.contains("Creation") => {
-                                        if let Some(name) = event.target_instance.name {
-                                            if event_tx
-                                                .blocking_send(ProcessEvent::Created(name, pid))
-                                                .is_err()
-                                            {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    Some(c) if c.contains("Deletion") => {
+                for event_result in events {
+                    match event_result {
+                        Ok(event) => {
+                            let pid = event.target_instance.process_id;
+                            match event.class.as_deref() {
+                                Some(c) if c.contains("Creation") => {
+                                    if let Some(name) = event.target_instance.name {
                                         if event_tx
-                                            .blocking_send(ProcessEvent::Deleted(pid))
+                                            .blocking_send(ProcessEvent::Created(name, pid))
                                             .is_err()
                                         {
                                             break;
                                         }
                                     }
-                                    _ => {
-                                        // Unknown or missing __CLASS (e.g. modification events)
-                                        // Skip — 60s reconciliation catches anything missed
-                                        debug!("WMI: skipping event with class {:?}", event.class);
+                                }
+                                Some(c) if c.contains("Deletion") => {
+                                    if event_tx.blocking_send(ProcessEvent::Deleted(pid)).is_err() {
+                                        break;
                                     }
                                 }
-                            }
-                            Err(e) => {
-                                error!("WMI process event error: {}", e);
-                                break;
+                                _ => {
+                                    // Unknown or missing __CLASS (e.g. modification events)
+                                    // Skip — 60s reconciliation catches anything missed
+                                    debug!("WMI: skipping event with class {:?}", event.class);
+                                }
                             }
                         }
+                        Err(e) => {
+                            error!("WMI process event error: {}", e);
+                            break;
+                        }
                     }
-                })
-                .expect("failed to spawn WMI events thread");
+                }
+            })
+            .expect("failed to spawn WMI events thread");
 
-            Ok(())
-        })
-        .await??;
-
-        Ok(())
+        // Wait for the WMI thread to confirm subscription succeeded
+        match ready_rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(msg)) => Err(anyhow::anyhow!(msg)),
+            Err(_) => Err(anyhow::anyhow!(
+                "WMI event thread exited before reporting status"
+            )),
+        }
     }
 
     /// Process WMI events and run periodic reconciliation
