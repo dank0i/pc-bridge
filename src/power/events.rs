@@ -244,75 +244,77 @@ impl PowerEventListener {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
-        if msg == WM_POWERBROADCAST {
-            let event_tx_ptr =
-                GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const mpsc::Sender<PowerEvent>;
+        unsafe {
+            if msg == WM_POWERBROADCAST {
+                let event_tx_ptr =
+                    GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const mpsc::Sender<PowerEvent>;
 
-            if !event_tx_ptr.is_null() {
-                let event_tx = &*event_tx_ptr;
+                if !event_tx_ptr.is_null() {
+                    let event_tx = &*event_tx_ptr;
 
-                match wparam.0 {
-                    PBT_APMSUSPEND => {
-                        debug!("Received PBT_APMSUSPEND");
-                        // Only fire if transitioning from awake to sleeping
-                        if try_transition_to_sleep() {
-                            info!("State transition: awake -> sleeping");
-                            let _ = event_tx.blocking_send(PowerEvent::Sleep);
-                        } else {
-                            debug!("Ignoring duplicate sleep event");
+                    match wparam.0 {
+                        PBT_APMSUSPEND => {
+                            debug!("Received PBT_APMSUSPEND");
+                            // Only fire if transitioning from awake to sleeping
+                            if try_transition_to_sleep() {
+                                info!("State transition: awake -> sleeping");
+                                let _ = event_tx.blocking_send(PowerEvent::Sleep);
+                            } else {
+                                debug!("Ignoring duplicate sleep event");
+                            }
                         }
-                    }
-                    PBT_APMRESUMEAUTO | PBT_APMRESUMESUSPEND => {
-                        debug!("Received PBT_APMRESUME* (wparam={})", wparam.0);
-                        // Only fire if transitioning from sleeping to awake
-                        if try_transition_to_awake() {
-                            info!("State transition: sleeping -> awake");
-                            let _ = event_tx.blocking_send(PowerEvent::Wake);
-                        } else {
-                            debug!("Ignoring duplicate wake event");
+                        PBT_APMRESUMEAUTO | PBT_APMRESUMESUSPEND => {
+                            debug!("Received PBT_APMRESUME* (wparam={})", wparam.0);
+                            // Only fire if transitioning from sleeping to awake
+                            if try_transition_to_awake() {
+                                info!("State transition: sleeping -> awake");
+                                let _ = event_tx.blocking_send(PowerEvent::Wake);
+                            } else {
+                                debug!("Ignoring duplicate wake event");
+                            }
                         }
-                    }
-                    PBT_POWERSETTINGCHANGE => {
-                        // Display power state change notification
-                        let pbs = lparam.0 as *const PowerBroadcastSetting;
-                        if !pbs.is_null() {
-                            let setting = &*pbs;
-                            if setting.power_setting == GUID_CONSOLE_DISPLAY_STATE
-                                && setting.data_length >= 1
-                            {
-                                let display_state = setting.data[0];
-                                debug!(
-                                    "Display power state change: {}",
+                        PBT_POWERSETTINGCHANGE => {
+                            // Display power state change notification
+                            let pbs = lparam.0 as *const PowerBroadcastSetting;
+                            if !pbs.is_null() {
+                                let setting = &*pbs;
+                                if setting.power_setting == GUID_CONSOLE_DISPLAY_STATE
+                                    && setting.data_length >= 1
+                                {
+                                    let display_state = setting.data[0];
+                                    debug!(
+                                        "Display power state change: {}",
+                                        match display_state {
+                                            0 => "off",
+                                            1 => "on",
+                                            2 => "dimmed",
+                                            _ => "unknown",
+                                        }
+                                    );
                                     match display_state {
-                                        0 => "off",
-                                        1 => "on",
-                                        2 => "dimmed",
-                                        _ => "unknown",
-                                    }
-                                );
-                                match display_state {
-                                    0 => {
-                                        let _ = event_tx.blocking_send(PowerEvent::DisplayOff);
-                                    }
-                                    1 => {
-                                        let _ = event_tx.blocking_send(PowerEvent::DisplayOn);
-                                    }
-                                    2 => {
-                                        // Dimmed - treat as still on (display is visible)
-                                        debug!("Display dimmed, treating as on");
-                                    }
-                                    _ => {
-                                        debug!("Unknown display state: {}", display_state);
+                                        0 => {
+                                            let _ = event_tx.blocking_send(PowerEvent::DisplayOff);
+                                        }
+                                        1 => {
+                                            let _ = event_tx.blocking_send(PowerEvent::DisplayOn);
+                                        }
+                                        2 => {
+                                            // Dimmed - treat as still on (display is visible)
+                                            debug!("Display dimmed, treating as on");
+                                        }
+                                        _ => {
+                                            debug!("Unknown display state: {}", display_state);
+                                        }
                                     }
                                 }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
-        }
 
-        DefWindowProcW(hwnd, msg, wparam, lparam)
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
     }
 }

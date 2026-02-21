@@ -1,7 +1,6 @@
 //! Sensor modules for game detection, idle tracking, and system monitoring
 
 mod custom;
-mod memory;
 mod system;
 
 #[cfg(windows)]

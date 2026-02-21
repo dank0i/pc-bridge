@@ -335,8 +335,13 @@ impl ProcessWatcher {
         change_tx: broadcast::Sender<ProcessChangeNotification>,
         mut event_rx: mpsc::Receiver<ProcessEvent>,
     ) {
-        let mut reconcile_interval = tokio::time::interval(Duration::from_secs(60));
-        reconcile_interval.tick().await; // Skip immediate first tick
+        // Adaptive reconciliation: start at 60s, extend to 5min when WMI is healthy,
+        // shrink back to 60s if reconciliation detects drift (missed events).
+        const MIN_RECONCILE_SECS: u64 = 60;
+        const MAX_RECONCILE_SECS: u64 = 300;
+        let mut reconcile_secs = MIN_RECONCILE_SECS;
+        let mut consecutive_clean = 0u32;
+        let mut next_reconcile = tokio::time::Instant::now() + Duration::from_secs(reconcile_secs);
 
         loop {
             tokio::select! {
@@ -369,12 +374,23 @@ impl ProcessWatcher {
                     drop(guard);
                     let _ = change_tx.send(ProcessChangeNotification);
                 }
-                _ = reconcile_interval.tick() => {
+                _ = tokio::time::sleep_until(next_reconcile) => {
                     let pruned = Self::reconcile(state).await;
                     if pruned > 0 {
-                        debug!("Reconciliation pruned {} stale entries", pruned);
+                        debug!("Reconciliation pruned {} stale entries, resetting interval to {}s", pruned, MIN_RECONCILE_SECS);
+                        // Drift detected — shrink interval back to minimum
+                        reconcile_secs = MIN_RECONCILE_SECS;
+                        consecutive_clean = 0;
                         let _ = change_tx.send(ProcessChangeNotification);
+                    } else {
+                        consecutive_clean += 1;
+                        // After 3 consecutive clean reconciliations, double the interval
+                        if consecutive_clean >= 3 && reconcile_secs < MAX_RECONCILE_SECS {
+                            reconcile_secs = (reconcile_secs * 2).min(MAX_RECONCILE_SECS);
+                            debug!("WMI healthy, extending reconciliation to {}s", reconcile_secs);
+                        }
                     }
+                    next_reconcile = tokio::time::Instant::now() + Duration::from_secs(reconcile_secs);
                 }
             }
         }

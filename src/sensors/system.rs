@@ -248,7 +248,7 @@ fn start_window_focus_monitor(
                 wparam: WPARAM,
                 lparam: LPARAM,
             ) -> windows::Win32::Foundation::LRESULT {
-                DefWindowProcW(hwnd, msg, wparam, lparam)
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
 
             let wc = WNDCLASSEXW {
@@ -381,24 +381,26 @@ fn start_battery_monitor(
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
-        if msg == WM_POWERBROADCAST && wparam.0 == PBT_POWERSETTINGCHANGE {
-            let pbs = lparam.0 as *const PowerBroadcastSetting;
-            if !pbs.is_null() {
-                let setting = &*pbs;
-                if (setting.power_setting == GUID_BATTERY_PERCENTAGE_REMAINING
-                    || setting.power_setting == GUID_ACDC_POWER_SOURCE)
-                    && setting.data_length >= 1
-                {
-                    let event_tx_ptr =
-                        GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const mpsc::Sender<SystemEvent>;
-                    if !event_tx_ptr.is_null() {
-                        let event_tx = &*event_tx_ptr;
-                        let _ = event_tx.blocking_send(SystemEvent::BatteryChanged);
+        unsafe {
+            if msg == WM_POWERBROADCAST && wparam.0 == PBT_POWERSETTINGCHANGE {
+                let pbs = lparam.0 as *const PowerBroadcastSetting;
+                if !pbs.is_null() {
+                    let setting = &*pbs;
+                    if (setting.power_setting == GUID_BATTERY_PERCENTAGE_REMAINING
+                        || setting.power_setting == GUID_ACDC_POWER_SOURCE)
+                        && setting.data_length >= 1
+                    {
+                        let event_tx_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA)
+                            as *const mpsc::Sender<SystemEvent>;
+                        if !event_tx_ptr.is_null() {
+                            let event_tx = &*event_tx_ptr;
+                            let _ = event_tx.blocking_send(SystemEvent::BatteryChanged);
+                        }
                     }
                 }
             }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
         }
-        DefWindowProcW(hwnd, msg, wparam, lparam)
     }
 
     let (hwnd_tx, hwnd_rx) = tokio::sync::oneshot::channel::<isize>();

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 const GITHUB_OWNER: &str = "dank0i";
 const GITHUB_REPO: &str = "pc-bridge";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const USER_AGENT: &str = concat!("pc-bridge/", env!("CARGO_PKG_VERSION"));
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -59,7 +60,19 @@ pub async fn check_for_updates() {
 
                 // Find the exe asset
                 if let Some(asset) = release.assets.iter().find(|a| a.name.ends_with(".exe")) {
-                    match download_update(&asset.browser_download_url, &asset.name).await {
+                    // Look for a .sha256 sidecar (e.g. "pc-bridge.exe.sha256")
+                    let checksum_asset = release
+                        .assets
+                        .iter()
+                        .find(|a| a.name == format!("{}.sha256", asset.name));
+
+                    match download_update(
+                        &asset.browser_download_url,
+                        &asset.name,
+                        checksum_asset.map(|a| a.browser_download_url.as_str()),
+                    )
+                    .await
+                    {
                         Ok(update_path) => {
                             info!("Update downloaded, installing...");
                             install_and_restart(&update_path);
@@ -85,42 +98,30 @@ pub async fn check_for_updates() {
 }
 
 async fn fetch_latest_release() -> anyhow::Result<Option<GitHubRelease>> {
-    // Use /releases (not /releases/latest) since latest doesn't include pre-releases
     let url = format!(
         "https://api.github.com/repos/{}/{}/releases",
         GITHUB_OWNER, GITHUB_REPO
     );
 
-    let response = tokio::task::spawn_blocking(move || fetch_url_blocking(&url)).await??;
+    let response = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+        let body = ureq::get(&url)
+            .header("User-Agent", USER_AGENT)
+            .call()?
+            .body_mut()
+            .read_to_string()?;
+        Ok(body)
+    })
+    .await??;
 
     let releases: Vec<GitHubRelease> = serde_json::from_str(&response)?;
     Ok(releases.into_iter().next())
 }
 
-fn fetch_url_blocking(url: &str) -> anyhow::Result<String> {
-    use std::process::Command;
-
-    // Use curl instead of PowerShell (~10ms vs ~200-500ms startup)
-    #[allow(unused_mut)]
-    let mut cmd = Command::new("curl");
-    cmd.args(["-sS", "-L", "-A", "pc-agent", url]);
-
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-
-    let output = cmd.output()?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        anyhow::bail!(
-            "HTTP request failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-    }
-}
-
-async fn download_update(url: &str, filename: &str) -> anyhow::Result<PathBuf> {
+async fn download_update(
+    url: &str,
+    filename: &str,
+    checksum_url: Option<&str>,
+) -> anyhow::Result<PathBuf> {
     let exe_dir = std::env::current_exe()?
         .parent()
         .ok_or_else(|| anyhow::anyhow!("No parent dir"))?
@@ -129,32 +130,71 @@ async fn download_update(url: &str, filename: &str) -> anyhow::Result<PathBuf> {
     let update_path = exe_dir.join(format!("{}.update", filename));
 
     let url = url.to_string();
+    let checksum_url = checksum_url.map(String::from);
     let path = update_path.clone();
 
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-        #[allow(unused_mut)]
-        let mut cmd = std::process::Command::new("curl");
-        cmd.args(["-sS", "-L", "-A", "pc-agent", "-o"]);
-        cmd.arg(path.as_os_str());
-        cmd.arg(&url);
+        // Download the binary
+        let mut body = ureq::get(&url)
+            .header("User-Agent", USER_AGENT)
+            .call()?
+            .into_body();
 
-        #[cfg(windows)]
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        let mut file = std::fs::File::create(&path)?;
+        std::io::copy(&mut body.as_reader(), &mut file)?;
+        drop(file);
 
-        let output = cmd.output()?;
-
-        if !output.status.success() {
-            anyhow::bail!(
-                "Download failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+        // Verify SHA-256 if checksum asset is available
+        if let Some(checksum_url) = checksum_url {
+            verify_sha256(&path, &checksum_url)?;
+        } else {
+            warn!("No .sha256 checksum asset in release — skipping integrity check");
         }
+
         Ok(())
     })
     .await??;
 
     info!("Downloaded update to {:?}", update_path);
     Ok(update_path)
+}
+
+/// Download the `.sha256` sidecar and verify the file matches.
+fn verify_sha256(file_path: &Path, checksum_url: &str) -> anyhow::Result<()> {
+    use sha2::{Digest, Sha256};
+
+    // Fetch expected hash from the .sha256 file
+    let checksum_body = ureq::get(checksum_url)
+        .header("User-Agent", USER_AGENT)
+        .call()?
+        .body_mut()
+        .read_to_string()?;
+
+    // Format: "<hex_hash>  <filename>" or just "<hex_hash>"
+    let expected_hex = checksum_body
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Empty checksum file"))?
+        .to_lowercase();
+
+    // Compute actual hash
+    let mut hasher = Sha256::new();
+    let mut file = std::fs::File::open(file_path)?;
+    std::io::copy(&mut file, &mut hasher)?;
+    let actual_hex = format!("{:x}", hasher.finalize());
+
+    if actual_hex != expected_hex {
+        // Remove the corrupt download
+        let _ = std::fs::remove_file(file_path);
+        anyhow::bail!(
+            "SHA-256 mismatch: expected {}, got {} — download may be corrupted or tampered",
+            expected_hex,
+            actual_hex
+        );
+    }
+
+    info!("SHA-256 verified: {}", actual_hex);
+    Ok(())
 }
 
 fn is_newer_version(remote: &str, current: &str) -> bool {

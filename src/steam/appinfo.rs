@@ -32,6 +32,9 @@ pub struct AppInfoReader {
     file: File,
     index: HashMap<u32, AppInfoEntry>,
     version: u32,
+    /// Reusable read buffer — avoids allocating a fresh Vec per get_game_info() call.
+    /// Grows to max entry size and stays there for the lifetime of the reader.
+    read_buf: Vec<u8>,
 }
 
 impl AppInfoReader {
@@ -64,6 +67,7 @@ impl AppInfoReader {
             file,
             index,
             version,
+            read_buf: Vec::new(),
         })
     }
 
@@ -154,7 +158,7 @@ impl AppInfoReader {
     /// Get game name and executable for an app ID
     ///
     /// Returns: (name, executable)
-    /// Performance: ~0.05-0.1ms per lookup
+    /// Performance: ~0.05-0.1ms per lookup (reuses internal buffer)
     pub fn get_game_info(&mut self, app_id: u32) -> Option<(String, String)> {
         let entry = self.index.get(&app_id)?;
 
@@ -162,12 +166,13 @@ impl AppInfoReader {
         let data_offset = entry.offset + 8 + if self.version >= 29 { 44 } else { 40 };
         self.file.seek(SeekFrom::Start(data_offset)).ok()?;
 
-        // Read data
-        let mut data = vec![0u8; entry.size as usize];
-        self.file.read_exact(&mut data).ok()?;
+        // Reuse buffer — resize without shrinking (grows to max entry, stays there)
+        let size = entry.size as usize;
+        self.read_buf.resize(size, 0);
+        self.file.read_exact(&mut self.read_buf[..size]).ok()?;
 
         // Parse binary VDF to find name and executable
-        Self::parse_game_info(&data)
+        Self::parse_game_info(&self.read_buf[..size])
     }
 
     /// Parse binary VDF data to extract Windows launch executable

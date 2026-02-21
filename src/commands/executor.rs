@@ -164,26 +164,20 @@ impl CommandExecutor {
             return Ok(());
         }
 
-        // Get command string
-        let cmd_str = if let Some(predefined) = get_predefined_command(name) {
-            predefined.to_string()
-        } else if !payload.is_empty() {
-            // Launcher shortcuts (steam:, epic:, exe:, lnk:, close:) are always
-            // allowed - they're validated and safe, no raw shell execution.
-            if let Some(expanded) = expand_launcher_shortcut(payload) {
-                expanded
-            } else {
-                // Raw payload execution: only allowed if configured
-                let config = state.config.read().await;
-                if !config.allow_raw_commands {
-                    warn!("Raw command blocked (allow_raw_commands=false): {}", name);
-                    return Ok(());
-                }
-                payload.to_string()
+        // Resolve shell command from name/payload
+        let allow_raw = state.config.read().await.allow_raw_commands;
+        let cmd_str = match resolve_shell_command(name, payload, allow_raw) {
+            ShellResolution::Predefined(cmd)
+            | ShellResolution::LauncherShortcut(cmd)
+            | ShellResolution::RawCommand(cmd) => cmd,
+            ShellResolution::Blocked => {
+                warn!("Raw command blocked (allow_raw_commands=false): {}", name);
+                return Ok(());
             }
-        } else {
-            warn!("No command configured for: {}", name);
-            return Ok(());
+            ShellResolution::NotFound => {
+                warn!("No command configured for: {}", name);
+                return Ok(());
+            }
         };
 
         // Expand environment variables
@@ -228,6 +222,146 @@ impl CommandExecutor {
 
         Ok(())
     }
+}
+
+/// The full action resolved from a command name + payload.
+///
+/// Captures every branch of `execute_command`'s routing logic in a testable
+/// enum.  `execute_command` uses this internally, and tests can exercise the
+/// whole routing table without needing Windows APIs or an `AppState`.
+#[derive(Debug, PartialEq)]
+pub(crate) enum CommandAction {
+    /// Native side-effect handled inline (Wake, Lock, media keys, etc.)
+    Native(&'static str),
+    /// Show a toast notification with the given text
+    Notification(String),
+    /// Set volume to a specific level
+    VolumeSet(f32),
+    /// Mute/unmute (Some = explicit, None = toggle)
+    VolumeMute(Option<bool>),
+    /// Run a shell command via PowerShell
+    Shell(ShellResolution),
+    /// No action — unknown command with empty payload, or raw blocked
+    NoOp(&'static str),
+}
+
+/// Resolve the full routing for a command, purely from name + payload + config.
+///
+/// This is the exact same logic as `execute_command` but returns a value
+/// instead of performing side effects.  Custom commands are NOT checked here
+/// (they require async config access); in `execute_command` they're tried
+/// before falling through to `resolve_shell_command`.
+pub(crate) fn resolve_command_action(
+    name: &str,
+    payload: &str,
+    allow_raw_commands: bool,
+) -> CommandAction {
+    // Normalize payload (same as execute_command)
+    let payload = payload.trim();
+    let payload = if payload.eq_ignore_ascii_case("PRESS") {
+        ""
+    } else {
+        payload
+    };
+
+    // Native commands
+    match name {
+        "discord_leave_channel" => return CommandAction::Native("discord_leave_channel"),
+        "Wake" => return CommandAction::Native("Wake"),
+        "Lock" => return CommandAction::Native("Lock"),
+        "Hibernate" => return CommandAction::Native("Hibernate"),
+        "Restart" => return CommandAction::Native("Restart"),
+        "notification" => {
+            if payload.is_empty() {
+                return CommandAction::NoOp("notification_empty");
+            }
+            return CommandAction::Notification(payload.to_string());
+        }
+        "volume_set" => {
+            return match payload.parse::<f32>() {
+                Ok(level) => CommandAction::VolumeSet(level),
+                Err(_) => CommandAction::NoOp("volume_set_invalid"),
+            };
+        }
+        "volume_mute" => {
+            if payload.eq_ignore_ascii_case("press") || payload.is_empty() {
+                return CommandAction::VolumeMute(None);
+            }
+            let mute = payload.eq_ignore_ascii_case("true") || payload == "1";
+            return CommandAction::VolumeMute(Some(mute));
+        }
+        "volume_toggle_mute" => return CommandAction::VolumeMute(None),
+        "media_play_pause" => return CommandAction::Native("media_play_pause"),
+        "media_next" => return CommandAction::Native("media_next"),
+        "media_previous" => return CommandAction::Native("media_previous"),
+        "media_stop" => return CommandAction::Native("media_stop"),
+        _ => {}
+    }
+
+    // Shell resolution (predefined → launcher → raw → blocked → not found)
+    let resolution = resolve_shell_command(name, payload, allow_raw_commands);
+    match &resolution {
+        ShellResolution::Blocked => CommandAction::NoOp("blocked"),
+        ShellResolution::NotFound => CommandAction::NoOp("not_found"),
+        _ => CommandAction::Shell(resolution),
+    }
+}
+
+/// Result of resolving a command name + payload into a shell command.
+///
+/// Separated from `execute_command` for testability — the original bug where
+/// launcher shortcuts were blocked by `allow_raw_commands=false` was missed
+/// because this logic was inline and untestable without a real Windows env.
+#[derive(Debug, PartialEq)]
+pub(crate) enum ShellResolution {
+    /// Predefined command (Screensaver, Shutdown, sleep)
+    Predefined(String),
+    /// Validated launcher shortcut (steam:, exe:, close:, url:, etc.)
+    LauncherShortcut(String),
+    /// Raw payload, allowed by config
+    RawCommand(String),
+    /// Raw payload blocked (allow_raw_commands=false)
+    Blocked,
+    /// No command found for this name/payload combination
+    NotFound,
+}
+
+/// Resolve a command name + payload into a shell command string.
+///
+/// Called after native commands (Wake, Lock, etc.) and custom commands have
+/// been checked. This function is pure (no I/O) and fully unit-testable.
+///
+/// Order of resolution:
+/// 1. Predefined commands (matched by name)
+/// 2. Launcher shortcuts (matched by payload prefix like `steam:`, `close:`)
+/// 3. Raw payload (gated by `allow_raw_commands`)
+/// 4. Not found (empty payload, unknown name)
+pub(crate) fn resolve_shell_command(
+    name: &str,
+    payload: &str,
+    allow_raw_commands: bool,
+) -> ShellResolution {
+    // 1. Predefined commands always work regardless of allow_raw_commands
+    if let Some(predefined) = get_predefined_command(name) {
+        return ShellResolution::Predefined(predefined.to_string());
+    }
+
+    // 2. Payload-based resolution
+    if !payload.is_empty() {
+        // Launcher shortcuts are always allowed — they're validated and safe
+        if let Some(expanded) = expand_launcher_shortcut(payload) {
+            return ShellResolution::LauncherShortcut(expanded);
+        }
+
+        // 3. Raw payload: only if configured
+        if allow_raw_commands {
+            return ShellResolution::RawCommand(payload.to_string());
+        }
+        return ShellResolution::Blocked;
+    }
+
+    // 4. No payload and not a predefined command
+    ShellResolution::NotFound
 }
 
 /// Check if command needs "& " prefix for PowerShell
@@ -369,7 +503,273 @@ fn restart() {
 mod tests {
     use super::*;
 
-    // -- get_predefined_command tests --
+    // ===================================================================
+    // resolve_shell_command tests — the core routing logic
+    // ===================================================================
+    //
+    // These tests cover the exact bug scenario where launcher shortcuts
+    // (steam:, exe:, close:, url:) were incorrectly blocked by
+    // allow_raw_commands=false. The extraction of resolve_shell_command
+    // ensures this class of bug is caught by unit tests going forward.
+
+    // -- Predefined commands --
+
+    #[test]
+    fn test_resolve_predefined_screensaver() {
+        let result = resolve_shell_command("Screensaver", "", false);
+        assert!(
+            matches!(result, ShellResolution::Predefined(ref cmd) if cmd.contains("scrnsave.scr")),
+            "Screensaver should resolve to predefined command: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_predefined_shutdown() {
+        let result = resolve_shell_command("Shutdown", "", false);
+        assert_eq!(
+            result,
+            ShellResolution::Predefined("shutdown -s -t 0".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_predefined_sleep() {
+        let result = resolve_shell_command("sleep", "", false);
+        assert!(
+            matches!(result, ShellResolution::Predefined(ref cmd) if cmd.contains("SetSuspendState")),
+        );
+    }
+
+    #[test]
+    fn test_resolve_predefined_ignores_allow_raw_commands() {
+        // Predefined commands must work regardless of allow_raw_commands
+        for allow_raw in [false, true] {
+            let result = resolve_shell_command("Screensaver", "", allow_raw);
+            assert!(
+                matches!(result, ShellResolution::Predefined(_)),
+                "Predefined should resolve with allow_raw={allow_raw}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_predefined_with_payload_still_predefined() {
+        // If name matches predefined, the predefined wins even if payload exists
+        let result = resolve_shell_command("Screensaver", "some:payload", false);
+        assert!(matches!(result, ShellResolution::Predefined(_)));
+    }
+
+    // -- Launcher shortcuts (THE BUG SCENARIO) --
+
+    #[test]
+    fn test_resolve_steam_shortcut_allowed_when_raw_disabled() {
+        // THIS IS THE EXACT BUG: steam: shortcuts must work even with allow_raw_commands=false
+        let result = resolve_shell_command("Launch", "steam:730", false);
+        assert!(
+            matches!(result, ShellResolution::LauncherShortcut(ref cmd) if cmd.contains("steam://rungameid/730")),
+            "steam: shortcut must work with allow_raw_commands=false: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_close_shortcut_allowed_when_raw_disabled() {
+        // close: shortcuts must work even with allow_raw_commands=false
+        let result = resolve_shell_command("Launch", "close:notepad", false);
+        assert!(
+            matches!(result, ShellResolution::LauncherShortcut(ref cmd) if cmd.contains("CloseMainWindow")),
+            "close: shortcut must work with allow_raw_commands=false: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_kill_shortcut_allowed_when_raw_disabled() {
+        let result = resolve_shell_command("Launch", "kill:notepad", false);
+        assert!(
+            matches!(result, ShellResolution::LauncherShortcut(ref cmd) if cmd.contains("CloseMainWindow")),
+            "kill: shortcut must work with allow_raw_commands=false: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_exe_shortcut_allowed_when_raw_disabled() {
+        let result = resolve_shell_command("Launch", r"exe:C:\Games\Game.exe", false);
+        assert!(
+            matches!(result, ShellResolution::LauncherShortcut(ref cmd) if cmd.contains("Start-Process")),
+            "exe: shortcut must work with allow_raw_commands=false: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_lnk_shortcut_allowed_when_raw_disabled() {
+        let result = resolve_shell_command("Launch", r"lnk:C:\Users\user\Desktop\Game.lnk", false);
+        assert!(
+            matches!(result, ShellResolution::LauncherShortcut(ref cmd) if cmd.contains("Start-Process")),
+            "lnk: shortcut must work with allow_raw_commands=false: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_url_shortcut_allowed_when_raw_disabled() {
+        let result =
+            resolve_shell_command("Launch", "url:discord://discord.com/channels/1/2", false);
+        assert!(
+            matches!(result, ShellResolution::LauncherShortcut(ref cmd) if cmd.contains("Start-Process")),
+            "url: shortcut must work with allow_raw_commands=false: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_epic_shortcut_allowed_when_raw_disabled() {
+        let result = resolve_shell_command("Launch", "epic:Fortnite", false);
+        assert!(
+            matches!(result, ShellResolution::LauncherShortcut(ref cmd) if cmd.contains("epicgames")),
+            "epic: shortcut must work with allow_raw_commands=false: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_all_launcher_types_with_raw_enabled() {
+        // Sanity: all shortcuts also work when raw commands ARE allowed
+        let cases = vec![
+            ("steam:730", "steam://rungameid"),
+            ("close:notepad", "CloseMainWindow"),
+            (r"exe:C:\app.exe", "Start-Process"),
+            ("url:https://example.com", "Start-Process"),
+            ("epic:GameName", "epicgames"),
+        ];
+
+        for (payload, expected_substr) in cases {
+            let result = resolve_shell_command("Launch", payload, true);
+            assert!(
+                matches!(result, ShellResolution::LauncherShortcut(ref cmd) if cmd.contains(expected_substr)),
+                "Launcher shortcut should work with raw=true: payload={payload}, result={result:?}"
+            );
+        }
+    }
+
+    // -- Raw command blocking --
+
+    #[test]
+    fn test_resolve_raw_payload_blocked_when_disabled() {
+        let result = resolve_shell_command("Launch", "notepad.exe", false);
+        assert_eq!(result, ShellResolution::Blocked);
+    }
+
+    #[test]
+    fn test_resolve_raw_payload_allowed_when_enabled() {
+        let result = resolve_shell_command("Launch", "notepad.exe", true);
+        assert_eq!(
+            result,
+            ShellResolution::RawCommand("notepad.exe".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_raw_complex_payload_blocked() {
+        // A complex PowerShell command should be blocked without allow_raw_commands
+        let result = resolve_shell_command(
+            "Launch",
+            "Get-Process | Where-Object { $_.CPU -gt 100 }",
+            false,
+        );
+        assert_eq!(result, ShellResolution::Blocked);
+    }
+
+    #[test]
+    fn test_resolve_raw_complex_payload_allowed() {
+        let payload = "Get-Process | Where-Object { $_.CPU -gt 100 }";
+        let result = resolve_shell_command("Launch", payload, true);
+        assert_eq!(result, ShellResolution::RawCommand(payload.to_string()));
+    }
+
+    // -- Not found --
+
+    #[test]
+    fn test_resolve_unknown_name_empty_payload() {
+        let result = resolve_shell_command("unknown_command", "", false);
+        assert_eq!(result, ShellResolution::NotFound);
+    }
+
+    #[test]
+    fn test_resolve_unknown_name_empty_payload_raw_enabled() {
+        // Even with raw commands enabled, empty payload = not found
+        let result = resolve_shell_command("unknown_command", "", true);
+        assert_eq!(result, ShellResolution::NotFound);
+    }
+
+    // -- Native command names should NOT match predefined --
+
+    #[test]
+    fn test_resolve_native_commands_return_not_found() {
+        // Native commands (Wake, Lock, etc.) are handled before resolve_shell_command
+        // is called. If they somehow reach here, they should be NotFound.
+        let native_names = [
+            "Wake",
+            "Lock",
+            "Hibernate",
+            "Restart",
+            "volume_set",
+            "volume_mute",
+            "media_play_pause",
+            "media_next",
+            "media_previous",
+            "media_stop",
+        ];
+
+        for name in native_names {
+            let result = resolve_shell_command(name, "", false);
+            assert_eq!(
+                result,
+                ShellResolution::NotFound,
+                "{name} should be NotFound (handled natively before this function)"
+            );
+        }
+    }
+
+    // -- Edge cases --
+
+    #[test]
+    fn test_resolve_invalid_steam_id_falls_through_to_raw() {
+        // steam:abc is not valid (non-numeric), expand_launcher_shortcut returns None
+        // So it falls through to raw command check
+        let result = resolve_shell_command("Launch", "steam:abc", false);
+        assert_eq!(result, ShellResolution::Blocked);
+
+        let result = resolve_shell_command("Launch", "steam:abc", true);
+        assert_eq!(result, ShellResolution::RawCommand("steam:abc".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_url_without_scheme_falls_through() {
+        // url:not-a-url has no :// so expand_launcher_shortcut returns None
+        let result = resolve_shell_command("Launch", "url:not-a-url", false);
+        assert_eq!(result, ShellResolution::Blocked);
+    }
+
+    #[test]
+    fn test_resolve_shell_injection_in_url_falls_through() {
+        // Shell metacharacters are rejected by expand_launcher_shortcut
+        let result = resolve_shell_command("Launch", "url:discord://x;rm -rf /", false);
+        assert_eq!(result, ShellResolution::Blocked);
+    }
+
+    #[test]
+    fn test_resolve_close_with_injection_falls_through() {
+        // Process name with shell chars rejected by is_safe_identifier
+        let result = resolve_shell_command("Launch", "close:bad;name", false);
+        assert_eq!(result, ShellResolution::Blocked);
+    }
+
+    #[test]
+    fn test_resolve_empty_launcher_arg_falls_through() {
+        // steam: with no arg -> expand_launcher_shortcut returns None
+        let result = resolve_shell_command("Launch", "steam:", false);
+        assert_eq!(result, ShellResolution::Blocked);
+    }
+
+    // ===================================================================
+    // get_predefined_command tests
+    // ===================================================================
 
     #[test]
     fn test_predefined_screensaver() {
@@ -417,7 +817,9 @@ mod tests {
         assert!(get_predefined_command("nonexistent").is_none());
     }
 
-    // -- needs_ampersand tests --
+    // ===================================================================
+    // needs_ampersand tests
+    // ===================================================================
 
     #[test]
     fn test_needs_ampersand_plain_command() {
@@ -469,7 +871,9 @@ mod tests {
         assert!(!needs_ampersand("Invoke-WebRequest https://example.com"));
     }
 
-    // -- expand_env_vars tests --
+    // ===================================================================
+    // expand_env_vars tests
+    // ===================================================================
 
     #[test]
     fn test_expand_env_no_vars() {
@@ -513,5 +917,386 @@ mod tests {
     #[test]
     fn test_expand_env_empty_input() {
         assert_eq!(expand_env_vars(""), "");
+    }
+
+    // ===================================================================
+    // resolve_command_action tests — full end-to-end routing
+    // ===================================================================
+    //
+    // These test the COMPLETE command pipeline: name + payload → action.
+    // Covers native commands, shell resolution, payload normalisation,
+    // and the critical interaction between launcher shortcuts and
+    // allow_raw_commands.
+
+    // -- Native command routing --
+
+    #[test]
+    fn test_action_wake() {
+        assert_eq!(
+            resolve_command_action("Wake", "", false),
+            CommandAction::Native("Wake")
+        );
+    }
+
+    #[test]
+    fn test_action_lock() {
+        assert_eq!(
+            resolve_command_action("Lock", "", false),
+            CommandAction::Native("Lock")
+        );
+    }
+
+    #[test]
+    fn test_action_hibernate() {
+        assert_eq!(
+            resolve_command_action("Hibernate", "", false),
+            CommandAction::Native("Hibernate")
+        );
+    }
+
+    #[test]
+    fn test_action_restart() {
+        assert_eq!(
+            resolve_command_action("Restart", "", false),
+            CommandAction::Native("Restart")
+        );
+    }
+
+    #[test]
+    fn test_action_discord_leave() {
+        assert_eq!(
+            resolve_command_action("discord_leave_channel", "", false),
+            CommandAction::Native("discord_leave_channel")
+        );
+    }
+
+    #[test]
+    fn test_action_media_keys() {
+        for name in &[
+            "media_play_pause",
+            "media_next",
+            "media_previous",
+            "media_stop",
+        ] {
+            assert_eq!(
+                resolve_command_action(name, "PRESS", false),
+                CommandAction::Native(name),
+                "media key {name} should route to Native"
+            );
+        }
+    }
+
+    // -- Notification --
+
+    #[test]
+    fn test_action_notification_with_text() {
+        assert_eq!(
+            resolve_command_action("notification", "Hello world", false),
+            CommandAction::Notification("Hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn test_action_notification_empty_is_noop() {
+        assert_eq!(
+            resolve_command_action("notification", "", false),
+            CommandAction::NoOp("notification_empty")
+        );
+    }
+
+    #[test]
+    fn test_action_notification_press_is_noop() {
+        // "PRESS" normalises to empty
+        assert_eq!(
+            resolve_command_action("notification", "PRESS", false),
+            CommandAction::NoOp("notification_empty")
+        );
+    }
+
+    // -- Volume --
+
+    #[test]
+    fn test_action_volume_set() {
+        assert_eq!(
+            resolve_command_action("volume_set", "75", false),
+            CommandAction::VolumeSet(75.0)
+        );
+    }
+
+    #[test]
+    fn test_action_volume_set_decimal() {
+        assert_eq!(
+            resolve_command_action("volume_set", "33.5", false),
+            CommandAction::VolumeSet(33.5)
+        );
+    }
+
+    #[test]
+    fn test_action_volume_set_invalid() {
+        assert_eq!(
+            resolve_command_action("volume_set", "loud", false),
+            CommandAction::NoOp("volume_set_invalid")
+        );
+    }
+
+    #[test]
+    fn test_action_volume_set_press_is_invalid() {
+        // "PRESS" normalises to "" which fails to parse as f32
+        assert_eq!(
+            resolve_command_action("volume_set", "PRESS", false),
+            CommandAction::NoOp("volume_set_invalid")
+        );
+    }
+
+    #[test]
+    fn test_action_volume_mute_toggle() {
+        assert_eq!(
+            resolve_command_action("volume_mute", "", false),
+            CommandAction::VolumeMute(None)
+        );
+    }
+
+    #[test]
+    fn test_action_volume_mute_press_toggles() {
+        // "PRESS" normalises to "" → toggle
+        assert_eq!(
+            resolve_command_action("volume_mute", "PRESS", false),
+            CommandAction::VolumeMute(None)
+        );
+    }
+
+    #[test]
+    fn test_action_volume_mute_explicit_true() {
+        assert_eq!(
+            resolve_command_action("volume_mute", "true", false),
+            CommandAction::VolumeMute(Some(true))
+        );
+    }
+
+    #[test]
+    fn test_action_volume_mute_explicit_false() {
+        assert_eq!(
+            resolve_command_action("volume_mute", "false", false),
+            CommandAction::VolumeMute(Some(false))
+        );
+    }
+
+    #[test]
+    fn test_action_volume_mute_one() {
+        assert_eq!(
+            resolve_command_action("volume_mute", "1", false),
+            CommandAction::VolumeMute(Some(true))
+        );
+    }
+
+    #[test]
+    fn test_action_volume_toggle_mute() {
+        assert_eq!(
+            resolve_command_action("volume_toggle_mute", "", false),
+            CommandAction::VolumeMute(None)
+        );
+    }
+
+    // -- Shell commands through the full pipeline --
+
+    #[test]
+    fn test_action_screensaver_produces_shell() {
+        let action = resolve_command_action("Screensaver", "", false);
+        assert!(
+            matches!(
+                action,
+                CommandAction::Shell(ShellResolution::Predefined(ref cmd))
+                if cmd.contains("scrnsave.scr")
+            ),
+            "Screensaver should produce a shell command: {action:?}"
+        );
+    }
+
+    #[test]
+    fn test_action_shutdown_produces_shell() {
+        let action = resolve_command_action("Shutdown", "", false);
+        assert_eq!(
+            action,
+            CommandAction::Shell(ShellResolution::Predefined("shutdown -s -t 0".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_action_sleep_produces_shell() {
+        let action = resolve_command_action("sleep", "", false);
+        assert!(
+            matches!(
+                action,
+                CommandAction::Shell(ShellResolution::Predefined(ref cmd))
+                if cmd.contains("SetSuspendState")
+            ),
+            "sleep should produce shell command: {action:?}"
+        );
+    }
+
+    // -- THE CRITICAL BUG TEST --
+    // Launcher shortcuts (steam:, exe:, close:, url:) must work even
+    // when allow_raw_commands=false. This was the exact bug in v2.12.0.
+
+    #[test]
+    fn test_action_launch_steam_raw_disabled() {
+        let action = resolve_command_action("Launch", "steam:730", false);
+        assert!(
+            matches!(
+                action,
+                CommandAction::Shell(ShellResolution::LauncherShortcut(ref cmd))
+                if cmd.contains("steam://rungameid/730")
+            ),
+            "steam: launcher MUST work with raw=false: {action:?}"
+        );
+    }
+
+    #[test]
+    fn test_action_launch_close_raw_disabled() {
+        let action = resolve_command_action("Launch", "close:notepad", false);
+        assert!(
+            matches!(
+                action,
+                CommandAction::Shell(ShellResolution::LauncherShortcut(ref cmd))
+                if cmd.contains("CloseMainWindow")
+            ),
+            "close: launcher MUST work with raw=false: {action:?}"
+        );
+    }
+
+    #[test]
+    fn test_action_launch_exe_raw_disabled() {
+        let action = resolve_command_action("Launch", r"exe:C:\Games\Game.exe", false);
+        assert!(
+            matches!(
+                action,
+                CommandAction::Shell(ShellResolution::LauncherShortcut(ref cmd))
+                if cmd.contains("Start-Process")
+            ),
+            "exe: launcher MUST work with raw=false: {action:?}"
+        );
+    }
+
+    #[test]
+    fn test_action_launch_url_raw_disabled() {
+        let action =
+            resolve_command_action("Launch", "url:discord://discord.com/channels/123", false);
+        assert!(
+            matches!(
+                action,
+                CommandAction::Shell(ShellResolution::LauncherShortcut(ref cmd))
+                if cmd.contains("discord://")
+            ),
+            "url: launcher MUST work with raw=false: {action:?}"
+        );
+    }
+
+    #[test]
+    fn test_action_launch_epic_raw_disabled() {
+        let action = resolve_command_action("Launch", "epic:Fortnite", false);
+        assert!(
+            matches!(
+                action,
+                CommandAction::Shell(ShellResolution::LauncherShortcut(ref cmd))
+                if cmd.contains("epicgames")
+            ),
+            "epic: launcher MUST work with raw=false: {action:?}"
+        );
+    }
+
+    // -- Raw command blocking (full pipeline) --
+
+    #[test]
+    fn test_action_raw_command_blocked() {
+        assert_eq!(
+            resolve_command_action("Launch", "notepad.exe", false),
+            CommandAction::NoOp("blocked")
+        );
+    }
+
+    #[test]
+    fn test_action_raw_command_allowed() {
+        let action = resolve_command_action("Launch", "notepad.exe", true);
+        assert_eq!(
+            action,
+            CommandAction::Shell(ShellResolution::RawCommand("notepad.exe".to_string()))
+        );
+    }
+
+    // -- Unknown command --
+
+    #[test]
+    fn test_action_unknown_empty_payload() {
+        assert_eq!(
+            resolve_command_action("totally_unknown", "", false),
+            CommandAction::NoOp("not_found")
+        );
+    }
+
+    // -- PRESS normalisation --
+
+    #[test]
+    fn test_action_native_with_press_payload() {
+        // "PRESS" should be normalised to "" for native commands
+        assert_eq!(
+            resolve_command_action("Wake", "PRESS", false),
+            CommandAction::Native("Wake")
+        );
+    }
+
+    #[test]
+    fn test_action_press_normalisation_case_insensitive() {
+        assert_eq!(
+            resolve_command_action("Lock", "press", false),
+            CommandAction::Native("Lock")
+        );
+        assert_eq!(
+            resolve_command_action("Lock", "Press", false),
+            CommandAction::Native("Lock")
+        );
+    }
+
+    // -- Payload trimming --
+
+    #[test]
+    fn test_action_payload_whitespace_trimmed() {
+        let action = resolve_command_action("Launch", "  steam:730  ", false);
+        assert!(
+            matches!(
+                action,
+                CommandAction::Shell(ShellResolution::LauncherShortcut(ref cmd))
+                if cmd.contains("steam://rungameid/730")
+            ),
+            "Whitespace-padded payload should still resolve: {action:?}"
+        );
+    }
+
+    // -- Native commands ignore payload --
+
+    #[test]
+    fn test_action_wake_ignores_extra_payload() {
+        assert_eq!(
+            resolve_command_action("Wake", "some extra data", false),
+            CommandAction::Native("Wake")
+        );
+    }
+
+    // -- Shell injection through full pipeline --
+
+    #[test]
+    fn test_action_url_injection_blocked() {
+        // Shell metacharacters in URL → launcher returns None → blocked
+        assert_eq!(
+            resolve_command_action("Launch", "url:discord://x;rm -rf /", false),
+            CommandAction::NoOp("blocked")
+        );
+    }
+
+    #[test]
+    fn test_action_close_injection_blocked() {
+        assert_eq!(
+            resolve_command_action("Launch", "close:bad;name", false),
+            CommandAction::NoOp("blocked")
+        );
     }
 }

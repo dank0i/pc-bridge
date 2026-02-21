@@ -4,7 +4,6 @@ use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::interval;
 
 use crate::AppState;
 use crate::config::{CustomSensor, CustomSensorType};
@@ -70,19 +69,19 @@ impl CustomSensorManager {
             );
         }
 
-        // Track last poll time per sensor
-        let mut last_poll: HashMap<String, tokio::time::Instant> = HashMap::new();
-
-        // Use minimum sensor interval for tick (avoids waking every 1s)
-        let min_interval = sensors
-            .iter()
-            .map(|s| s.interval_seconds)
-            .min()
-            .unwrap_or(30)
-            .max(1);
-        let mut tick = interval(Duration::from_secs(min_interval));
+        // Track next-due time per sensor (start all as due now)
+        let now = tokio::time::Instant::now();
+        let mut next_due: HashMap<String, tokio::time::Instant> =
+            sensors.iter().map(|s| (s.name.clone(), now)).collect();
 
         loop {
+            // Find the earliest next-due sensor to calculate sleep time
+            let next_wake = next_due
+                .values()
+                .copied()
+                .min()
+                .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(30));
+
             tokio::select! {
                 biased;
                 _ = shutdown_rx.recv() => {
@@ -94,22 +93,24 @@ impl CustomSensorManager {
                     let config = self.state.config.read().await;
                     sensors.clone_from(&config.custom_sensors);
                     enabled = config.custom_sensors_enabled;
+                    // Reset schedules for new/changed sensors
+                    let reload_now = tokio::time::Instant::now();
+                    next_due.clear();
+                    for s in &sensors {
+                        next_due.insert(s.name.clone(), reload_now);
+                    }
                     info!("Custom sensors config reloaded ({} sensors, enabled={})", sensors.len(), enabled);
                 }
-                _ = tick.tick() => {
+                () = tokio::time::sleep_until(next_wake) => {
                     if !enabled {
                         continue;
                     }
 
-                    let now = tokio::time::Instant::now();
+                    let poll_now = tokio::time::Instant::now();
 
                     for sensor in &sensors {
-                        let should_poll = match last_poll.get(&sensor.name) {
-                            Some(last) => now.duration_since(*last) >= Duration::from_secs(sensor.interval_seconds),
-                            None => true,
-                        };
-
-                        if should_poll {
+                        let due = next_due.get(&sensor.name).copied().unwrap_or(poll_now);
+                        if poll_now >= due {
                             let value = self.poll_sensor(sensor).await;
 
                             // Publish to MQTT
@@ -117,7 +118,11 @@ impl CustomSensorManager {
                             self.state.mqtt.publish_sensor(&topic_name, &value).await;
                             debug!("Custom sensor '{}' = {}", sensor.name, value);
 
-                            last_poll.insert(sensor.name.clone(), now);
+                            // Schedule next poll at exact interval from due time
+                            next_due.insert(
+                                sensor.name.clone(),
+                                due + Duration::from_secs(sensor.interval_seconds.max(1)),
+                            );
                         }
                     }
                 }
