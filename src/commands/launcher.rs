@@ -5,6 +5,7 @@
 //! - epic:GAME       → launches Epic game by name  
 //! - exe:PATH        → launches executable
 //! - lnk:PATH        → launches shortcut
+//! - url:URL         → opens a protocol URL (discord://, https://, etc.)
 //! - close:NAME      → gracefully closes process
 
 use log::{info, warn};
@@ -69,6 +70,18 @@ pub fn expand_launcher_shortcut(cmd: &str) -> Option<String> {
             }
         }
 
+        "url" => {
+            if !is_safe_url(arg) {
+                warn!(
+                    "Invalid URL (must be protocol://path with safe characters): {}",
+                    arg
+                );
+                return None;
+            }
+            info!("Opening URL: {}", arg);
+            Some(format!(r#"Start-Process "{}""#, arg))
+        }
+
         "close" | "kill" => {
             let process_name = arg.trim_end_matches(".exe");
             if !is_safe_identifier(process_name) {
@@ -126,6 +139,25 @@ fn is_safe_path(s: &str) -> bool {
             .any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '"' | '\'' | '\n' | '\r'))
 }
 
+/// Check if string is a safe protocol URL (scheme://path, no shell metacharacters)
+fn is_safe_url(s: &str) -> bool {
+    // Must have a scheme (e.g., discord://, https://)
+    let Some((scheme, _rest)) = s.split_once("://") else {
+        return false;
+    };
+    // Scheme must be alphanumeric/dots/hyphens (e.g., "com.epicgames.launcher")
+    if scheme.is_empty()
+        || !scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '+')
+    {
+        return false;
+    }
+    // No shell metacharacters in the full URL
+    !s.chars()
+        .any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '\'' | '\n' | '\r'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +183,33 @@ mod tests {
         let result = expand_launcher_shortcut("close:notepad");
         assert!(result.is_some());
         assert!(result.unwrap().contains("CloseMainWindow"));
+    }
+
+    #[test]
+    fn test_url_shortcut_discord() {
+        let result = expand_launcher_shortcut("url:discord://discord.com/channels/123/456");
+        assert_eq!(
+            result,
+            Some(r#"Start-Process "discord://discord.com/channels/123/456""#.to_string())
+        );
+    }
+
+    #[test]
+    fn test_url_shortcut_https() {
+        let result = expand_launcher_shortcut("url:https://example.com");
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("Start-Process"));
+    }
+
+    #[test]
+    fn test_url_shortcut_rejects_no_scheme() {
+        assert_eq!(expand_launcher_shortcut("url:not-a-url"), None);
+    }
+
+    #[test]
+    fn test_url_shortcut_rejects_shell_injection() {
+        assert_eq!(expand_launcher_shortcut("url:discord://x;rm -rf /"), None);
+        assert_eq!(expand_launcher_shortcut("url:discord://x|evil"), None);
+        assert_eq!(expand_launcher_shortcut("url:discord://x&evil"), None);
     }
 }
