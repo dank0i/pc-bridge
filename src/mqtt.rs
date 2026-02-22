@@ -155,7 +155,15 @@ impl MqttClient {
             true,
         ));
 
-        let (client, mut eventloop) = AsyncClient::new(opts, 100);
+        // Buffer must hold ALL messages queued before the event loop starts draining.
+        // MQTT spec forbids sending packets before CONNACK, so nothing drains until
+        // after ConnAck. At that point, the buffer holds:
+        //   register_discovery()  → up to ~28 publishes (all features)
+        //   subscribe_commands()  → up to ~17 subscribes
+        //   ConnAck handler       → 1 availability publish + ~17 resubscribes
+        // Total worst case: ~63 messages. 128 gives headroom for custom entities
+        // registered shortly after new() returns. Too small = deadlock on current_thread.
+        let (client, mut eventloop) = AsyncClient::new(opts, 128);
 
         let device_name = config.device_name.clone();
         let device_id = config.device_id();
@@ -2068,5 +2076,598 @@ mod tests {
         };
         assert_eq!(cmd.name, "notification");
         assert!(cmd.payload.contains("Test"));
+    }
+
+    // =========================================================================
+    // Integration tests — in-process MQTT broker on current_thread runtime
+    // =========================================================================
+    //
+    // These tests spin up a minimal MQTT v4 broker over TCP and run the real
+    // MqttClient::new() flow. They catch:
+    //   - Buffer-too-small deadlocks (the exact bug that hit us in v2.14.0)
+    //   - Missing discovery registrations
+    //   - Incorrect subscribe topics
+    //   - Broken command routing
+    //
+    // The broker runs on the same current_thread runtime as production to
+    // reproduce single-threaded scheduling constraints.
+
+    mod integration {
+        use super::*;
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        /// Decode MQTT v4 variable-length remaining length.
+        /// Returns (value, bytes_consumed) or None if incomplete.
+        fn decode_remaining_length(bytes: &[u8]) -> Option<(usize, usize)> {
+            let mut value = 0usize;
+            let mut multiplier = 1;
+            for (i, &byte) in bytes.iter().enumerate() {
+                value += (byte as usize & 0x7F) * multiplier;
+                if byte & 0x80 == 0 {
+                    return Some((value, i + 1));
+                }
+                multiplier *= 128;
+                if i >= 3 {
+                    return None;
+                }
+            }
+            None
+        }
+
+        /// Encode MQTT v4 variable-length remaining length.
+        fn encode_remaining_length(buf: &mut Vec<u8>, mut len: usize) {
+            loop {
+                let mut byte = (len % 128) as u8;
+                len /= 128;
+                if len > 0 {
+                    byte |= 0x80;
+                }
+                buf.push(byte);
+                if len == 0 {
+                    break;
+                }
+            }
+        }
+
+        /// Build a QoS 0 PUBLISH packet for injecting commands into the client.
+        fn encode_publish_qos0(topic: &str, payload: &[u8]) -> Vec<u8> {
+            let topic_bytes = topic.as_bytes();
+            let remaining = 2 + topic_bytes.len() + payload.len();
+            let mut pkt = Vec::with_capacity(1 + 4 + remaining);
+            pkt.push(0x30); // PUBLISH, QoS 0, no retain
+            encode_remaining_length(&mut pkt, remaining);
+            pkt.extend_from_slice(&(topic_bytes.len() as u16).to_be_bytes());
+            pkt.extend_from_slice(topic_bytes);
+            pkt.extend_from_slice(payload);
+            pkt
+        }
+
+        /// State tracked by the mini-broker for test assertions.
+        struct BrokerState {
+            published: Vec<(String, Vec<u8>)>,
+            subscribed: Vec<String>,
+        }
+
+        /// Process complete MQTT packets from a byte buffer.
+        /// Returns response packets to send back to the client.
+        fn process_broker_packets(buf: &mut Vec<u8>, state: &Mutex<BrokerState>) -> Vec<Vec<u8>> {
+            let mut responses = Vec::new();
+
+            loop {
+                if buf.len() < 2 {
+                    break;
+                }
+
+                let packet_type = buf[0] >> 4;
+                let Some((remaining_len, len_bytes)) = decode_remaining_length(&buf[1..]) else {
+                    break;
+                };
+                let total = 1 + len_bytes + remaining_len;
+                if buf.len() < total {
+                    break;
+                }
+
+                let payload_start = 1 + len_bytes;
+
+                match packet_type {
+                    1 => {
+                        // CONNECT → CONNACK (session not present, accepted)
+                        responses.push(vec![0x20, 0x02, 0x00, 0x00]);
+                    }
+                    3 => {
+                        // PUBLISH — record topic + payload, send PUBACK if QoS > 0
+                        let flags = buf[0] & 0x0F;
+                        let qos = (flags >> 1) & 0x03;
+                        let mut pos = payload_start;
+
+                        let topic_len = u16::from_be_bytes([buf[pos], buf[pos + 1]]) as usize;
+                        pos += 2;
+                        let topic = String::from_utf8_lossy(&buf[pos..pos + topic_len]).to_string();
+                        pos += topic_len;
+
+                        if qos > 0 {
+                            let pkt_id = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
+                            pos += 2;
+                            responses.push(vec![0x40, 0x02, (pkt_id >> 8) as u8, pkt_id as u8]);
+                        }
+
+                        let payload = buf[pos..total].to_vec();
+                        state.lock().unwrap().published.push((topic, payload));
+                    }
+                    8 => {
+                        // SUBSCRIBE → SUBACK
+                        let mut pos = payload_start;
+                        let pkt_id = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
+                        pos += 2;
+
+                        let mut sub_count = 0u8;
+                        while pos < total {
+                            let topic_len = u16::from_be_bytes([buf[pos], buf[pos + 1]]) as usize;
+                            pos += 2;
+                            let topic =
+                                String::from_utf8_lossy(&buf[pos..pos + topic_len]).to_string();
+                            state.lock().unwrap().subscribed.push(topic);
+                            pos += topic_len;
+                            pos += 1; // QoS byte
+                            sub_count += 1;
+                        }
+
+                        let remaining = 2 + sub_count as usize;
+                        let mut suback = Vec::with_capacity(2 + remaining);
+                        suback.push(0x90);
+                        encode_remaining_length(&mut suback, remaining);
+                        suback.extend_from_slice(&pkt_id.to_be_bytes());
+                        for _ in 0..sub_count {
+                            suback.push(0x01); // QoS 1 granted
+                        }
+                        responses.push(suback);
+                    }
+                    12 => {
+                        // PINGREQ → PINGRESP
+                        responses.push(vec![0xD0, 0x00]);
+                    }
+                    _ => {} // Ignore PUBACK, DISCONNECT, etc.
+                }
+
+                buf.drain(..total);
+            }
+
+            responses
+        }
+
+        /// Start a mini MQTT v4 broker on a random port.
+        /// Returns (port, shared_state, inject_sender).
+        ///
+        /// The inject sender pushes PUBLISH packets to the client (simulates HA
+        /// sending button commands or notifications).
+        async fn start_mini_broker()
+        -> (u16, Arc<Mutex<BrokerState>>, mpsc::Sender<(String, String)>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let state = Arc::new(Mutex::new(BrokerState {
+                published: Vec::new(),
+                subscribed: Vec::new(),
+            }));
+            let (inject_tx, mut inject_rx) = mpsc::channel::<(String, String)>(16);
+
+            let broker_state = Arc::clone(&state);
+            tokio::spawn(async move {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = Vec::with_capacity(8192);
+                let mut read_buf = [0u8; 8192];
+
+                loop {
+                    tokio::select! {
+                        result = stream.read(&mut read_buf) => {
+                            let n = result.unwrap_or(0);
+                            if n == 0 { break; }
+                            buf.extend_from_slice(&read_buf[..n]);
+                            let responses = process_broker_packets(&mut buf, &broker_state);
+                            for resp in responses {
+                                if stream.write_all(&resp).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        Some((topic, payload)) = inject_rx.recv() => {
+                            let pkt = encode_publish_qos0(&topic, payload.as_bytes());
+                            if stream.write_all(&pkt).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
+
+            (port, state, inject_tx)
+        }
+
+        /// Create a Config pointing to the mini broker.
+        fn broker_config(device_name: &str, port: u16, features: FeatureConfig) -> Config {
+            Config {
+                device_name: device_name.to_string(),
+                mqtt: MqttConfig {
+                    broker: format!("tcp://127.0.0.1:{port}"),
+                    user: String::new(),
+                    pass: String::new(),
+                    client_id: None,
+                },
+                intervals: IntervalConfig::default(),
+                features,
+                games: HashMap::new(),
+                custom_sensors_enabled: false,
+                custom_commands_enabled: false,
+                custom_command_privileges_allowed: false,
+                allow_raw_commands: false,
+                custom_sensors: Vec::new(),
+                custom_commands: Vec::new(),
+            }
+        }
+
+        fn all_features() -> FeatureConfig {
+            FeatureConfig {
+                game_detection: true,
+                idle_tracking: true,
+                power_events: true,
+                notifications: true,
+                system_sensors: true,
+                audio_control: true,
+                steam_updates: true,
+                discord: true,
+            }
+        }
+
+        /// Wait for the broker to receive at least `count` published messages.
+        async fn wait_for_publishes(state: &Arc<Mutex<BrokerState>>, count: usize) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if state.lock().unwrap().published.len() >= count {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                let actual = state.lock().unwrap().published.len();
+                panic!("Timed out waiting for {count} publishes (got {actual})");
+            });
+        }
+
+        /// Wait for the broker to receive at least `count` subscribe requests.
+        async fn wait_for_subscribes(state: &Arc<Mutex<BrokerState>>, count: usize) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if state.lock().unwrap().subscribed.len() >= count {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                let actual = state.lock().unwrap().subscribed.len();
+                panic!("Timed out waiting for {count} subscribes (got {actual})");
+            });
+        }
+
+        // =================================================================
+        // Deadlock tests — the #1 reason these integration tests exist.
+        // current_thread matches production runtime. If the MQTT buffer is
+        // too small, MqttClient::new() blocks forever and the timeout fires.
+        // =================================================================
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn test_startup_no_deadlock_all_features() {
+            let (port, _state, _inject) = start_mini_broker().await;
+            let config = broker_config("test-pc", port, all_features());
+
+            let result =
+                tokio::time::timeout(Duration::from_secs(5), MqttClient::new(&config)).await;
+
+            assert!(
+                result.is_ok(),
+                "MqttClient::new() timed out — likely deadlocked (buffer too small)"
+            );
+            assert!(result.unwrap().is_ok());
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn test_startup_no_deadlock_minimal() {
+            let (port, _state, _inject) = start_mini_broker().await;
+            let config = broker_config("test-pc", port, FeatureConfig::default());
+
+            let result =
+                tokio::time::timeout(Duration::from_secs(5), MqttClient::new(&config)).await;
+
+            assert!(
+                result.is_ok(),
+                "MqttClient::new() deadlocked with minimal features"
+            );
+            assert!(result.unwrap().is_ok());
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn test_startup_no_deadlock_with_custom_entities() {
+            let (port, _state, _inject) = start_mini_broker().await;
+            let mut config = broker_config("test-pc", port, all_features());
+
+            // Add 15 custom commands to stress the buffer
+            // (custom commands are added to subscribe_topics, increasing ConnAck
+            // handler burden on top of register_discovery)
+            for i in 0..15 {
+                config.custom_commands.push(CustomCommand {
+                    name: format!("test_cmd_{i}"),
+                    command_type: crate::config::CustomCommandType::Shell,
+                    icon: None,
+                    admin: false,
+                    script: None,
+                    path: None,
+                    args: None,
+                    command: Some("echo test".to_string()),
+                });
+            }
+
+            let result =
+                tokio::time::timeout(Duration::from_secs(5), MqttClient::new(&config)).await;
+
+            assert!(
+                result.is_ok(),
+                "MqttClient::new() deadlocked with custom entities — buffer too small"
+            );
+            assert!(result.unwrap().is_ok());
+        }
+
+        // =================================================================
+        // Discovery registration tests
+        // =================================================================
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn test_discovery_registers_all_sensors() {
+            let (port, state, _inject) = start_mini_broker().await;
+            let config = broker_config("test-pc", port, all_features());
+
+            let (_mqtt, _cmd_rx) = MqttClient::new(&config).await.unwrap();
+
+            // All features: 12 sensors + 15 buttons + 1 notify = 28 discovery
+            // + 1 availability from ConnAck handler
+            wait_for_publishes(&state, 28).await;
+
+            let guard = state.lock().unwrap();
+            let topics: Vec<&str> = guard.published.iter().map(|(t, _)| t.as_str()).collect();
+
+            // Every sensor must have a config topic published
+            let expected_sensors = [
+                "runninggames",
+                "lastactive",
+                "screensaver",
+                "sleep_state",
+                "display",
+                "cpu_usage",
+                "memory_usage",
+                "battery_level",
+                "battery_charging",
+                "active_window",
+                "steam_updating",
+                "volume_level",
+            ];
+            for sensor in expected_sensors {
+                let t = format!("homeassistant/sensor/test-pc/{sensor}/config");
+                assert!(
+                    topics.contains(&t.as_str()),
+                    "Missing discovery for sensor: {sensor}"
+                );
+            }
+
+            // Every button must have a config topic published
+            let expected_buttons = [
+                "Launch",
+                "Screensaver",
+                "Wake",
+                "Shutdown",
+                "sleep",
+                "Lock",
+                "Hibernate",
+                "Restart",
+                "discord_join",
+                "discord_leave_channel",
+                "media_play_pause",
+                "media_next",
+                "media_previous",
+                "media_stop",
+                "volume_mute",
+            ];
+            for button in expected_buttons {
+                let t = format!("homeassistant/button/test-pc/{button}/config");
+                assert!(
+                    topics.contains(&t.as_str()),
+                    "Missing discovery for button: {button}"
+                );
+            }
+
+            // Notify service
+            assert!(
+                topics.contains(&"homeassistant/notify/test-pc/config"),
+                "Missing notify service discovery"
+            );
+        }
+
+        // =================================================================
+        // Subscribe topic tests
+        // =================================================================
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn test_subscribes_all_command_topics() {
+            let (port, state, _inject) = start_mini_broker().await;
+            let config = broker_config("test-pc", port, all_features());
+
+            let (_mqtt, _cmd_rx) = MqttClient::new(&config).await.unwrap();
+
+            // subscribe_commands + ConnAck handler both subscribe → 17 * 2 = 34
+            wait_for_subscribes(&state, 17).await;
+
+            let guard = state.lock().unwrap();
+            let topics: Vec<&str> = guard.subscribed.iter().map(|t| t.as_str()).collect();
+
+            let expected = [
+                "homeassistant/button/test-pc/Launch/action",
+                "homeassistant/button/test-pc/Screensaver/action",
+                "homeassistant/button/test-pc/Wake/action",
+                "homeassistant/button/test-pc/Shutdown/action",
+                "homeassistant/button/test-pc/sleep/action",
+                "homeassistant/button/test-pc/Lock/action",
+                "homeassistant/button/test-pc/Hibernate/action",
+                "homeassistant/button/test-pc/Restart/action",
+                "homeassistant/button/test-pc/discord_join/action",
+                "homeassistant/button/test-pc/discord_leave_channel/action",
+                "homeassistant/button/test-pc/media_play_pause/action",
+                "homeassistant/button/test-pc/media_next/action",
+                "homeassistant/button/test-pc/media_previous/action",
+                "homeassistant/button/test-pc/media_stop/action",
+                "homeassistant/button/test-pc/volume_set/action",
+                "homeassistant/button/test-pc/volume_mute/action",
+                "pc-bridge/notifications/test-pc",
+            ];
+            for topic in expected {
+                assert!(topics.contains(&topic), "Missing subscribe for: {topic}");
+            }
+        }
+
+        // =================================================================
+        // Command routing tests — verify end-to-end MQTT → CommandReceiver
+        // =================================================================
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn test_command_routing_button() {
+            let (port, state, inject) = start_mini_broker().await;
+            let features = FeatureConfig {
+                power_events: true,
+                ..FeatureConfig::default()
+            };
+            let config = broker_config("test-pc", port, features);
+
+            let (_mqtt, mut cmd_rx) = MqttClient::new(&config).await.unwrap();
+
+            // Wait for subscriptions before injecting
+            wait_for_subscribes(&state, 5).await;
+
+            // Broker sends a "sleep" button press to the client
+            inject
+                .send((
+                    "homeassistant/button/test-pc/sleep/action".to_string(),
+                    String::new(),
+                ))
+                .await
+                .unwrap();
+
+            let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+                .await
+                .expect("Timed out waiting for command")
+                .expect("Command channel closed");
+
+            assert_eq!(cmd.name, "sleep");
+            assert!(cmd.payload.is_empty());
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn test_command_routing_notification_with_payload() {
+            let (port, state, inject) = start_mini_broker().await;
+            let features = FeatureConfig {
+                notifications: true,
+                ..FeatureConfig::default()
+            };
+            let config = broker_config("test-pc", port, features);
+
+            let (_mqtt, mut cmd_rx) = MqttClient::new(&config).await.unwrap();
+
+            wait_for_subscribes(&state, 5).await;
+
+            let payload = r#"{"title":"Test","message":"Hello from HA"}"#;
+            inject
+                .send((
+                    "pc-bridge/notifications/test-pc".to_string(),
+                    payload.to_string(),
+                ))
+                .await
+                .unwrap();
+
+            let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+                .await
+                .expect("Timed out waiting for notification")
+                .expect("Command channel closed");
+
+            assert_eq!(cmd.name, "notification");
+            assert_eq!(cmd.payload, payload);
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn test_ignores_messages_for_wrong_device() {
+            let (port, state, inject) = start_mini_broker().await;
+            let features = FeatureConfig {
+                power_events: true,
+                ..FeatureConfig::default()
+            };
+            let config = broker_config("test-pc", port, features);
+
+            let (_mqtt, mut cmd_rx) = MqttClient::new(&config).await.unwrap();
+
+            wait_for_subscribes(&state, 5).await;
+
+            // Send a command for a DIFFERENT device
+            inject
+                .send((
+                    "homeassistant/button/other-pc/sleep/action".to_string(),
+                    String::new(),
+                ))
+                .await
+                .unwrap();
+
+            // Then send one for OUR device so we know the event loop processed both
+            inject
+                .send((
+                    "homeassistant/button/test-pc/Shutdown/action".to_string(),
+                    String::new(),
+                ))
+                .await
+                .unwrap();
+
+            let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+                .await
+                .expect("Timed out")
+                .expect("Channel closed");
+
+            // Should get "Shutdown" (ours), not "sleep" (wrong device)
+            assert_eq!(cmd.name, "Shutdown");
+        }
+
+        // =================================================================
+        // Availability / LWT tests
+        // =================================================================
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn test_availability_published_on_connect() {
+            let (port, state, _inject) = start_mini_broker().await;
+            let config = broker_config("test-pc", port, FeatureConfig::default());
+
+            let (_mqtt, _cmd_rx) = MqttClient::new(&config).await.unwrap();
+
+            // Wait for at least one publish (availability or discovery)
+            wait_for_publishes(&state, 1).await;
+            // Give ConnAck handler time to run
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
+            let guard = state.lock().unwrap();
+            let availability = guard
+                .published
+                .iter()
+                .find(|(t, _)| t == "homeassistant/sensor/test-pc/availability");
+
+            assert!(availability.is_some(), "Availability not published");
+            let payload = String::from_utf8_lossy(&availability.unwrap().1).to_string();
+            assert_eq!(payload, "online");
+        }
     }
 }

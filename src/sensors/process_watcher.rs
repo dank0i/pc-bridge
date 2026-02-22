@@ -126,8 +126,8 @@ impl ProcessWatcher {
     /// Create a new process watcher with initial enumeration
     pub async fn new() -> Self {
         let state = Arc::new(RwLock::new(ProcessState::new()));
-        // Channel capacity of 16 is enough - subscribers just need to know "something changed"
-        let (change_tx, _) = broadcast::channel(16);
+        // Channel capacity of 256 is generous - subscribers just need to know "something changed"
+        let (change_tx, _) = broadcast::channel(256);
 
         // Initial enumeration using ToolHelp (fast, reliable)
         Self::initial_enumeration(&state).await;
@@ -155,6 +155,10 @@ impl ProcessWatcher {
     pub fn start_background(&self, shutdown_rx: broadcast::Receiver<()>, poll_interval: Duration) {
         let state = Arc::clone(&self.state);
         let change_tx = self.change_tx.clone();
+        // WMI fires events for ALL processes system-wide. Burst scenarios (compilers,
+        // installers) can spawn dozens of processes in rapid succession. The WMI thread
+        // uses blocking_send(), so a full channel stalls it rather than dropping events.
+        // 256 slots avoids stalling the WMI thread during heavy bursts.
         let (event_tx, event_rx) = mpsc::channel::<ProcessEvent>(256);
 
         // Try WMI events first, fall back to polling

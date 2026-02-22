@@ -227,8 +227,9 @@ impl CustomSensorManager {
             None => return "error: no file_path".to_string(),
         };
 
-        match tokio::fs::read_to_string(&path).await {
-            Ok(contents) => contents.trim().to_string(),
+        match tokio::task::spawn_blocking(move || std::fs::read_to_string(&path)).await {
+            Ok(Ok(contents)) => contents.trim().to_string(),
+            Ok(Err(e)) => format!("error: {}", e),
             Err(e) => format!("error: {}", e),
         }
     }

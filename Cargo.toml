@@ -1,6 +1,6 @@
 [package]
 name = "pc-bridge"
-version = "2.13.1"
+version = "3.0.0"
 edition = "2024"
 authors = ["dank0i"]
 description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
@@ -17,10 +17,10 @@ default = []
 
 [dependencies]
 # Async runtime
-tokio = { version = "1", features = ["rt", "macros", "sync", "time", "signal", "fs"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "signal"] }
 
-# MQTT
-rumqttc = "0.24"
+# MQTT (TLS disabled - local broker uses plain TCP)
+rumqttc = { version = "0.25", default-features = false }
 
 # Serialization
 serde = { version = "1", features = ["derive", "rc"] }
@@ -37,10 +37,11 @@ notify = "6"
 
 # Logging
 log = "0.4"
-env_logger = "0.11"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
 
 # Native HTTP client (replaces curl subprocess for updates)
-ureq = "3"
+# Uses OS TLS (Schannel on Windows, Security.framework on macOS) - zero binary cost
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
 
 # SHA-256 for update integrity verification
 sha2 = "0.10"
@@ -91,6 +92,8 @@ windows-service = "0.7"
 tempfile = "3"
 tokio-test = "0.4"
 pretty_assertions = "1"
+# Integration tests need TCP for in-process MQTT broker
+tokio = { version = "1", features = ["net", "io-util"] }
 
 [profile.release]
 opt-level = "z"
