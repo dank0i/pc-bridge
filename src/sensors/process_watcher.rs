@@ -342,6 +342,7 @@ impl ProcessWatcher {
         let mut reconcile_secs = MIN_RECONCILE_SECS;
         let mut consecutive_clean = 0u32;
         let mut next_reconcile = tokio::time::Instant::now() + Duration::from_secs(reconcile_secs);
+        let mut wmi_alive = true;
 
         loop {
             tokio::select! {
@@ -350,34 +351,47 @@ impl ProcessWatcher {
                     debug!("Event processor shutting down");
                     break;
                 }
-                Some(event) = event_rx.recv() => {
-                    // Batch: drain all pending events before acquiring write lock
-                    let mut batch = Vec::new();
-                    batch.push(event);
-                    while let Ok(e) = event_rx.try_recv() {
-                        batch.push(e);
-                    }
+                result = event_rx.recv(), if wmi_alive => {
+                    match result {
+                        Some(event) => {
+                            // Batch: drain all pending events before acquiring write lock
+                            let mut batch = Vec::new();
+                            batch.push(event);
+                            while let Ok(e) = event_rx.try_recv() {
+                                batch.push(e);
+                            }
 
-                    let mut guard = state.write().await;
-                    for ev in batch {
-                        match ev {
-                            ProcessEvent::Created(name, pid) => {
-                                debug!("Process started: {} (PID {})", name, pid);
-                                guard.add_process(name, pid);
+                            let mut guard = state.write().await;
+                            for ev in batch {
+                                match ev {
+                                    ProcessEvent::Created(name, pid) => {
+                                        debug!("Process started: {} (PID {})", name, pid);
+                                        guard.add_process(name, pid);
+                                    }
+                                    ProcessEvent::Deleted(pid) => {
+                                        debug!("Process ended: PID {}", pid);
+                                        guard.remove_process(pid);
+                                    }
+                                }
                             }
-                            ProcessEvent::Deleted(pid) => {
-                                debug!("Process ended: PID {}", pid);
-                                guard.remove_process(pid);
-                            }
+                            drop(guard);
+                            let _ = change_tx.send(ProcessChangeNotification);
+                        }
+                        None => {
+                            // WMI event channel closed — thread died due to error.
+                            // Continue with reconciliation-only mode at minimum interval.
+                            warn!("WMI event stream lost, falling back to reconciliation every {}s", MIN_RECONCILE_SECS);
+                            wmi_alive = false;
+                            reconcile_secs = MIN_RECONCILE_SECS;
+                            consecutive_clean = 0;
+                            next_reconcile = tokio::time::Instant::now() + Duration::from_secs(reconcile_secs);
                         }
                     }
-                    drop(guard);
-                    let _ = change_tx.send(ProcessChangeNotification);
                 }
                 _ = tokio::time::sleep_until(next_reconcile) => {
-                    let pruned = Self::reconcile(state).await;
-                    if pruned > 0 {
-                        debug!("Reconciliation pruned {} stale entries, resetting interval to {}s", pruned, MIN_RECONCILE_SECS);
+                    let (pruned, added) = Self::reconcile(state).await;
+                    if pruned > 0 || added > 0 {
+                        debug!("Reconciliation: pruned {} stale, added {} new entries, resetting interval to {}s", pruned, added, MIN_RECONCILE_SECS);
                         // Drift detected — shrink interval back to minimum
                         reconcile_secs = MIN_RECONCILE_SECS;
                         consecutive_clean = 0;
@@ -397,11 +411,12 @@ impl ProcessWatcher {
     }
 
     /// Periodic reconciliation: full process snapshot to catch missed WMI events
-    /// and prune stale PID entries (prevents memory leak from WMI event loss)
-    async fn reconcile(state: &Arc<RwLock<ProcessState>>) -> usize {
+    /// and prune stale PID entries (prevents memory leak from WMI event loss).
+    /// Returns (pruned, added) counts for callers to decide whether to notify.
+    async fn reconcile(state: &Arc<RwLock<ProcessState>>) -> (usize, usize) {
         let snapshot = match tokio::task::spawn_blocking(Self::snapshot_all_processes).await {
             Ok(s) => s,
-            Err(_) => return 0,
+            Err(_) => return (0, 0),
         };
 
         let mut guard = state.write().await;
@@ -420,9 +435,11 @@ impl ProcessWatcher {
         }
 
         // Add PIDs running but not tracked
+        let mut added = 0usize;
         for (pid, name) in snapshot {
             if !guard.pid_to_name.contains_key(&pid) {
                 guard.add_process(name, pid);
+                added += 1;
             }
         }
 
@@ -431,7 +448,7 @@ impl ProcessWatcher {
         guard.name_counts.shrink_to(256);
         guard.names.shrink_to(256);
 
-        pruned
+        (pruned, added)
     }
 
     /// Take a full process snapshot using ToolHelp API
@@ -469,7 +486,8 @@ impl ProcessWatcher {
         pids
     }
 
-    /// Polling fallback if WMI events aren't available
+    /// Polling fallback if WMI events aren't available.
+    /// Uses reconcile (snapshot + diff) to both add new and remove stale processes.
     async fn run_polling_fallback(
         state: &Arc<RwLock<ProcessState>>,
         mut shutdown_rx: broadcast::Receiver<()>,
@@ -487,9 +505,11 @@ impl ProcessWatcher {
                     break;
                 }
                 _ = interval.tick() => {
-                    Self::initial_enumeration(&state).await;
-                    // Notify subscribers after each poll
-                    let _ = change_tx.send(ProcessChangeNotification);
+                    let (pruned, added) = Self::reconcile(&state).await;
+                    // Notify subscribers after each poll if anything changed
+                    if pruned > 0 || added > 0 {
+                        let _ = change_tx.send(ProcessChangeNotification);
+                    }
                 }
             }
         }

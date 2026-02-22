@@ -47,6 +47,7 @@ impl GameSensor {
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
         let mut process_rx = self.state.process_watcher.subscribe();
         let mut config_rx = self.state.config_generation.subscribe();
+        let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
 
         // Build cached patterns once at startup
         let config = self.state.config.read().await;
@@ -82,6 +83,13 @@ impl GameSensor {
                         last_game_id = game_id;
                     }
                 }
+                // MQTT reconnected — force republish retained state
+                Ok(()) = reconnect_rx.recv() => {
+                    info!("Game sensor: MQTT reconnected, republishing current state");
+                    let (game_id, display_name) = self.detect_game(&cached).await;
+                    self.publish_game(&game_id, &display_name).await;
+                    last_game_id = game_id;
+                }
                 result = process_rx.recv() => {
                     match result {
                         Ok(_notification) => {
@@ -114,7 +122,7 @@ impl GameSensor {
     async fn publish_game(&self, game_ids: &str, display_names: &str) {
         self.state
             .mqtt
-            .publish_sensor("runninggames", game_ids)
+            .publish_sensor_retained("runninggames", game_ids)
             .await;
         let attrs = serde_json::json!({
             "display_name": display_names
@@ -144,11 +152,14 @@ fn match_games_in_processes(
     let mut seen_ids: HashSet<&str> = HashSet::with_capacity(cached.patterns.len());
 
     for proc_name in process_names {
-        // Strip .exe suffix without allocating (case-insensitive)
-        let base_name = proc_name
-            .strip_suffix(".exe")
-            .or_else(|| proc_name.strip_suffix(".EXE"))
-            .unwrap_or(proc_name);
+        // Strip .exe suffix without allocating (case-insensitive for all casings)
+        let base_name = if proc_name.len() > 4
+            && proc_name.as_bytes()[proc_name.len() - 4..].eq_ignore_ascii_case(b".exe")
+        {
+            &proc_name[..proc_name.len() - 4]
+        } else {
+            proc_name
+        };
 
         for (pattern_lower, game_id, display_name) in &cached.patterns {
             // Case-insensitive comparison without allocation
@@ -271,6 +282,18 @@ mod tests {
         let processes = procs(&["BF2042.EXE"]);
         let (ids, names) = match_games_in_processes(&processes, &cached);
         assert_eq!(ids, "battlefield_6");
+    }
+
+    #[test]
+    fn test_single_game_mixed_case_exe_suffix() {
+        // Mixed case .Exe / .eXe should also be stripped
+        let cached = make_patterns(&[("bf2042", GameConfig::Simple("battlefield_6".into()))]);
+        for suffix in &[".Exe", ".eXE", ".eXe", ".exE"] {
+            let name = format!("BF2042{}", suffix);
+            let processes = procs(&[&name]);
+            let (ids, _) = match_games_in_processes(&processes, &cached);
+            assert_eq!(ids, "battlefield_6", "failed for suffix {}", suffix);
+        }
     }
 
     #[test]

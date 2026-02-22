@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::config::{Config, CustomCommand, CustomSensor, FeatureConfig};
 
@@ -30,6 +30,9 @@ pub struct MqttClient {
     cached_topics: CachedTopics,
     /// Fix #5: Shared device info to avoid repeated cloning
     device: Arc<HADevice>,
+    /// Broadcast channel notifying subscribers when MQTT reconnects (ConnAck).
+    /// Sensors listen on this to republish retained state after broker/network recovery.
+    reconnect_tx: broadcast::Sender<()>,
 }
 
 /// Pre-computed topic strings for frequently published sensors
@@ -158,6 +161,10 @@ impl MqttClient {
         let device_id = config.device_id();
         let (command_tx, command_rx) = mpsc::channel(50);
 
+        // Reconnect notification channel — sensors subscribe to republish state
+        let (reconnect_tx, _) = broadcast::channel(4);
+        let reconnect_tx_for_eventloop = reconnect_tx.clone();
+
         // Build list of topics to subscribe to (for reconnection)
         let subscribe_topics = Self::build_subscribe_topics(&config.device_name, config);
 
@@ -226,6 +233,9 @@ impl MqttClient {
                             }
                         }
                         info!("Resubscribed to {} command topics", subscribe_topics.len());
+
+                        // Notify sensors to republish their retained state
+                        let _ = reconnect_tx_for_eventloop.send(());
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -254,6 +264,7 @@ impl MqttClient {
             device_id,
             cached_topics,
             device,
+            reconnect_tx,
         };
 
         let cmd_rx = CommandReceiver { rx: command_rx };
@@ -938,6 +949,13 @@ impl MqttClient {
         info!("Subscribed to {} command topics", topics.len());
     }
 
+    /// Subscribe to MQTT reconnect notifications.
+    /// Fires after every ConnAck (initial connect + reconnects).
+    /// Sensors use this to republish retained state that may have been lost.
+    pub fn subscribe_reconnect(&self) -> broadcast::Receiver<()> {
+        self.reconnect_tx.subscribe()
+    }
+
     /// Publish a sensor value (non-retained)
     pub async fn publish_sensor(&self, name: &str, value: &str) {
         let topic = self.sensor_topic(name);
@@ -1037,6 +1055,7 @@ mod tests {
         let opts = MqttOptions::new("test-client", "localhost", 1883);
         let (client, _eventloop) = AsyncClient::new(opts, 10);
         let device_id = device_name.replace('-', "_");
+        let (reconnect_tx, _) = broadcast::channel(4);
         MqttClient {
             client,
             device_name: device_name.to_string(),
@@ -1049,6 +1068,7 @@ mod tests {
                 manufacturer: "dank0i".to_string(),
                 sw_version: VERSION.to_string(),
             }),
+            reconnect_tx,
         }
     }
 

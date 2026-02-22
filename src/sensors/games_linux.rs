@@ -4,7 +4,7 @@
 //! 1. Steam auto-discovery (if Steam installed) - uses process name → app_id lookup
 //! 2. Manual config `games` map (pattern → game_id)
 
-use log::{debug, error};
+use log::{debug, error, info};
 use std::fs;
 use std::sync::Arc;
 use tokio::time::{Duration, interval};
@@ -51,6 +51,7 @@ impl GameSensor {
         let mut tick = interval(Duration::from_secs(interval_secs));
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
         let mut config_rx = self.state.config_generation.subscribe();
+        let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
 
         // Publish initial state
         let (game_id, display_name) = self.detect_game(&cached).await;
@@ -78,6 +79,13 @@ impl GameSensor {
                         last_game_id = game_id;
                     }
                 }
+                // MQTT reconnected — force republish retained state
+                Ok(()) = reconnect_rx.recv() => {
+                    info!("Game sensor: MQTT reconnected, republishing current state");
+                    let (game_id, display_name) = self.detect_game(&cached).await;
+                    self.publish_game(&game_id, &display_name).await;
+                    last_game_id = game_id;
+                }
                 _ = tick.tick() => {
                     let (game_id, display_name) = self.detect_game(&cached).await;
                     if game_id != last_game_id {
@@ -92,7 +100,7 @@ impl GameSensor {
     async fn publish_game(&self, game_ids: &str, display_names: &str) {
         self.state
             .mqtt
-            .publish_sensor("runninggames", game_ids)
+            .publish_sensor_retained("runninggames", game_ids)
             .await;
         let attrs = serde_json::json!({
             "display_name": display_names
