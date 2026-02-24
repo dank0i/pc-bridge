@@ -201,19 +201,25 @@ impl CustomSensorManager {
         };
 
         let result = tokio::task::spawn_blocking(move || {
-            use std::process::Command;
-            let output = Command::new("pgrep").args(["-x", &process]).output();
-
-            match output {
-                Ok(out) => {
-                    if out.status.success() {
-                        "on"
-                    } else {
-                        "off"
-                    }
+            // Scan /proc/*/comm directly — no subprocess spawn needed
+            let Ok(entries) = std::fs::read_dir("/proc") else {
+                return "error";
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(name_str) = name.to_str() else {
+                    continue;
+                };
+                if !name_str.bytes().all(|b| b.is_ascii_digit()) {
+                    continue;
                 }
-                Err(_) => "error",
+                if let Ok(comm) = std::fs::read_to_string(entry.path().join("comm"))
+                    && comm.trim().eq_ignore_ascii_case(&process)
+                {
+                    return "on";
+                }
             }
+            "off"
         })
         .await;
 

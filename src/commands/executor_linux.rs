@@ -114,37 +114,37 @@ impl CommandExecutor {
             }
             "volume_set" => {
                 if let Ok(level) = payload.parse::<f32>() {
-                    audio::set_volume(level);
+                    tokio::task::spawn_blocking(move || audio::set_volume(level));
                 }
                 return Ok(());
             }
             "volume_mute" => {
                 if payload.eq_ignore_ascii_case("press") || payload.is_empty() {
-                    audio::toggle_mute();
+                    tokio::task::spawn_blocking(audio::toggle_mute);
                 } else {
                     let mute = payload.eq_ignore_ascii_case("true") || payload == "1";
-                    audio::set_mute(mute);
+                    tokio::task::spawn_blocking(move || audio::set_mute(mute));
                 }
                 return Ok(());
             }
             "volume_toggle_mute" => {
-                audio::toggle_mute();
+                tokio::task::spawn_blocking(audio::toggle_mute);
                 return Ok(());
             }
             "media_play_pause" => {
-                audio::send_media_key(MediaKey::PlayPause);
+                tokio::task::spawn_blocking(|| audio::send_media_key(MediaKey::PlayPause));
                 return Ok(());
             }
             "media_next" => {
-                audio::send_media_key(MediaKey::Next);
+                tokio::task::spawn_blocking(|| audio::send_media_key(MediaKey::Next));
                 return Ok(());
             }
             "media_previous" => {
-                audio::send_media_key(MediaKey::Previous);
+                tokio::task::spawn_blocking(|| audio::send_media_key(MediaKey::Previous));
                 return Ok(());
             }
             "media_stop" => {
-                audio::send_media_key(MediaKey::Stop);
+                tokio::task::spawn_blocking(|| audio::send_media_key(MediaKey::Stop));
                 return Ok(());
             }
             _ => {}

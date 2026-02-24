@@ -1,6 +1,6 @@
 //! Idle time sensor for Linux - tracks last user input
 
-use log::{debug, warn};
+use log::{debug, info, warn};
 use std::process::Command;
 use std::sync::Arc;
 use time::OffsetDateTime;
@@ -25,11 +25,13 @@ impl IdleSensor {
 
     pub async fn run(self) {
         let config = self.state.config.read().await;
-        let interval_secs = config.intervals.last_active.max(1); // Prevent panic on 0
+        let mut interval_secs = config.intervals.last_active.max(1); // Prevent panic on 0
         drop(config);
 
         let mut tick = interval(Duration::from_secs(interval_secs));
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
+        let mut config_rx = self.state.config_generation.subscribe();
+        let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
 
         // Track previous value to skip duplicate publishes
         let mut prev_last_active;
@@ -49,6 +51,24 @@ impl IdleSensor {
                 _ = shutdown_rx.recv() => {
                     debug!("Idle sensor shutting down");
                     break;
+                }
+                // Config hot-reload: update poll interval
+                Ok(()) = config_rx.recv() => {
+                    let config = self.state.config.read().await;
+                    let new_interval = config.intervals.last_active.max(1);
+                    if new_interval != interval_secs {
+                        interval_secs = new_interval;
+                        tick = interval(Duration::from_secs(interval_secs));
+                        info!("Idle sensor: interval changed to {}s", interval_secs);
+                    }
+                }
+                // MQTT reconnected: force republish current state
+                Ok(()) = reconnect_rx.recv() => {
+                    info!("Idle sensor: MQTT reconnected, republishing current state");
+                    let last_active = self.get_last_active_time().await;
+                    let formatted = format_rfc3339(last_active);
+                    self.state.mqtt.publish_sensor("lastactive", &formatted).await;
+                    prev_last_active = formatted;
                 }
                 _ = tick.tick() => {
                     let last_active = self.get_last_active_time().await;

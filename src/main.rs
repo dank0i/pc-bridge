@@ -9,6 +9,11 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+// Use mimalloc as the global allocator — reduces RSS by 10-20% vs system allocator
+// through better fragmentation handling in long-running single-threaded workloads.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod audio;
 mod commands;
 mod config;
@@ -329,12 +334,16 @@ async fn main() -> anyhow::Result<()> {
 
 /// Log which features are enabled
 fn log_enabled_features(config: &Config) {
-    let features = &config.features;
+    let f = &config.features;
     let count = [
-        features.game_detection,
-        features.idle_tracking,
-        features.power_events,
-        features.notifications,
+        f.game_detection,
+        f.idle_tracking,
+        f.power_events,
+        f.notifications,
+        f.system_sensors,
+        f.audio_control,
+        f.steam_updates,
+        f.discord,
         config.custom_sensors_enabled,
         config.custom_commands_enabled,
     ]

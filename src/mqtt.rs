@@ -145,6 +145,13 @@ impl MqttClient {
         opts.set_keep_alive(Duration::from_secs(30));
         opts.set_clean_session(false); // Preserve subscriptions
 
+        // Cap incoming packet size — our MQTT payloads are small (commands, sensor values).
+        // Default is unbounded; 16 KB prevents bloated memory from unexpected large messages.
+        opts.set_max_packet_size(16_384, 16_384);
+
+        // Limit in-flight QoS 1 messages — local broker doesn't need aggressive pipelining
+        opts.set_inflight(5);
+
         // Reconnection is handled by rumqttc automatically - just keep polling
 
         // Last Will and Testament (LWT)

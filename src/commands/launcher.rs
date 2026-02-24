@@ -102,18 +102,18 @@ pub fn expand_launcher_shortcut(cmd: &str) -> Option<String> {
 /// Split executable path from arguments
 /// e.g., "C:\Games\Game.exe -fullscreen" → ("C:\Games\Game.exe", Some("-fullscreen"))
 fn split_exe_args(arg: &str) -> (&str, Option<&str>) {
-    let lower = arg.to_lowercase();
-
-    if let Some(idx) = lower.find(".exe ") {
-        let path = &arg[..idx + 4];
-        let args = arg[idx + 5..].trim();
-        return (path, if args.is_empty() { None } else { Some(args) });
-    }
-
-    if let Some(idx) = lower.find(".lnk ") {
-        let path = &arg[..idx + 4];
-        let args = arg[idx + 5..].trim();
-        return (path, if args.is_empty() { None } else { Some(args) });
+    // Zero-alloc: byte-level sliding window for case-insensitive ".exe " / ".lnk " search
+    for pattern in [b".exe " as &[u8], b".lnk "] {
+        if let Some(pos) = arg
+            .as_bytes()
+            .windows(pattern.len())
+            .position(|w| w.eq_ignore_ascii_case(pattern))
+        {
+            let ext_len = pattern.len() - 1; // exclude trailing space
+            let path = &arg[..pos + ext_len];
+            let args = arg[pos + pattern.len()..].trim();
+            return (path, if args.is_empty() { None } else { Some(args) });
+        }
     }
 
     (arg, None)

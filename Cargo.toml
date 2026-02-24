@@ -1,6 +1,6 @@
 [package]
 name = "pc-bridge"
-version = "3.1.0"
+version = "3.2.0"
 edition = "2024"
 authors = ["dank0i"]
 description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
@@ -30,7 +30,7 @@ serde_json = "1"
 anyhow = "1"
 
 # Date/time
-time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
 
 # File watching for config hot-reload
 notify = "6"
@@ -45,6 +45,9 @@ ureq = { version = "3", default-features = false, features = ["native-tls"] }
 
 # SHA-256 for update integrity verification
 sha2 = "0.10"
+
+# Memory-efficient allocator — reduces fragmentation and RSS on long-running processes
+mimalloc = { version = "0.1", default-features = false }
 
 
 
