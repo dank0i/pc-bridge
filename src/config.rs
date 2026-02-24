@@ -256,8 +256,6 @@ pub struct IntervalConfig {
     pub game_sensor: u64,
     #[serde(default = "default_last_active")]
     pub last_active: u64,
-    #[serde(default = "default_availability")]
-    pub availability: u64,
     #[serde(default = "default_steam_check")]
     pub steam_check: u64,
     #[serde(default = "default_system_sensors")]
@@ -269,7 +267,6 @@ impl Default for IntervalConfig {
         Self {
             game_sensor: default_game_sensor(),
             last_active: default_last_active(),
-            availability: default_availability(),
             steam_check: default_steam_check(),
             system_sensors: default_system_sensors(),
         }
@@ -281,9 +278,6 @@ fn default_game_sensor() -> u64 {
 }
 fn default_last_active() -> u64 {
     10
-}
-fn default_availability() -> u64 {
-    30
 }
 fn default_steam_check() -> u64 {
     30
@@ -344,10 +338,6 @@ impl Config {
             }
             if intervals.get("last_active").and_then(|v| v.as_u64()) == Some(0) {
                 intervals.insert("last_active".to_string(), serde_json::json!(10));
-                migrated = true;
-            }
-            if intervals.get("availability").and_then(|v| v.as_u64()) == Some(0) {
-                intervals.insert("availability".to_string(), serde_json::json!(30));
                 migrated = true;
             }
             if intervals.get("system_sensors").and_then(|v| v.as_u64()) == Some(0) {
@@ -1118,7 +1108,6 @@ mod tests {
         let intervals = IntervalConfig::default();
         assert_eq!(intervals.game_sensor, 5);
         assert_eq!(intervals.last_active, 10);
-        assert_eq!(intervals.availability, 30);
         assert_eq!(intervals.steam_check, 30);
     }
 

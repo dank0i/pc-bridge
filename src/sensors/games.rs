@@ -180,12 +180,6 @@ fn match_games_in_processes(
     }
 }
 
-/// Build the attributes JSON for `runninggames` sensor.
-/// Separated for testability.
-fn game_attributes_json(display_names: &str) -> serde_json::Value {
-    serde_json::json!({ "display_name": display_names })
-}
-
 /// Case-insensitive ASCII prefix check without allocation
 fn starts_with_ignore_ascii_case(haystack: &str, prefix: &str) -> bool {
     haystack.len() >= prefix.len()
@@ -388,36 +382,6 @@ mod tests {
         assert_eq!(ids, "helldivers_2");
     }
 
-    // ===== Attributes JSON content =====
-
-    #[test]
-    fn test_game_attributes_json_single_game() {
-        let attrs = game_attributes_json("Battlefield 6");
-        assert_eq!(attrs["display_name"], "Battlefield 6");
-        // Verify it's a flat object with exactly one key
-        let obj = attrs.as_object().unwrap();
-        assert_eq!(obj.len(), 1);
-    }
-
-    #[test]
-    fn test_game_attributes_json_no_game() {
-        let attrs = game_attributes_json("None");
-        assert_eq!(attrs["display_name"], "None");
-    }
-
-    #[test]
-    fn test_game_attributes_json_multiple_games() {
-        let attrs = game_attributes_json("Battlefield 6,HELLDIVERS 2");
-        assert_eq!(attrs["display_name"], "Battlefield 6,HELLDIVERS 2");
-    }
-
-    #[test]
-    fn test_game_attributes_json_serializes_correctly() {
-        let attrs = game_attributes_json("Battlefield 6");
-        let json_str = serde_json::to_string(&attrs).unwrap();
-        assert_eq!(json_str, r#"{"display_name":"Battlefield 6"}"#);
-    }
-
     // ===== CachedGamePatterns::build =====
 
     #[test]
@@ -447,7 +411,7 @@ mod tests {
         assert_eq!(ids, "none");
 
         // Verify exact attributes JSON payload
-        let attrs = game_attributes_json(&names);
+        let attrs = serde_json::json!({ "display_name": names });
         let json_bytes = serde_json::to_vec(&attrs).unwrap();
         assert_eq!(
             String::from_utf8(json_bytes).unwrap(),
@@ -474,7 +438,7 @@ mod tests {
         assert_eq!(ids, "battlefield_6");
 
         // This is what goes to: homeassistant/sensor/{device}/runninggames/attributes
-        let attrs = game_attributes_json(&names);
+        let attrs = serde_json::json!({ "display_name": names });
         assert_eq!(
             serde_json::to_string(&attrs).unwrap(),
             r#"{"display_name":"Battlefield 2042"}"#

@@ -737,11 +737,6 @@ impl SteamGameDiscovery {
 
         self.games.get(&key)
     }
-
-    /// Get all discovered games
-    pub fn all_games(&self) -> impl Iterator<Item = &SteamGame> {
-        self.games.values()
-    }
 }
 
 #[cfg(test)]

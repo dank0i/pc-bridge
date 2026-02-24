@@ -4,12 +4,11 @@ use log::{debug, error, info, warn};
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 
-use crate::config::{Config, CustomCommand, CustomSensor, FeatureConfig};
+use crate::config::{Config, CustomCommand, CustomSensor};
 
 const DISCOVERY_PREFIX: &str = "homeassistant";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -58,7 +57,6 @@ impl CachedTopics {
             "volume_level",
             "cpu_usage",
             "memory_usage",
-            "gpu_temp",
             "steam_updating",
             "bridge_health",
         ];
@@ -175,7 +173,7 @@ impl MqttClient {
 
         let device_name = config.device_name.clone();
         let device_id = config.device_id();
-        let (command_tx, command_rx) = mpsc::channel(50);
+        let (command_tx, command_rx) = mpsc::channel(16);
 
         // Reconnect notification channel — sensors subscribe to republish state
         let (reconnect_tx, _) = broadcast::channel(4);
@@ -475,9 +473,11 @@ impl MqttClient {
         }
 
         // Command buttons - gated by their respective features
-        // Game launch button
+        // Game launch button + Steam refresh
         if config.features.game_detection {
             self.register_button(device, "Launch", "mdi:rocket-launch")
+                .await;
+            self.register_button(device, "RefreshSteamGames", "mdi:steam")
                 .await;
         }
 
@@ -493,7 +493,7 @@ impl MqttClient {
         if config.features.power_events {
             for (name, icon) in [
                 ("Shutdown", "mdi:power"),
-                ("sleep", "mdi:power-sleep"),
+                ("Sleep", "mdi:power-sleep"),
                 ("Lock", "mdi:lock"),
                 ("Hibernate", "mdi:power-sleep"),
                 ("Restart", "mdi:restart"),
@@ -503,22 +503,24 @@ impl MqttClient {
         }
 
         // Discord buttons
-        // discord_join: Expects a launcher payload like \"url:discord://discord.com/channels/...\"\n        //   which gets expanded by expand_launcher_shortcut() and opened via Start-Process.\n        // discord_leave_channel: Simulates Ctrl+F6 keypress (Discord's default disconnect hotkey).
+        // DiscordJoin: Expects a launcher payload like "url:discord://discord.com/channels/..."
+        //   which gets expanded by expand_launcher_shortcut() and opened via Start-Process.
+        // DiscordLeaveChannel: Simulates Ctrl+F6 keypress (Discord's default disconnect hotkey).
         if config.features.discord {
-            self.register_button(device, "discord_join", "mdi:discord")
+            self.register_button(device, "DiscordJoin", "mdi:discord")
                 .await;
-            self.register_button(device, "discord_leave_channel", "mdi:phone-hangup")
+            self.register_button(device, "DiscordLeaveChannel", "mdi:phone-hangup")
                 .await;
         }
 
         // Audio control commands (media keys) if enabled
         if config.features.audio_control {
             for (name, icon) in [
-                ("media_play_pause", "mdi:play-pause"),
-                ("media_next", "mdi:skip-next"),
-                ("media_previous", "mdi:skip-previous"),
-                ("media_stop", "mdi:stop"),
-                ("volume_mute", "mdi:volume-mute"),
+                ("MediaPlayPause", "mdi:play-pause"),
+                ("MediaNext", "mdi:skip-next"),
+                ("MediaPrevious", "mdi:skip-previous"),
+                ("MediaStop", "mdi:stop"),
+                ("VolumeMute", "mdi:volume-mute"),
             ] {
                 self.register_button(device, name, icon).await;
             }
@@ -540,140 +542,7 @@ impl MqttClient {
             self.register_notify_service(device).await;
         }
 
-        // Unregister entities for features that changed from enabled → disabled
-        self.unregister_changed_features(config).await;
-
         info!("Registered HA discovery");
-    }
-
-    /// Unregister discovery only for features that changed from enabled to disabled
-    async fn unregister_changed_features(&self, config: &Config) {
-        let state_path = Self::feature_state_path();
-        let previous = Self::load_feature_state(&state_path);
-
-        // Only unregister if feature was previously enabled and is now disabled
-        if previous.game_detection && !config.features.game_detection {
-            info!("Feature disabled: game_detection - removing entities");
-            self.unregister_entity("sensor", "runninggames").await;
-            self.unregister_entity("button", "Launch").await;
-        }
-
-        if previous.idle_tracking && !config.features.idle_tracking {
-            info!("Feature disabled: idle_tracking - removing entities");
-            self.unregister_entity("sensor", "lastactive").await;
-            self.unregister_entity("sensor", "screensaver").await;
-            self.unregister_entity("button", "Screensaver").await;
-            self.unregister_entity("button", "Wake").await;
-        }
-
-        if previous.power_events && !config.features.power_events {
-            info!("Feature disabled: power_events - removing entities");
-            self.unregister_entity("sensor", "sleep_state").await;
-            self.unregister_entity("sensor", "display").await;
-            for name in ["Shutdown", "sleep", "Lock", "Hibernate", "Restart"] {
-                self.unregister_entity("button", name).await;
-            }
-        }
-
-        if previous.system_sensors && !config.features.system_sensors {
-            info!("Feature disabled: system_sensors - removing entities");
-            for name in [
-                "cpu_usage",
-                "memory_usage",
-                "battery_level",
-                "battery_charging",
-                "active_window",
-                "bridge_health",
-            ] {
-                self.unregister_entity("sensor", name).await;
-            }
-        }
-
-        if previous.audio_control && !config.features.audio_control {
-            info!("Feature disabled: audio_control - removing entities");
-            for name in [
-                "media_play_pause",
-                "media_next",
-                "media_previous",
-                "media_stop",
-                "volume_mute",
-            ] {
-                self.unregister_entity("button", name).await;
-            }
-            self.unregister_entity("number", "volume_set").await;
-        }
-
-        if previous.notifications && !config.features.notifications {
-            info!("Feature disabled: notifications - removing entity");
-            self.unregister_entity("notify", &self.device_name).await;
-        }
-
-        if previous.discord && !config.features.discord {
-            info!("Feature disabled: discord - removing entities");
-            self.unregister_entity("button", "discord_join").await;
-            self.unregister_entity("button", "discord_leave_channel")
-                .await;
-        }
-
-        // Save current feature state for next comparison
-        Self::save_feature_state(&state_path, &config.features);
-    }
-
-    /// Get path to feature state file (in app data dir, next to steam_cache.bin)
-    fn feature_state_path() -> PathBuf {
-        #[cfg(windows)]
-        {
-            std::env::var("LOCALAPPDATA")
-                .map(|p| {
-                    PathBuf::from(p)
-                        .join("pc-bridge")
-                        .join("feature_state.json")
-                })
-                .unwrap_or_else(|_| PathBuf::from("feature_state.json"))
-        }
-        #[cfg(unix)]
-        {
-            std::env::var("HOME")
-                .map(|p| {
-                    PathBuf::from(p)
-                        .join(".cache")
-                        .join("pc-bridge")
-                        .join("feature_state.json")
-                })
-                .unwrap_or_else(|_| PathBuf::from("feature_state.json"))
-        }
-    }
-
-    /// Load previous feature state (defaults to all false if not found)
-    fn load_feature_state(path: &PathBuf) -> FeatureConfig {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
-    }
-
-    /// Save current feature state
-    fn save_feature_state(path: &PathBuf, features: &FeatureConfig) {
-        // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(json) = serde_json::to_string(features) {
-            let _ = std::fs::write(path, json);
-        }
-    }
-
-    /// Unregister a single entity by publishing empty payload to its config topic
-    async fn unregister_entity(&self, entity_type: &str, name: &str) {
-        let topic = format!(
-            "{}/{}/{}/{}/config",
-            DISCOVERY_PREFIX, entity_type, self.device_name, name
-        );
-        // Empty payload removes the entity from HA
-        let _ = self
-            .client
-            .publish(&topic, QoS::AtLeastOnce, true, "")
-            .await;
     }
 
     /// Helper to register a single sensor
@@ -922,12 +791,12 @@ impl MqttClient {
             "Screensaver",
             "Wake",
             "Shutdown",
-            "sleep",
+            "Sleep",
             "Lock",
             "Hibernate",
             "Restart",
-            "discord_join",
-            "discord_leave_channel",
+            "DiscordJoin",
+            "DiscordLeaveChannel",
         ];
 
         for cmd in commands {
@@ -940,12 +809,12 @@ impl MqttClient {
         // Audio commands if enabled
         if config.features.audio_control {
             let audio_commands = [
-                "media_play_pause",
-                "media_next",
-                "media_previous",
-                "media_stop",
-                "volume_set",
-                "volume_mute",
+                "MediaPlayPause",
+                "MediaNext",
+                "MediaPrevious",
+                "MediaStop",
+                "VolumeSet",
+                "VolumeMute",
             ];
             for cmd in audio_commands {
                 topics.push(format!(
@@ -1081,7 +950,7 @@ impl CommandReceiver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{IntervalConfig, MqttConfig};
+    use crate::config::{FeatureConfig, IntervalConfig, MqttConfig};
 
     /// Create a minimal MqttClient for testing topics and payload generation.
     /// The event loop is never polled — no real broker connection is made.
@@ -1163,8 +1032,8 @@ mod tests {
     fn test_command_topic() {
         let mqtt = test_client("dank0i-pc");
         assert_eq!(
-            mqtt.command_topic("sleep"),
-            "homeassistant/button/dank0i-pc/sleep/action"
+            mqtt.command_topic("Sleep"),
+            "homeassistant/button/dank0i-pc/Sleep/action"
         );
     }
 
@@ -1190,7 +1059,6 @@ mod tests {
             "volume_level",
             "cpu_usage",
             "memory_usage",
-            "gpu_temp",
             "steam_updating",
             "bridge_health",
         ];
@@ -1265,10 +1133,10 @@ mod tests {
     fn test_button_discovery_payload_json_structure() {
         let mqtt = test_client("dank0i-pc");
         let payload = HADiscoveryPayload {
-            name: "sleep".to_string(),
-            unique_id: format!("{}_sleep", mqtt.device_id),
+            name: "Sleep".to_string(),
+            unique_id: format!("{}_Sleep", mqtt.device_id),
             state_topic: None,
-            command_topic: Some(mqtt.command_topic("sleep")),
+            command_topic: Some(mqtt.command_topic("Sleep")),
             availability_topic: Some(mqtt.availability_topic()),
             json_attributes_topic: None,
             device: Arc::clone(&mqtt.device),
@@ -1280,11 +1148,11 @@ mod tests {
         let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
 
         // Required fields for HA button discovery
-        assert_eq!(json["name"], "sleep");
-        assert_eq!(json["unique_id"], "dank0i_pc_sleep");
+        assert_eq!(json["name"], "Sleep");
+        assert_eq!(json["unique_id"], "dank0i_pc_Sleep");
         assert_eq!(
             json["command_topic"],
-            "homeassistant/button/dank0i-pc/sleep/action"
+            "homeassistant/button/dank0i-pc/Sleep/action"
         );
         assert_eq!(
             json["availability_topic"],
@@ -1571,7 +1439,7 @@ mod tests {
 
         // Default features: power_events=true, all others false
         // Core commands are always subscribed
-        assert!(topics.contains(&"homeassistant/button/test-pc/sleep/action".to_string()));
+        assert!(topics.contains(&"homeassistant/button/test-pc/Sleep/action".to_string()));
         assert!(topics.contains(&"homeassistant/button/test-pc/Shutdown/action".to_string()));
         assert!(topics.contains(&"homeassistant/button/test-pc/Lock/action".to_string()));
         assert!(topics.contains(&"homeassistant/button/test-pc/Restart/action".to_string()));
@@ -1579,9 +1447,9 @@ mod tests {
 
         // Audio commands should NOT be present (audio_control=false)
         assert!(
-            !topics.contains(&"homeassistant/button/test-pc/media_play_pause/action".to_string())
+            !topics.contains(&"homeassistant/button/test-pc/MediaPlayPause/action".to_string())
         );
-        assert!(!topics.contains(&"homeassistant/button/test-pc/volume_mute/action".to_string()));
+        assert!(!topics.contains(&"homeassistant/button/test-pc/VolumeMute/action".to_string()));
 
         // Notifications should NOT be present
         assert!(!topics.contains(&"pc-bridge/notifications/test-pc".to_string()));
@@ -1597,14 +1465,12 @@ mod tests {
         let topics = MqttClient::build_subscribe_topics("test-pc", &config);
 
         // Audio commands should be present
-        assert!(
-            topics.contains(&"homeassistant/button/test-pc/media_play_pause/action".to_string())
-        );
-        assert!(topics.contains(&"homeassistant/button/test-pc/media_next/action".to_string()));
-        assert!(topics.contains(&"homeassistant/button/test-pc/media_previous/action".to_string()));
-        assert!(topics.contains(&"homeassistant/button/test-pc/media_stop/action".to_string()));
-        assert!(topics.contains(&"homeassistant/button/test-pc/volume_set/action".to_string()));
-        assert!(topics.contains(&"homeassistant/button/test-pc/volume_mute/action".to_string()));
+        assert!(topics.contains(&"homeassistant/button/test-pc/MediaPlayPause/action".to_string()));
+        assert!(topics.contains(&"homeassistant/button/test-pc/MediaNext/action".to_string()));
+        assert!(topics.contains(&"homeassistant/button/test-pc/MediaPrevious/action".to_string()));
+        assert!(topics.contains(&"homeassistant/button/test-pc/MediaStop/action".to_string()));
+        assert!(topics.contains(&"homeassistant/button/test-pc/VolumeSet/action".to_string()));
+        assert!(topics.contains(&"homeassistant/button/test-pc/VolumeMute/action".to_string()));
     }
 
     #[test]
@@ -1691,30 +1557,15 @@ mod tests {
     fn test_button_config_topic_format() {
         let topic = format!(
             "{}/button/{}/{}/config",
-            DISCOVERY_PREFIX, "dank0i-pc", "sleep"
+            DISCOVERY_PREFIX, "dank0i-pc", "Sleep"
         );
-        assert_eq!(topic, "homeassistant/button/dank0i-pc/sleep/config");
+        assert_eq!(topic, "homeassistant/button/dank0i-pc/Sleep/config");
     }
 
     #[test]
     fn test_notify_config_topic_format() {
         let topic = format!("{}/notify/{}/config", DISCOVERY_PREFIX, "dank0i-pc");
         assert_eq!(topic, "homeassistant/notify/dank0i-pc/config");
-    }
-
-    // ===== Unregister entity topic test =====
-
-    #[test]
-    fn test_unregister_entity_topic_format() {
-        // When unregistering, we publish empty payload to: homeassistant/{type}/{device}/{name}/config
-        let entity_type = "sensor";
-        let device_name = "dank0i-pc";
-        let name = "cpu_usage";
-        let topic = format!(
-            "{}/{}/{}/{}/config",
-            DISCOVERY_PREFIX, entity_type, device_name, name
-        );
-        assert_eq!(topic, "homeassistant/sensor/dank0i-pc/cpu_usage/config");
     }
 
     // ===== Payload round-trip test =====
@@ -1864,15 +1715,15 @@ mod tests {
     #[test]
     fn test_custom_sensor_topic_prefix() {
         // Custom sensors publish to "custom_{name}" topic
-        let sensor_name = "gpu_temp";
+        let sensor_name = "my_sensor";
         let topic_name = format!("custom_{sensor_name}");
-        assert_eq!(topic_name, "custom_gpu_temp");
+        assert_eq!(topic_name, "custom_my_sensor");
 
         let mqtt = test_client("dank0i-pc");
         let topic = mqtt.sensor_topic(&topic_name);
         assert_eq!(
             topic,
-            "homeassistant/sensor/dank0i-pc/custom_gpu_temp/state"
+            "homeassistant/sensor/dank0i-pc/custom_my_sensor/state"
         );
     }
 
@@ -2036,16 +1887,16 @@ mod tests {
 
     #[test]
     fn test_extract_command_name_button() {
-        let topic = "homeassistant/button/dank0i-pc/sleep/action";
+        let topic = "homeassistant/button/dank0i-pc/Sleep/action";
         let cmd = MqttClient::extract_command_name(topic, "dank0i-pc");
-        assert_eq!(cmd, Some("sleep".to_string()));
+        assert_eq!(cmd, Some("Sleep".to_string()));
     }
 
     #[test]
     fn test_extract_command_name_shutdown() {
-        let topic = "homeassistant/button/dank0i-pc/shutdown/action";
+        let topic = "homeassistant/button/dank0i-pc/Shutdown/action";
         let cmd = MqttClient::extract_command_name(topic, "dank0i-pc");
-        assert_eq!(cmd, Some("shutdown".to_string()));
+        assert_eq!(cmd, Some("Shutdown".to_string()));
     }
 
     #[test]
@@ -2089,10 +1940,10 @@ mod tests {
     #[test]
     fn test_command_struct() {
         let cmd = Command {
-            name: "sleep".to_string(),
+            name: "Sleep".to_string(),
             payload: "".to_string(),
         };
-        assert_eq!(cmd.name, "sleep");
+        assert_eq!(cmd.name, "Sleep");
         assert!(cmd.payload.is_empty());
     }
 
@@ -2122,6 +1973,7 @@ mod tests {
 
     mod integration {
         use super::*;
+        use crate::config::FeatureConfig;
         use std::sync::{Arc, Mutex};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -2495,17 +2347,17 @@ mod tests {
                 "Screensaver",
                 "Wake",
                 "Shutdown",
-                "sleep",
+                "Sleep",
                 "Lock",
                 "Hibernate",
                 "Restart",
-                "discord_join",
-                "discord_leave_channel",
-                "media_play_pause",
-                "media_next",
-                "media_previous",
-                "media_stop",
-                "volume_mute",
+                "DiscordJoin",
+                "DiscordLeaveChannel",
+                "MediaPlayPause",
+                "MediaNext",
+                "MediaPrevious",
+                "MediaStop",
+                "VolumeMute",
             ];
             for button in expected_buttons {
                 let t = format!("homeassistant/button/test-pc/{button}/config");
@@ -2544,18 +2396,18 @@ mod tests {
                 "homeassistant/button/test-pc/Screensaver/action",
                 "homeassistant/button/test-pc/Wake/action",
                 "homeassistant/button/test-pc/Shutdown/action",
-                "homeassistant/button/test-pc/sleep/action",
+                "homeassistant/button/test-pc/Sleep/action",
                 "homeassistant/button/test-pc/Lock/action",
                 "homeassistant/button/test-pc/Hibernate/action",
                 "homeassistant/button/test-pc/Restart/action",
-                "homeassistant/button/test-pc/discord_join/action",
-                "homeassistant/button/test-pc/discord_leave_channel/action",
-                "homeassistant/button/test-pc/media_play_pause/action",
-                "homeassistant/button/test-pc/media_next/action",
-                "homeassistant/button/test-pc/media_previous/action",
-                "homeassistant/button/test-pc/media_stop/action",
-                "homeassistant/button/test-pc/volume_set/action",
-                "homeassistant/button/test-pc/volume_mute/action",
+                "homeassistant/button/test-pc/DiscordJoin/action",
+                "homeassistant/button/test-pc/DiscordLeaveChannel/action",
+                "homeassistant/button/test-pc/MediaPlayPause/action",
+                "homeassistant/button/test-pc/MediaNext/action",
+                "homeassistant/button/test-pc/MediaPrevious/action",
+                "homeassistant/button/test-pc/MediaStop/action",
+                "homeassistant/button/test-pc/VolumeSet/action",
+                "homeassistant/button/test-pc/VolumeMute/action",
                 "pc-bridge/notifications/test-pc",
             ];
             for topic in expected {
@@ -2581,10 +2433,10 @@ mod tests {
             // Wait for subscriptions before injecting
             wait_for_subscribes(&state, 5).await;
 
-            // Broker sends a "sleep" button press to the client
+            // Broker sends a "Sleep" button press to the client
             inject
                 .send((
-                    "homeassistant/button/test-pc/sleep/action".to_string(),
+                    "homeassistant/button/test-pc/Sleep/action".to_string(),
                     String::new(),
                 ))
                 .await
@@ -2595,7 +2447,7 @@ mod tests {
                 .expect("Timed out waiting for command")
                 .expect("Command channel closed");
 
-            assert_eq!(cmd.name, "sleep");
+            assert_eq!(cmd.name, "Sleep");
             assert!(cmd.payload.is_empty());
         }
 
@@ -2646,7 +2498,7 @@ mod tests {
             // Send a command for a DIFFERENT device
             inject
                 .send((
-                    "homeassistant/button/other-pc/sleep/action".to_string(),
+                    "homeassistant/button/other-pc/Sleep/action".to_string(),
                     String::new(),
                 ))
                 .await
@@ -2666,7 +2518,7 @@ mod tests {
                 .expect("Timed out")
                 .expect("Channel closed");
 
-            // Should get "Shutdown" (ours), not "sleep" (wrong device)
+            // Should get "Shutdown" (ours), not "Sleep" (wrong device)
             assert_eq!(cmd.name, "Shutdown");
         }
 

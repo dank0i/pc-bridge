@@ -11,6 +11,7 @@ use crate::audio::{self, MediaKey};
 use crate::mqtt::CommandReceiver;
 use crate::notification;
 use crate::power::wake_display;
+use crate::steam::SteamGameDiscovery;
 
 const MAX_CONCURRENT_COMMANDS: usize = 5;
 
@@ -20,7 +21,7 @@ fn get_predefined_command(name: &str) -> Option<&'static str> {
         "Screensaver" => Some("xdg-screensaver activate"),
         "Wake" => None, // Handled natively
         "Shutdown" => Some("systemctl poweroff"),
-        "sleep" => Some("systemctl suspend"),
+        "Sleep" => Some("systemctl suspend"),
         "Lock" => Some("loginctl lock-session"),
         "Hibernate" => Some("systemctl hibernate"),
         "Restart" => Some("systemctl reboot"),
@@ -91,7 +92,7 @@ impl CommandExecutor {
 
         // ── Native commands (no shell needed) ──────────────────────────
         match name {
-            "discord_leave_channel" => {
+            "DiscordLeaveChannel" => {
                 let keybind = state
                     .config
                     .read()
@@ -112,13 +113,13 @@ impl CommandExecutor {
                 }
                 return Ok(());
             }
-            "volume_set" => {
+            "VolumeSet" => {
                 if let Ok(level) = payload.parse::<f32>() {
                     tokio::task::spawn_blocking(move || audio::set_volume(level));
                 }
                 return Ok(());
             }
-            "volume_mute" => {
+            "VolumeMute" => {
                 if payload.eq_ignore_ascii_case("press") || payload.is_empty() {
                     tokio::task::spawn_blocking(audio::toggle_mute);
                 } else {
@@ -127,24 +128,54 @@ impl CommandExecutor {
                 }
                 return Ok(());
             }
-            "volume_toggle_mute" => {
-                tokio::task::spawn_blocking(audio::toggle_mute);
-                return Ok(());
-            }
-            "media_play_pause" => {
+            "MediaPlayPause" => {
                 tokio::task::spawn_blocking(|| audio::send_media_key(MediaKey::PlayPause));
                 return Ok(());
             }
-            "media_next" => {
+            "MediaNext" => {
                 tokio::task::spawn_blocking(|| audio::send_media_key(MediaKey::Next));
                 return Ok(());
             }
-            "media_previous" => {
+            "MediaPrevious" => {
                 tokio::task::spawn_blocking(|| audio::send_media_key(MediaKey::Previous));
                 return Ok(());
             }
-            "media_stop" => {
+            "MediaStop" => {
                 tokio::task::spawn_blocking(|| audio::send_media_key(MediaKey::Stop));
+                return Ok(());
+            }
+            "RefreshSteamGames" => {
+                info!("Refreshing Steam game library...");
+                match SteamGameDiscovery::discover_async().await {
+                    Some(discovery) => {
+                        let mut config = state.config.write().await;
+                        match config.merge_steam_games(&discovery) {
+                            Ok(added) if added > 0 => {
+                                info!(
+                                    "Steam refresh: added {} new games ({}ms{})",
+                                    added,
+                                    discovery.build_time_ms,
+                                    if discovery.from_cache { ", cached" } else { "" }
+                                );
+                                drop(config);
+                                let _ = state.config_generation.send(());
+                            }
+                            Ok(_) => {
+                                info!(
+                                    "Steam refresh: no new games ({}ms{})",
+                                    discovery.build_time_ms,
+                                    if discovery.from_cache { ", cached" } else { "" }
+                                );
+                            }
+                            Err(e) => {
+                                warn!("Steam refresh: failed to save games: {}", e);
+                            }
+                        }
+                    }
+                    None => {
+                        info!("Steam refresh: Steam not found or no games installed");
+                    }
+                }
                 return Ok(());
             }
             _ => {}

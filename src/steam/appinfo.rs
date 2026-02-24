@@ -85,7 +85,7 @@ impl AppInfoReader {
             file_size, version
         );
 
-        let mut index = HashMap::with_capacity(16384);
+        let mut index = HashMap::with_capacity(2048);
         let mut buf4 = [0u8; 4];
 
         // v29 entry format:
@@ -175,13 +175,6 @@ impl AppInfoReader {
         Self::parse_game_info(&self.read_buf[..size])
     }
 
-    /// Parse binary VDF data to extract Windows launch executable
-    ///
-    /// We're looking for: common -> launch -> 0 -> executable (with type=default, oslist containing windows)
-    fn parse_executable(data: &[u8]) -> Option<String> {
-        Self::parse_game_info(data).map(|(_, exe)| exe)
-    }
-
     /// Parse binary VDF data to extract game name and Windows launch executable
     fn parse_game_info(data: &[u8]) -> Option<(String, String)> {
         let mut reader = BinaryVdfReader::new(data);
@@ -259,12 +252,6 @@ impl AppInfoReader {
         }
 
         None
-    }
-
-    /// Check if an app ID exists
-    #[inline]
-    pub fn has_app(&self, app_id: u32) -> bool {
-        self.index.contains_key(&app_id)
     }
 
     /// Number of indexed apps

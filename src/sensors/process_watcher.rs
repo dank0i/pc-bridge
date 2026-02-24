@@ -66,9 +66,9 @@ pub struct ProcessState {
 impl ProcessState {
     fn new() -> Self {
         Self {
-            names: HashSet::with_capacity(128),
-            pid_to_name: std::collections::HashMap::with_capacity(128),
-            name_counts: std::collections::HashMap::with_capacity(128),
+            names: HashSet::new(),
+            pid_to_name: std::collections::HashMap::new(),
+            name_counts: std::collections::HashMap::new(),
             scr_count: 0,
             last_updated: Instant::now(),
         }
@@ -126,8 +126,8 @@ impl ProcessWatcher {
     /// Create a new process watcher with initial enumeration
     pub async fn new() -> Self {
         let state = Arc::new(RwLock::new(ProcessState::new()));
-        // Channel capacity of 256 is generous - subscribers just need to know "something changed"
-        let (change_tx, _) = broadcast::channel(256);
+        // Subscribers just need to know "something changed" — lag is handled gracefully
+        let (change_tx, _) = broadcast::channel(16);
 
         // Initial enumeration using ToolHelp (fast, reliable)
         Self::initial_enumeration(&state).await;
@@ -140,13 +140,6 @@ impl ProcessWatcher {
         self.change_tx.subscribe()
     }
 
-    /// Notify subscribers that processes changed
-    #[allow(dead_code)]
-    fn notify_change(&self) {
-        // Ignore send errors - means no subscribers
-        let _ = self.change_tx.send(ProcessChangeNotification);
-    }
-
     /// Start the background WMI event watcher
     ///
     /// This should be called once after creating the ProcessWatcher.
@@ -155,11 +148,10 @@ impl ProcessWatcher {
     pub fn start_background(&self, shutdown_rx: broadcast::Receiver<()>, poll_interval: Duration) {
         let state = Arc::clone(&self.state);
         let change_tx = self.change_tx.clone();
-        // WMI fires events for ALL processes system-wide. Burst scenarios (compilers,
-        // installers) can spawn dozens of processes in rapid succession. The WMI thread
-        // uses blocking_send(), so a full channel stalls it rather than dropping events.
-        // 256 slots avoids stalling the WMI thread during heavy bursts.
-        let (event_tx, event_rx) = mpsc::channel::<ProcessEvent>(256);
+        // WMI fires events for ALL processes. The WMI thread uses blocking_send(),
+        // so a full channel stalls it rather than dropping events. WMI's WITHIN 1
+        // batching means events arrive in ~1s bursts — 64 slots is ample.
+        let (event_tx, event_rx) = mpsc::channel::<ProcessEvent>(16);
 
         // Try WMI events first, fall back to polling
         tokio::spawn(async move {
@@ -219,7 +211,7 @@ impl ProcessWatcher {
         // JoinHandle is intentionally detached — the thread is cleaned up on process exit.
         std::thread::Builder::new()
             .name("wmi-events".into())
-            .stack_size(256 * 1024)
+            .stack_size(128 * 1024)
             .spawn(move || {
                 let com = match COMLibrary::new() {
                     Ok(c) => c,
@@ -359,7 +351,7 @@ impl ProcessWatcher {
                             // WMI event channel closed — thread died due to error.
                             // Attempt to restart the WMI thread before falling back.
                             warn!("WMI event stream lost, attempting restart...");
-                            let (new_tx, new_rx) = mpsc::channel::<ProcessEvent>(256);
+                            let (new_tx, new_rx) = mpsc::channel::<ProcessEvent>(16);
                             match Self::setup_wmi_events(new_tx).await {
                                 Ok(()) => {
                                     info!("WMI event thread restarted successfully");
@@ -439,12 +431,15 @@ impl ProcessWatcher {
             }
         }
 
-        // Reclaim excess capacity only when significantly oversized (>2x target)
+        // Reclaim excess capacity only when significantly oversized
         // Avoids churning the allocator on small fluctuations
-        if guard.pid_to_name.capacity() > 512 {
-            guard.pid_to_name.shrink_to(256);
-            guard.name_counts.shrink_to(256);
-            guard.names.shrink_to(256);
+        let cap = guard.pid_to_name.capacity();
+        let len = guard.pid_to_name.len();
+        if cap > 256 && cap > len * 3 {
+            let target = len.next_power_of_two().max(64);
+            guard.pid_to_name.shrink_to(target);
+            guard.name_counts.shrink_to(target);
+            guard.names.shrink_to(target);
         }
 
         (pruned, added)
@@ -452,7 +447,7 @@ impl ProcessWatcher {
 
     /// Take a full process snapshot using ToolHelp API
     fn snapshot_all_processes() -> std::collections::HashMap<u32, String> {
-        let mut pids = std::collections::HashMap::with_capacity(256);
+        let mut pids = std::collections::HashMap::new();
 
         // SAFETY: CreateToolhelp32Snapshot and Process32 enumeration are
         // standard Win32 APIs for process listing. Handle is properly closed.

@@ -57,21 +57,6 @@ pub async fn execute_custom_command(state: &Arc<AppState>, name: &str) -> anyhow
     Ok(true)
 }
 
-/// Get list of custom command names for MQTT discovery
-pub async fn get_custom_command_names(state: &Arc<AppState>) -> Vec<(String, Option<String>)> {
-    let config = state.config.read().await;
-
-    if !config.custom_commands_enabled {
-        return Vec::new();
-    }
-
-    config
-        .custom_commands
-        .iter()
-        .map(|c| (c.name.clone(), c.icon.clone()))
-        .collect()
-}
-
 /// Execute PowerShell command
 #[cfg(windows)]
 async fn execute_powershell(cmd: &CustomCommand) -> anyhow::Result<()> {

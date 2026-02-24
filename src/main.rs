@@ -20,9 +20,8 @@ mod setup;
 mod steam;
 mod updater;
 
-use log::{error, info, warn};
+use log::{error, info};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 #[cfg(windows)]
 use std::time::Duration;
 use tokio::sync::{RwLock, broadcast};
@@ -34,7 +33,6 @@ use crate::power::PowerEventListener;
 #[cfg(windows)]
 use crate::sensors::ProcessWatcher;
 use crate::sensors::{CustomSensorManager, GameSensor, IdleSensor, SystemSensor};
-use crate::steam::SteamGameDiscovery;
 
 /// Application state shared across tasks
 pub struct AppState {
@@ -47,9 +45,6 @@ pub struct AppState {
     /// Provides always-up-to-date process list for game detection and screensaver
     #[cfg(windows)]
     pub process_watcher: ProcessWatcher,
-    /// Display power state: true when Windows has powered off the display
-    /// Set by PowerEventListener via GUID_CONSOLE_DISPLAY_STATE notifications
-    pub display_off: AtomicBool,
     /// Monotonic start time for uptime tracking in health diagnostics
     pub start_time: std::time::Instant,
 }
@@ -148,38 +143,8 @@ async fn main() -> anyhow::Result<()> {
     // Create MQTT client (conditionally registers discovery based on features)
     let (mqtt, command_rx) = MqttClient::new(&config).await?;
 
-    // Discover Steam games and merge into config if game detection is enabled
-    let mut config = config;
-    if config.features.game_detection {
-        info!("Discovering Steam games...");
-        if let Some(discovery) = SteamGameDiscovery::discover_async().await {
-            info!(
-                "  Found {} Steam games in {}ms{}",
-                discovery.game_count,
-                discovery.build_time_ms,
-                if discovery.from_cache {
-                    " (cached)"
-                } else {
-                    ""
-                }
-            );
-
-            // Merge into config and save
-            match config.merge_steam_games(&discovery) {
-                Ok(added) if added > 0 => {
-                    info!("  Added {} new games to userConfig.json", added);
-                }
-                Ok(_) => {
-                    // No new games to add
-                }
-                Err(e) => {
-                    warn!("  Failed to save discovered games: {}", e);
-                }
-            }
-        } else {
-            info!("  Steam not found or no games installed");
-        }
-    }
+    // Steam discovery is deferred to the "refresh_steam_games" button in HA
+    // (previously ran at startup, causing ~400KB+ heap fragmentation on Windows)
 
     // Create event-driven process watcher (Windows only)
     // This does initial enumeration and sets up WMI event subscription
@@ -197,7 +162,6 @@ async fn main() -> anyhow::Result<()> {
         config_generation: config_generation_tx,
         #[cfg(windows)]
         process_watcher,
-        display_off: AtomicBool::new(false),
         start_time: std::time::Instant::now(),
     });
 

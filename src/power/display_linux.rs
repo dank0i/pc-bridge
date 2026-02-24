@@ -1,7 +1,7 @@
 //! Display wake functions for Linux
 #![allow(dead_code)] // Used on Linux only
 
-use log::{debug, info};
+use log::info;
 use std::process::Command;
 
 /// Wake display using xdotool or dbus
@@ -27,22 +27,4 @@ pub fn wake_display() {
         .spawn();
 
     info!("WakeDisplay: Wake sequence completed");
-}
-
-/// Wake display with retries (async version — uses tokio::time::sleep)
-pub async fn wake_display_with_retry(max_attempts: usize, delay_between: std::time::Duration) {
-    let attempts = max_attempts.max(1);
-    info!(
-        "WakeDisplay: Starting wake sequence with {} attempts",
-        attempts
-    );
-
-    for attempt in 1..=attempts {
-        wake_display();
-        if attempt < attempts {
-            tokio::time::sleep(delay_between).await;
-        }
-    }
-
-    debug!("WakeDisplay: Wake sequence completed");
 }

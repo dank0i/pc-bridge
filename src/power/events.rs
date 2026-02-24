@@ -143,12 +143,10 @@ impl PowerEventListener {
                         }
                         PowerEvent::DisplayOff => {
                             info!("Power event: DISPLAY OFF");
-                            self.state.display_off.store(true, Ordering::SeqCst);
                             self.state.mqtt.publish_sensor_retained("display", "off").await;
                         }
                         PowerEvent::DisplayOn => {
                             info!("Power event: DISPLAY ON");
-                            self.state.display_off.store(false, Ordering::SeqCst);
                             self.state.mqtt.publish_sensor_retained("display", "on").await;
                         }
                     }

@@ -43,6 +43,30 @@ Download the latest release from [GitHub Releases](https://github.com/dank0i/pc-
 2. Configuration saved to `userConfig.json`
 3. PC Bridge connects and registers with Home Assistant
 
+## Breaking Changes in v3.3.0
+
+**All MQTT button names are now PascalCase.** If you have Home Assistant automations or scripts
+referencing old button topics, you must update them.
+
+| Old Name | New Name |
+|----------|----------|
+| `sleep` | `Sleep` |
+| `media_play_pause` | `MediaPlayPause` |
+| `media_next` | `MediaNext` |
+| `media_previous` | `MediaPrevious` |
+| `media_stop` | `MediaStop` |
+| `volume_mute` | `VolumeMute` |
+| `volume_set` | `VolumeSet` |
+| `discord_join` | `DiscordJoin` |
+| `discord_leave_channel` | `DiscordLeaveChannel` |
+
+Other names (`Screensaver`, `Wake`, `Lock`, `Shutdown`, `Hibernate`, `Restart`, `Launch`) were already PascalCase and are unchanged.
+
+**Other breaking changes:**
+- The `intervals.availability` config field has been removed (availability is now handled automatically via MQTT LWT)
+- The `VolumeToggleMute` command has been removed (use `VolumeMute` instead)
+- Steam game discovery no longer runs at startup — press the `RefreshSteamGames` button in HA to trigger it on demand
+
 ## Configuration
 
 Edit `userConfig.json` next to the executable:
@@ -67,8 +91,7 @@ Edit `userConfig.json` next to the executable:
   },
   "intervals": {
     "game_sensor": 5,
-    "last_active": 10,
-    "availability": 30
+    "last_active": 10
   },
   "games": {
     "bf6": "battlefield_6",
@@ -90,7 +113,7 @@ All features are opt-in via the `features` object (except `power_events` which d
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `game_detection` | `false` | Monitor running games, register Launch button |
+| `game_detection` | `false` | Monitor running games, register Launch/RefreshSteamGames buttons |
 | `idle_tracking` | `false` | Report last user input time, Screensaver/Wake buttons |
 | `power_events` | **`true`** | Detect sleep/wake/display state, Shutdown/Restart/Sleep/Lock/Hibernate buttons |
 | `notifications` | `false` | Receive toast notifications from HA |
@@ -320,7 +343,7 @@ Send commands via MQTT button topics:
 | `Wake` | Wake display, dismiss screensaver |
 | `Lock` | Lock workstation |
 | `Shutdown` | Power off the PC |
-| `sleep` | Put PC to sleep |
+| `Sleep` | Put PC to sleep |
 | `Hibernate` | Hibernate the PC |
 | `Restart` | Restart the PC |
 
@@ -328,12 +351,12 @@ Send commands via MQTT button topics:
 
 | Button | Description |
 |--------|-------------|
-| `media_play_pause` | Play/pause media |
-| `media_next` | Next track |
-| `media_previous` | Previous track |
-| `media_stop` | Stop media |
-| `volume_mute` | Toggle mute |
-| `volume_set` | Set volume (payload: 0-100) |
+| `MediaPlayPause` | Play/pause media |
+| `MediaNext` | Next track |
+| `MediaPrevious` | Previous track |
+| `MediaStop` | Stop media |
+| `VolumeMute` | Toggle mute |
+| `VolumeSet` | Set volume (payload: 0-100) |
 
 ### Launch Payloads
 
@@ -348,6 +371,53 @@ The `Launch` button accepts special payloads:
 | `close:processname` | Close process gracefully |
 
 > **Note:** The `Launch` button requires you to define actions in Home Assistant that send the appropriate payload. Unlike custom commands (which are self-contained), Launch is a generic endpoint that executes whatever payload you send it.
+
+### Discord Commands (requires `discord: true`)
+
+Control Discord voice channels directly from Home Assistant.
+
+| Button | Description |
+|--------|-------------|
+| `DiscordJoin` | Join a voice channel (requires payload) |
+| `DiscordLeaveChannel` | Leave current voice channel (no payload) |
+
+**DiscordJoin** uses the `Launch` system under the hood — send a `url:` payload with a Discord deep link:
+
+```
+url:discord://discord.com/channels/SERVER_ID/CHANNEL_ID
+```
+
+**DiscordLeaveChannel** simulates a keyboard shortcut (default: `Ctrl+F6`, Discord's built-in "Disconnect from Voice Channel" hotkey). Customize it in `userConfig.json`:
+
+```json
+{
+  "discord_keybind": "ctrl+f6"
+}
+```
+
+**Example HA scripts:**
+
+```yaml
+# Join a specific voice channel
+discord_join_gaming:
+  alias: "Discord: Join Gaming Channel"
+  sequence:
+    - action: mqtt.publish
+      data:
+        topic: homeassistant/button/my-pc/DiscordJoin/action
+        payload: "url:discord://discord.com/channels/123456789/987654321"
+
+# Leave any voice channel
+discord_leave:
+  alias: "Discord: Leave Channel"
+  sequence:
+    - action: mqtt.publish
+      data:
+        topic: homeassistant/button/my-pc/DiscordLeaveChannel/action
+        payload: "PRESS"
+```
+
+> **Tip:** You can find the server and channel IDs in Discord by enabling Developer Mode (Settings → App Settings → Advanced → Developer Mode), then right-clicking a server or channel and selecting "Copy ID".
 
 ## Home Assistant Integration
 
@@ -377,11 +447,15 @@ PC Bridge auto-discovers via MQTT. After connecting, you'll get:
 - `button.<device>_hibernate`
 - `button.<device>_restart`
 - `button.<device>_launch`
-- `button.<device>_media_play_pause`
-- `button.<device>_media_next`
-- `button.<device>_media_previous`
-- `button.<device>_media_stop`
-- `button.<device>_volume_mute`
+- `button.<device>_refreshsteamgames` (requires `game_detection`)
+- `button.<device>_mediaplaypause`
+- `button.<device>_medianext`
+- `button.<device>_mediaprevious`
+- `button.<device>_mediastop`
+- `button.<device>_volumemute`
+- `button.<device>_volumeset`
+- `button.<device>_discordjoin` (requires `discord`)
+- `button.<device>_discordleavechannel` (requires `discord`)
 - `button.<device>_<custom>` - Any custom commands you define
 
 **Notifications:**
@@ -457,8 +531,8 @@ All system sensors use native APIs for minimal overhead:
 
 | Metric | Value |
 |--------|-------|
-| Binary size | ~3 MB |
-| Memory usage | ~5 MB base |
+| Binary size | ~1.3 MB |
+| Memory usage | ~2.5 MB |
 | CPU usage | < 1% |
 
 **Native API Performance (Windows):**

@@ -13,6 +13,7 @@ use crate::audio::{self, MediaKey};
 use crate::mqtt::CommandReceiver;
 use crate::notification;
 use crate::power::wake_display;
+use crate::steam::SteamGameDiscovery;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const MAX_CONCURRENT_COMMANDS: usize = 5;
@@ -22,10 +23,10 @@ fn get_predefined_command(name: &str) -> Option<&'static str> {
     match name {
         "Screensaver" => Some(r#"%windir%\System32\scrnsave.scr /s"#),
         // These are handled natively in execute_command
-        "Wake" | "Lock" | "Hibernate" | "Restart" | "volume_set" | "volume_mute"
-        | "media_play_pause" | "media_next" | "media_previous" | "media_stop" => None,
+        "Wake" | "Lock" | "Hibernate" | "Restart" | "VolumeSet" | "VolumeMute"
+        | "MediaPlayPause" | "MediaNext" | "MediaPrevious" | "MediaStop" => None,
         "Shutdown" => Some("shutdown -s -t 0"),
-        "sleep" => Some("Rundll32.exe powrprof.dll,SetSuspendState 0,1,0"),
+        "Sleep" => Some("Rundll32.exe powrprof.dll,SetSuspendState 0,1,0"),
         _ => None,
     }
 }
@@ -98,7 +99,7 @@ impl CommandExecutor {
             // Configurable via discord_keybind in userConfig.json.
             // Runs on a blocking thread because keybd_event uses sleep() between
             // key-down and key-up events.
-            "discord_leave_channel" => {
+            "DiscordLeaveChannel" => {
                 let keybind = state
                     .config
                     .read()
@@ -131,13 +132,13 @@ impl CommandExecutor {
                 restart();
                 return Ok(());
             }
-            "volume_set" => {
+            "VolumeSet" => {
                 if let Ok(level) = payload.parse::<f32>() {
                     audio::set_volume(level);
                 }
                 return Ok(());
             }
-            "volume_mute" => {
+            "VolumeMute" => {
                 // Button sends "PRESS" - toggle mute
                 // Service call can send "true"/"false" to set specific state
                 if payload.eq_ignore_ascii_case("press") || payload.is_empty() {
@@ -148,24 +149,55 @@ impl CommandExecutor {
                 }
                 return Ok(());
             }
-            "volume_toggle_mute" => {
-                audio::toggle_mute();
-                return Ok(());
-            }
-            "media_play_pause" => {
+            "MediaPlayPause" => {
                 audio::send_media_key(MediaKey::PlayPause);
                 return Ok(());
             }
-            "media_next" => {
+            "MediaNext" => {
                 audio::send_media_key(MediaKey::Next);
                 return Ok(());
             }
-            "media_previous" => {
+            "MediaPrevious" => {
                 audio::send_media_key(MediaKey::Previous);
                 return Ok(());
             }
-            "media_stop" => {
+            "MediaStop" => {
                 audio::send_media_key(MediaKey::Stop);
+                return Ok(());
+            }
+            "RefreshSteamGames" => {
+                info!("Refreshing Steam game library...");
+                match SteamGameDiscovery::discover_async().await {
+                    Some(discovery) => {
+                        let mut config = state.config.write().await;
+                        match config.merge_steam_games(&discovery) {
+                            Ok(added) if added > 0 => {
+                                info!(
+                                    "Steam refresh: added {} new games ({}ms{})",
+                                    added,
+                                    discovery.build_time_ms,
+                                    if discovery.from_cache { ", cached" } else { "" }
+                                );
+                                drop(config);
+                                // Notify game sensor to rebuild cached patterns
+                                let _ = state.config_generation.send(());
+                            }
+                            Ok(_) => {
+                                info!(
+                                    "Steam refresh: no new games ({}ms{})",
+                                    discovery.build_time_ms,
+                                    if discovery.from_cache { ", cached" } else { "" }
+                                );
+                            }
+                            Err(e) => {
+                                warn!("Steam refresh: failed to save games: {}", e);
+                            }
+                        }
+                    }
+                    None => {
+                        info!("Steam refresh: Steam not found or no games installed");
+                    }
+                }
                 return Ok(());
             }
             _ => {}
@@ -278,7 +310,7 @@ pub(crate) fn resolve_command_action(
 
     // Native commands
     match name {
-        "discord_leave_channel" => return CommandAction::Native("discord_leave_channel"),
+        "DiscordLeaveChannel" => return CommandAction::Native("DiscordLeaveChannel"),
         "Wake" => return CommandAction::Native("Wake"),
         "Lock" => return CommandAction::Native("Lock"),
         "Hibernate" => return CommandAction::Native("Hibernate"),
@@ -289,24 +321,23 @@ pub(crate) fn resolve_command_action(
             }
             return CommandAction::Notification(payload.to_string());
         }
-        "volume_set" => {
+        "VolumeSet" => {
             return match payload.parse::<f32>() {
                 Ok(level) => CommandAction::VolumeSet(level),
                 Err(_) => CommandAction::NoOp("volume_set_invalid"),
             };
         }
-        "volume_mute" => {
+        "VolumeMute" => {
             if payload.eq_ignore_ascii_case("press") || payload.is_empty() {
                 return CommandAction::VolumeMute(None);
             }
             let mute = payload.eq_ignore_ascii_case("true") || payload == "1";
             return CommandAction::VolumeMute(Some(mute));
         }
-        "volume_toggle_mute" => return CommandAction::VolumeMute(None),
-        "media_play_pause" => return CommandAction::Native("media_play_pause"),
-        "media_next" => return CommandAction::Native("media_next"),
-        "media_previous" => return CommandAction::Native("media_previous"),
-        "media_stop" => return CommandAction::Native("media_stop"),
+        "MediaPlayPause" => return CommandAction::Native("MediaPlayPause"),
+        "MediaNext" => return CommandAction::Native("MediaNext"),
+        "MediaPrevious" => return CommandAction::Native("MediaPrevious"),
+        "MediaStop" => return CommandAction::Native("MediaStop"),
         _ => {}
     }
 
@@ -618,7 +649,7 @@ mod tests {
 
     #[test]
     fn test_resolve_predefined_sleep() {
-        let result = resolve_shell_command("sleep", "", false);
+        let result = resolve_shell_command("Sleep", "", false);
         assert!(
             matches!(result, ShellResolution::Predefined(ref cmd) if cmd.contains("SetSuspendState")),
         );
@@ -792,12 +823,12 @@ mod tests {
             "Lock",
             "Hibernate",
             "Restart",
-            "volume_set",
-            "volume_mute",
-            "media_play_pause",
-            "media_next",
-            "media_previous",
-            "media_stop",
+            "VolumeSet",
+            "VolumeMute",
+            "MediaPlayPause",
+            "MediaNext",
+            "MediaPrevious",
+            "MediaStop",
         ];
 
         for name in native_names {
@@ -869,7 +900,7 @@ mod tests {
 
     #[test]
     fn test_predefined_sleep() {
-        let cmd = get_predefined_command("sleep");
+        let cmd = get_predefined_command("Sleep");
         assert!(cmd.is_some());
         assert!(cmd.unwrap().contains("SetSuspendState"));
     }
@@ -882,12 +913,12 @@ mod tests {
             "Lock",
             "Hibernate",
             "Restart",
-            "volume_set",
-            "volume_mute",
-            "media_play_pause",
-            "media_next",
-            "media_previous",
-            "media_stop",
+            "VolumeSet",
+            "VolumeMute",
+            "MediaPlayPause",
+            "MediaNext",
+            "MediaPrevious",
+            "MediaStop",
         ] {
             assert!(
                 get_predefined_command(name).is_none(),
@@ -1049,19 +1080,14 @@ mod tests {
     #[test]
     fn test_action_discord_leave() {
         assert_eq!(
-            resolve_command_action("discord_leave_channel", "", false),
-            CommandAction::Native("discord_leave_channel")
+            resolve_command_action("DiscordLeaveChannel", "", false),
+            CommandAction::Native("DiscordLeaveChannel")
         );
     }
 
     #[test]
     fn test_action_media_keys() {
-        for name in &[
-            "media_play_pause",
-            "media_next",
-            "media_previous",
-            "media_stop",
-        ] {
+        for name in &["MediaPlayPause", "MediaNext", "MediaPrevious", "MediaStop"] {
             assert_eq!(
                 resolve_command_action(name, "PRESS", false),
                 CommandAction::Native(name),
@@ -1102,7 +1128,7 @@ mod tests {
     #[test]
     fn test_action_volume_set() {
         assert_eq!(
-            resolve_command_action("volume_set", "75", false),
+            resolve_command_action("VolumeSet", "75", false),
             CommandAction::VolumeSet(75.0)
         );
     }
@@ -1110,7 +1136,7 @@ mod tests {
     #[test]
     fn test_action_volume_set_decimal() {
         assert_eq!(
-            resolve_command_action("volume_set", "33.5", false),
+            resolve_command_action("VolumeSet", "33.5", false),
             CommandAction::VolumeSet(33.5)
         );
     }
@@ -1118,7 +1144,7 @@ mod tests {
     #[test]
     fn test_action_volume_set_invalid() {
         assert_eq!(
-            resolve_command_action("volume_set", "loud", false),
+            resolve_command_action("VolumeSet", "loud", false),
             CommandAction::NoOp("volume_set_invalid")
         );
     }
@@ -1127,7 +1153,7 @@ mod tests {
     fn test_action_volume_set_press_is_invalid() {
         // "PRESS" normalises to "" which fails to parse as f32
         assert_eq!(
-            resolve_command_action("volume_set", "PRESS", false),
+            resolve_command_action("VolumeSet", "PRESS", false),
             CommandAction::NoOp("volume_set_invalid")
         );
     }
@@ -1135,7 +1161,7 @@ mod tests {
     #[test]
     fn test_action_volume_mute_toggle() {
         assert_eq!(
-            resolve_command_action("volume_mute", "", false),
+            resolve_command_action("VolumeMute", "", false),
             CommandAction::VolumeMute(None)
         );
     }
@@ -1144,7 +1170,7 @@ mod tests {
     fn test_action_volume_mute_press_toggles() {
         // "PRESS" normalises to "" → toggle
         assert_eq!(
-            resolve_command_action("volume_mute", "PRESS", false),
+            resolve_command_action("VolumeMute", "PRESS", false),
             CommandAction::VolumeMute(None)
         );
     }
@@ -1152,7 +1178,7 @@ mod tests {
     #[test]
     fn test_action_volume_mute_explicit_true() {
         assert_eq!(
-            resolve_command_action("volume_mute", "true", false),
+            resolve_command_action("VolumeMute", "true", false),
             CommandAction::VolumeMute(Some(true))
         );
     }
@@ -1160,7 +1186,7 @@ mod tests {
     #[test]
     fn test_action_volume_mute_explicit_false() {
         assert_eq!(
-            resolve_command_action("volume_mute", "false", false),
+            resolve_command_action("VolumeMute", "false", false),
             CommandAction::VolumeMute(Some(false))
         );
     }
@@ -1168,16 +1194,8 @@ mod tests {
     #[test]
     fn test_action_volume_mute_one() {
         assert_eq!(
-            resolve_command_action("volume_mute", "1", false),
+            resolve_command_action("VolumeMute", "1", false),
             CommandAction::VolumeMute(Some(true))
-        );
-    }
-
-    #[test]
-    fn test_action_volume_toggle_mute() {
-        assert_eq!(
-            resolve_command_action("volume_toggle_mute", "", false),
-            CommandAction::VolumeMute(None)
         );
     }
 
@@ -1207,14 +1225,14 @@ mod tests {
 
     #[test]
     fn test_action_sleep_produces_shell() {
-        let action = resolve_command_action("sleep", "", false);
+        let action = resolve_command_action("Sleep", "", false);
         assert!(
             matches!(
                 action,
                 CommandAction::Shell(ShellResolution::Predefined(ref cmd))
                 if cmd.contains("SetSuspendState")
             ),
-            "sleep should produce shell command: {action:?}"
+            "Sleep should produce shell command: {action:?}"
         );
     }
 

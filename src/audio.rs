@@ -254,7 +254,7 @@ pub fn send_media_key(key: MediaKey) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
         VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK, VK_MEDIA_STOP,
-        VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
+        VK_VOLUME_MUTE,
     };
 
     let vk = match key {
@@ -262,8 +262,6 @@ pub fn send_media_key(key: MediaKey) {
         MediaKey::Next => VK_MEDIA_NEXT_TRACK,
         MediaKey::Previous => VK_MEDIA_PREV_TRACK,
         MediaKey::Stop => VK_MEDIA_STOP,
-        MediaKey::VolumeUp => VK_VOLUME_UP,
-        MediaKey::VolumeDown => VK_VOLUME_DOWN,
         MediaKey::VolumeMute => VK_VOLUME_MUTE,
     };
 
@@ -296,8 +294,6 @@ pub enum MediaKey {
     Next,
     Previous,
     Stop,
-    VolumeUp,
-    VolumeDown,
     VolumeMute,
 }
 
@@ -375,8 +371,6 @@ pub fn send_media_key(key: MediaKey) {
         MediaKey::Next => "XF86AudioNext",
         MediaKey::Previous => "XF86AudioPrev",
         MediaKey::Stop => "XF86AudioStop",
-        MediaKey::VolumeUp => "XF86AudioRaiseVolume",
-        MediaKey::VolumeDown => "XF86AudioLowerVolume",
         MediaKey::VolumeMute => "XF86AudioMute",
     };
 

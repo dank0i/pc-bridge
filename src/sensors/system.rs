@@ -69,7 +69,7 @@ impl SystemSensor {
         let mut prev_vals = PrevSystemValues::new();
 
         // Channel for receiving events from background threads
-        let (event_tx, mut event_rx) = mpsc::channel::<SystemEvent>(32);
+        let (event_tx, mut event_rx) = mpsc::channel::<SystemEvent>(8);
 
         // Start event-driven active window monitor
         #[cfg(windows)]
