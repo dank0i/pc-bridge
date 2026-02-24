@@ -5,11 +5,7 @@
 [advisories]
 version = 2
 db-path = "~/.cargo/advisory-db"
-ignore = [
-    # rustls-pemfile is unmaintained but is a transitive dep from rumqttc
-    # Waiting for rumqttc to update their dependencies
-    "RUSTSEC-2025-0134",
-]
+ignore = []
 
 [licenses]
 version = 2
