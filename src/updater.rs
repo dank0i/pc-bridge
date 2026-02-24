@@ -31,23 +31,24 @@ struct GitHubAsset {
     browser_download_url: String,
 }
 
-/// Shared HTTP agent configured to use native-tls (OS TLS stack).
+/// Create an HTTP agent configured to use native-tls (OS TLS stack).
 ///
 /// ureq v3 defaults to Rustls even with the `native-tls` feature;
 /// the provider must be set explicitly via [`TlsConfig`].
 /// Root certs default to `WebPki` which requires `native-tls-webpki-roots`;
 /// we use `PlatformVerifier` so Windows Schannel loads the OS cert store.
 ///
-/// Reused across update check, download, and SHA-256 verification to avoid
-/// rebuilding TLS state on each request.
-static HTTP_AGENT: std::sync::LazyLock<ureq::Agent> = std::sync::LazyLock::new(|| {
+/// Returns a fresh agent each call — intentionally NOT static so the TLS
+/// context and connection pool are freed after each update check, avoiding
+/// ~500 KB+ of persistent Schannel/connection-pool memory on Windows.
+fn http_agent() -> ureq::Agent {
     let tls = TlsConfig::builder()
         .provider(TlsProvider::NativeTls)
         .root_certs(RootCerts::PlatformVerifier)
         .build();
     let config = ureq::Agent::config_builder().tls_config(tls).build();
     ureq::Agent::new_with_config(config)
-});
+}
 
 /// Clean up leftover `.old` files from a previous update.
 /// Called on startup before the update check.
@@ -120,7 +121,7 @@ async fn fetch_latest_release() -> anyhow::Result<GitHubRelease> {
     );
 
     let response = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-        let body = HTTP_AGENT
+        let body = http_agent()
             .get(&url)
             .header("User-Agent", USER_AGENT)
             .call()?
@@ -152,7 +153,7 @@ async fn download_update(
 
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         // Download the binary
-        let mut body = HTTP_AGENT
+        let mut body = http_agent()
             .get(&url)
             .header("User-Agent", USER_AGENT)
             .call()?
@@ -182,7 +183,7 @@ fn verify_sha256(file_path: &Path, checksum_url: &str) -> anyhow::Result<()> {
     use sha2::{Digest, Sha256};
 
     // Fetch expected hash from the .sha256 file
-    let checksum_body = HTTP_AGENT
+    let checksum_body = http_agent()
         .get(checksum_url)
         .header("User-Agent", USER_AGENT)
         .call()?
