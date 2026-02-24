@@ -459,17 +459,32 @@ impl MqttClient {
             .await;
         }
 
-        // Steam update sensor
+        // Steam update sensor — no availability so updates persist while PC is off/asleep
         if config.features.steam_updates {
-            self.register_sensor_with_attributes(
-                device,
-                "steam_updating",
-                "Steam Updating",
-                "mdi:steam",
-                None,
-                None,
-            )
-            .await;
+            let payload = HADiscoveryPayload {
+                name: "Steam Updating".to_string(),
+                unique_id: format!("{}_steam_updating", self.device_id),
+                state_topic: Some(self.sensor_topic("steam_updating")),
+                command_topic: None,
+                availability_topic: None,
+                json_attributes_topic: Some(self.sensor_attributes_topic("steam_updating")),
+                device: Arc::clone(device),
+                icon: Some("mdi:steam".to_string()),
+                device_class: None,
+                unit_of_measurement: None,
+            };
+            let topic = format!(
+                "{}/sensor/{}/steam_updating/config",
+                DISCOVERY_PREFIX, self.device_name
+            );
+            let Ok(json) = serde_json::to_string(&payload) else {
+                error!("Failed to serialize HA discovery payload");
+                return;
+            };
+            let _ = self
+                .client
+                .publish(&topic, QoS::AtLeastOnce, true, json)
+                .await;
         }
 
         // Command buttons - gated by their respective features
