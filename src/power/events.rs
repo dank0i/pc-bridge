@@ -60,7 +60,7 @@ static POWER_STATE: AtomicU8 = AtomicU8::new(0); // Start awake
 /// Returns true only if this call performed the transition.
 fn try_transition_to_sleep() -> bool {
     POWER_STATE
-        .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
 }
 
@@ -68,7 +68,7 @@ fn try_transition_to_sleep() -> bool {
 /// Returns true only if this call performed the transition.
 fn try_transition_to_awake() -> bool {
     POWER_STATE
-        .compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
 }
 

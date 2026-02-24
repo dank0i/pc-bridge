@@ -50,6 +50,8 @@ pub struct AppState {
     /// Display power state: true when Windows has powered off the display
     /// Set by PowerEventListener via GUID_CONSOLE_DISPLAY_STATE notifications
     pub display_off: AtomicBool,
+    /// Monotonic start time for uptime tracking in health diagnostics
+    pub start_time: std::time::Instant,
 }
 
 /// Handle for optional tasks
@@ -196,6 +198,7 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(windows)]
         process_watcher,
         display_off: AtomicBool::new(false),
+        start_time: std::time::Instant::now(),
     });
 
     // Collect task handles for cleanup

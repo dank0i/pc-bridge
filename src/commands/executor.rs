@@ -93,8 +93,20 @@ impl CommandExecutor {
         info!("Executing command: {} (payload: {:?})", name, payload);
 
         match name {
+            // Discord: Leave the current voice channel by simulating a keybind
+            // (default: Ctrl+F6, Discord's "Disconnect from Voice Channel").
+            // Configurable via discord_keybind in userConfig.json.
+            // Runs on a blocking thread because keybd_event uses sleep() between
+            // key-down and key-up events.
             "discord_leave_channel" => {
-                tokio::task::spawn_blocking(send_ctrl_f6);
+                let keybind = state
+                    .config
+                    .read()
+                    .await
+                    .discord_keybind
+                    .clone()
+                    .unwrap_or_else(|| "ctrl+f6".to_string());
+                tokio::task::spawn_blocking(move || send_keybind(&keybind));
                 return Ok(());
             }
             "Wake" => {
@@ -415,30 +427,102 @@ fn expand_env_vars(s: &str) -> String {
     result
 }
 
-/// Send Ctrl+F6 keypress (Discord leave channel hotkey)
-fn send_ctrl_f6() {
+/// Send a configurable keybind (e.g. "ctrl+f6", "ctrl+shift+m").
+///
+/// Parses the keybind string into modifiers + key, then simulates
+/// the keypresses via `keybd_event`. Spaced 10ms apart to ensure
+/// the OS input queue processes them in order.
+fn send_keybind(keybind: &str) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, keybd_event,
     };
 
-    const VK_CONTROL: u8 = 0x11;
-    const VK_F6: u8 = 0x75;
+    let parts: Vec<&str> = keybind.split('+').map(str::trim).collect();
+    if parts.is_empty() {
+        warn!("Empty keybind string");
+        return;
+    }
+
+    let mut modifiers: Vec<u8> = Vec::new();
+    let mut key: Option<u8> = None;
+
+    for part in &parts {
+        let lower = part.to_lowercase();
+        match lower.as_str() {
+            "ctrl" | "control" => modifiers.push(0x11), // VK_CONTROL
+            "shift" => modifiers.push(0x10),            // VK_SHIFT
+            "alt" => modifiers.push(0x12),              // VK_MENU
+            "win" | "super" => modifiers.push(0x5B),    // VK_LWIN
+            k => match parse_vk_code(k) {
+                Some(vk) => key = Some(vk),
+                None => {
+                    warn!("Unknown key in keybind: {}", part);
+                    return;
+                }
+            },
+        }
+    }
+
+    let Some(vk) = key else {
+        warn!("No key found in keybind: {}", keybind);
+        return;
+    };
 
     unsafe {
-        // Key down Ctrl
-        keybd_event(VK_CONTROL, 0, KEYBD_EVENT_FLAGS(0), 0);
+        // Press modifiers
+        for &m in &modifiers {
+            keybd_event(m, 0, KEYBD_EVENT_FLAGS(0), 0);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // Press key
+        keybd_event(vk, 0, KEYBD_EVENT_FLAGS(0), 0);
         std::thread::sleep(std::time::Duration::from_millis(10));
-
-        // Key down F6
-        keybd_event(VK_F6, 0, KEYBD_EVENT_FLAGS(0), 0);
+        // Release key
+        keybd_event(vk, 0, KEYEVENTF_KEYUP, 0);
         std::thread::sleep(std::time::Duration::from_millis(10));
+        // Release modifiers (reverse order)
+        for &m in modifiers.iter().rev() {
+            keybd_event(m, 0, KEYEVENTF_KEYUP, 0);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
 
-        // Key up F6
-        keybd_event(VK_F6, 0, KEYEVENTF_KEYUP, 0);
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        // Key up Ctrl
-        keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+/// Map a key name to a Windows virtual-key code.
+fn parse_vk_code(key: &str) -> Option<u8> {
+    match key {
+        "f1" => Some(0x70),
+        "f2" => Some(0x71),
+        "f3" => Some(0x72),
+        "f4" => Some(0x73),
+        "f5" => Some(0x74),
+        "f6" => Some(0x75),
+        "f7" => Some(0x76),
+        "f8" => Some(0x77),
+        "f9" => Some(0x78),
+        "f10" => Some(0x79),
+        "f11" => Some(0x7A),
+        "f12" => Some(0x7B),
+        "escape" | "esc" => Some(0x1B),
+        "tab" => Some(0x09),
+        "space" => Some(0x20),
+        "enter" | "return" => Some(0x0D),
+        "backspace" => Some(0x08),
+        "delete" | "del" => Some(0x2E),
+        "insert" | "ins" => Some(0x2D),
+        "home" => Some(0x24),
+        "end" => Some(0x23),
+        "pageup" | "pgup" => Some(0x21),
+        "pagedown" | "pgdn" => Some(0x22),
+        "up" => Some(0x26),
+        "down" => Some(0x28),
+        "left" => Some(0x25),
+        "right" => Some(0x27),
+        k if k.len() == 1 && k.as_bytes()[0].is_ascii_alphabetic() => {
+            Some(k.as_bytes()[0].to_ascii_uppercase())
+        }
+        k if k.len() == 1 && k.as_bytes()[0].is_ascii_digit() => Some(k.as_bytes()[0]),
+        _ => None,
     }
 }
 

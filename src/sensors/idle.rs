@@ -37,6 +37,7 @@ impl IdleSensor {
         let mut tick = interval(Duration::from_secs(interval_secs));
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
         let mut process_rx = self.state.process_watcher.subscribe();
+        let mut config_rx = self.state.config_generation.subscribe();
 
         // Publish initial state
         let last_active = self.get_last_active_time();
@@ -64,6 +65,14 @@ impl IdleSensor {
                 _ = shutdown_rx.recv() => {
                     debug!("Idle sensor shutting down");
                     break;
+                }
+                // Hot-reload: pick up new interval from config changes
+                Ok(()) = config_rx.recv() => {
+                    let config = self.state.config.read().await;
+                    let new_interval = config.intervals.last_active.max(1);
+                    drop(config);
+                    tick = interval(Duration::from_secs(new_interval));
+                    debug!("Idle sensor: interval updated to {}s", new_interval);
                 }
                 _ = tick.tick() => {
                     let last_active = self.get_last_active_time();

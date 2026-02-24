@@ -31,20 +31,23 @@ struct GitHubAsset {
     browser_download_url: String,
 }
 
-/// Create an HTTP agent configured to use native-tls (OS TLS stack).
+/// Shared HTTP agent configured to use native-tls (OS TLS stack).
 ///
 /// ureq v3 defaults to Rustls even with the `native-tls` feature;
 /// the provider must be set explicitly via [`TlsConfig`].
 /// Root certs default to `WebPki` which requires `native-tls-webpki-roots`;
 /// we use `PlatformVerifier` so Windows Schannel loads the OS cert store.
-fn http_agent() -> ureq::Agent {
+///
+/// Reused across update check, download, and SHA-256 verification to avoid
+/// rebuilding TLS state on each request.
+static HTTP_AGENT: std::sync::LazyLock<ureq::Agent> = std::sync::LazyLock::new(|| {
     let tls = TlsConfig::builder()
         .provider(TlsProvider::NativeTls)
         .root_certs(RootCerts::PlatformVerifier)
         .build();
     let config = ureq::Agent::config_builder().tls_config(tls).build();
     ureq::Agent::new_with_config(config)
-}
+});
 
 /// Clean up leftover `.old` files from a previous update.
 /// Called on startup before the update check.
@@ -65,7 +68,7 @@ pub fn cleanup_old_files() {
 /// Check for updates and download if available
 pub async fn check_for_updates() {
     match fetch_latest_release().await {
-        Ok(Some(release)) => {
+        Ok(release) => {
             let remote_version = release.tag_name.trim_start_matches('v');
 
             if is_newer_version(remote_version, CURRENT_VERSION) {
@@ -104,23 +107,20 @@ pub async fn check_for_updates() {
                 info!("Already up to date (v{})", CURRENT_VERSION);
             }
         }
-        Ok(None) => {
-            info!("No releases found");
-        }
         Err(e) => {
             warn!("Failed to check for updates: {}", e);
         }
     }
 }
 
-async fn fetch_latest_release() -> anyhow::Result<Option<GitHubRelease>> {
+async fn fetch_latest_release() -> anyhow::Result<GitHubRelease> {
     let url = format!(
-        "https://api.github.com/repos/{}/{}/releases",
+        "https://api.github.com/repos/{}/{}/releases/latest",
         GITHUB_OWNER, GITHUB_REPO
     );
 
     let response = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-        let body = http_agent()
+        let body = HTTP_AGENT
             .get(&url)
             .header("User-Agent", USER_AGENT)
             .call()?
@@ -130,8 +130,8 @@ async fn fetch_latest_release() -> anyhow::Result<Option<GitHubRelease>> {
     })
     .await??;
 
-    let releases: Vec<GitHubRelease> = serde_json::from_str(&response)?;
-    Ok(releases.into_iter().next())
+    let release: GitHubRelease = serde_json::from_str(&response)?;
+    Ok(release)
 }
 
 async fn download_update(
@@ -152,7 +152,7 @@ async fn download_update(
 
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         // Download the binary
-        let mut body = http_agent()
+        let mut body = HTTP_AGENT
             .get(&url)
             .header("User-Agent", USER_AGENT)
             .call()?
@@ -182,7 +182,7 @@ fn verify_sha256(file_path: &Path, checksum_url: &str) -> anyhow::Result<()> {
     use sha2::{Digest, Sha256};
 
     // Fetch expected hash from the .sha256 file
-    let checksum_body = http_agent()
+    let checksum_body = HTTP_AGENT
         .get(checksum_url)
         .header("User-Agent", USER_AGENT)
         .call()?

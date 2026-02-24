@@ -60,6 +60,7 @@ impl CachedTopics {
             "memory_usage",
             "gpu_temp",
             "steam_updating",
+            "bridge_health",
         ];
 
         for name in sensors {
@@ -186,6 +187,7 @@ impl MqttClient {
 
         // Spawn event loop handler
         tokio::spawn(async move {
+            let mut backoff_secs: u64 = 1;
             loop {
                 match eventloop.poll().await {
                     Ok(Event::Incoming(Packet::Publish(publish))) => {
@@ -244,11 +246,15 @@ impl MqttClient {
 
                         // Notify sensors to republish their retained state
                         let _ = reconnect_tx_for_eventloop.send(());
+
+                        // Reset backoff on successful connection
+                        backoff_secs = 1;
                     }
                     Ok(_) => {}
                     Err(e) => {
-                        warn!("MQTT error: {:?}", e);
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        warn!("MQTT error (retrying in {}s): {:?}", backoff_secs, e);
+                        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                        backoff_secs = (backoff_secs * 2).min(30);
                     }
                 }
             }
@@ -435,6 +441,17 @@ impl MqttClient {
                 None,
             )
             .await;
+
+            // Bridge health diagnostics (uptime in seconds, version in attributes)
+            self.register_sensor_with_attributes(
+                device,
+                "bridge_health",
+                "Bridge Health",
+                "mdi:heart-pulse",
+                Some("duration"),
+                Some("s"),
+            )
+            .await;
         }
 
         // Steam update sensor
@@ -479,6 +496,7 @@ impl MqttClient {
         }
 
         // Discord buttons
+        // discord_join: Expects a launcher payload like \"url:discord://discord.com/channels/...\"\n        //   which gets expanded by expand_launcher_shortcut() and opened via Start-Process.\n        // discord_leave_channel: Simulates Ctrl+F6 keypress (Discord's default disconnect hotkey).
         if config.features.discord {
             self.register_button(device, "discord_join", "mdi:discord")
                 .await;
@@ -558,6 +576,7 @@ impl MqttClient {
                 "battery_level",
                 "battery_charging",
                 "active_window",
+                "bridge_health",
             ] {
                 self.unregister_entity("sensor", name).await;
             }
@@ -969,7 +988,7 @@ impl MqttClient {
         let topic = self.sensor_topic(name);
         let _ = self
             .client
-            .publish(&topic, QoS::AtLeastOnce, false, value)
+            .publish(topic, QoS::AtLeastOnce, false, value)
             .await;
     }
 
@@ -978,7 +997,7 @@ impl MqttClient {
         let topic = self.sensor_topic(name);
         let _ = self
             .client
-            .publish(&topic, QoS::AtLeastOnce, true, value)
+            .publish(topic, QoS::AtLeastOnce, true, value)
             .await;
     }
 
@@ -988,7 +1007,7 @@ impl MqttClient {
         let payload: &[u8] = if online { b"online" } else { b"offline" };
         let _ = self
             .client
-            .publish(&topic, QoS::AtLeastOnce, true, payload)
+            .publish(topic, QoS::AtLeastOnce, true, payload)
             .await;
     }
 
@@ -1001,7 +1020,7 @@ impl MqttClient {
         };
         let _ = self
             .client
-            .publish(&topic, QoS::AtLeastOnce, true, payload)
+            .publish(topic, QoS::AtLeastOnce, true, payload)
             .await;
     }
 
@@ -1097,6 +1116,7 @@ mod tests {
             custom_commands_enabled: false,
             custom_command_privileges_allowed: false,
             allow_raw_commands: false,
+            discord_keybind: None,
             custom_sensors: Vec::new(),
             custom_commands: Vec::new(),
         }
@@ -1165,6 +1185,7 @@ mod tests {
             "memory_usage",
             "gpu_temp",
             "steam_updating",
+            "bridge_health",
         ];
         for name in expected {
             assert!(
@@ -2218,9 +2239,7 @@ mod tests {
                         suback.push(0x90);
                         encode_remaining_length(&mut suback, remaining);
                         suback.extend_from_slice(&pkt_id.to_be_bytes());
-                        for _ in 0..sub_count {
-                            suback.push(0x01); // QoS 1 granted
-                        }
+                        suback.extend(std::iter::repeat_n(0x01_u8, sub_count as usize)); // QoS 1 granted
                         responses.push(suback);
                     }
                     12 => {
@@ -2302,6 +2321,7 @@ mod tests {
                 custom_commands_enabled: false,
                 custom_command_privileges_allowed: false,
                 allow_raw_commands: false,
+                discord_keybind: None,
                 custom_sensors: Vec::new(),
                 custom_commands: Vec::new(),
             }

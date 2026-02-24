@@ -6,8 +6,13 @@
 use log::{debug, error, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::sync::mpsc;
+
+/// Pre-built JSON attributes for the idle (no updates) state.
+/// Avoids re-creating the same `serde_json::Value` every publish cycle.
+static IDLE_STEAM_ATTRS: LazyLock<serde_json::Value> =
+    LazyLock::new(|| serde_json::json!({"updating_games": [], "count": 0}));
 use tokio::time::{Duration, Instant};
 use winreg::RegKey;
 use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
@@ -486,13 +491,9 @@ impl SteamSensor {
                 .publish_sensor_attributes("steam_updating", &attrs)
                 .await;
         } else {
-            let attrs = serde_json::json!({
-                "updating_games": [],
-                "count": 0
-            });
             self.state
                 .mqtt
-                .publish_sensor_attributes("steam_updating", &attrs)
+                .publish_sensor_attributes("steam_updating", &IDLE_STEAM_ATTRS)
                 .await;
         }
     }

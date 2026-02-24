@@ -20,6 +20,8 @@ pub struct SetupConfig {
     pub system_sensors: bool,
     pub audio_control: bool,
     pub steam_updates: bool,
+    pub discord: bool,
+    pub discord_keybind: String,
 }
 
 impl Default for SetupConfig {
@@ -36,6 +38,8 @@ impl Default for SetupConfig {
             system_sensors: true,
             audio_control: true,
             steam_updates: true,
+            discord: false,
+            discord_keybind: String::new(),
         }
     }
 }
@@ -250,8 +254,14 @@ fn run_wizard_flow() -> Option<SetupConfig> {
         );
         println!("      Detect when Steam games are updating");
         println!();
+        println!(
+            "  [8] [{}] Discord Integration",
+            if config.discord { "*" } else { " " }
+        );
+        println!("      Leave voice channel via HA command");
+        println!();
 
-        let input = read_input("  Toggle (1-7) or Enter to continue: ");
+        let input = read_input("  Toggle (1-8) or Enter to continue: ");
 
         match input.as_str() {
             "1" => config.game_detection = !config.game_detection,
@@ -261,8 +271,24 @@ fn run_wizard_flow() -> Option<SetupConfig> {
             "5" => config.system_sensors = !config.system_sensors,
             "6" => config.audio_control = !config.audio_control,
             "7" => config.steam_updates = !config.steam_updates,
+            "8" => config.discord = !config.discord,
             "" => break,
             _ => {} // Ignore invalid input
+        }
+    }
+
+    // Discord keybind prompt (only if discord was enabled)
+    if config.discord {
+        clear_screen();
+        print_header("Discord Keybind");
+        println!("  Enter the keybind for leaving a voice channel.");
+        println!("  This must match your Discord keybind setting.");
+        println!();
+        println!("  Format: modifier+key (e.g. ctrl+f6, ctrl+shift+m)");
+        println!();
+        let input = read_input("  Keybind [ctrl+f6]: ");
+        if !input.is_empty() {
+            config.discord_keybind = input.to_lowercase();
         }
     }
 
@@ -309,6 +335,10 @@ fn run_wizard_flow() -> Option<SetupConfig> {
         "    [{}] Steam Updates",
         if config.steam_updates { "x" } else { " " }
     );
+    println!(
+        "    [{}] Discord Integration",
+        if config.discord { "x" } else { " " }
+    );
     println!();
 
     let input = read_input("  Save configuration? [Y/n]: ");
@@ -339,13 +369,18 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
             system_sensors: config.system_sensors,
             audio_control: config.audio_control,
             steam_updates: config.steam_updates,
-            ..FeatureConfig::default()
+            discord: config.discord,
         },
         games: HashMap::new(),
         custom_sensors_enabled: false,
         custom_commands_enabled: false,
         custom_command_privileges_allowed: false,
         allow_raw_commands: false,
+        discord_keybind: if config.discord_keybind.is_empty() {
+            None
+        } else {
+            Some(config.discord_keybind.clone())
+        },
         custom_sensors: Vec::new(),
         custom_commands: Vec::new(),
     };

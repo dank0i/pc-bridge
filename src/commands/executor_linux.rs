@@ -1,23 +1,29 @@
-//! Command executor for Linux
+//! Command executor for Linux — feature-parity with Windows executor
 
 use log::{debug, error, info, warn};
 use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
+use super::custom::execute_custom_command;
 use crate::AppState;
+use crate::audio::{self, MediaKey};
 use crate::mqtt::CommandReceiver;
+use crate::notification;
 use crate::power::wake_display;
 
 const MAX_CONCURRENT_COMMANDS: usize = 5;
 
-/// Predefined commands for Linux
+/// Predefined shell commands for Linux
 fn get_predefined_command(name: &str) -> Option<&'static str> {
     match name {
         "Screensaver" => Some("xdg-screensaver activate"),
-        "Wake" => None, // Handled specially
+        "Wake" => None, // Handled natively
         "Shutdown" => Some("systemctl poweroff"),
         "sleep" => Some("systemctl suspend"),
+        "Lock" => Some("loginctl lock-session"),
+        "Hibernate" => Some("systemctl hibernate"),
+        "Restart" => Some("systemctl reboot"),
         _ => None,
     }
 }
@@ -83,28 +89,76 @@ impl CommandExecutor {
 
         info!("Executing command: {} (payload: {:?})", name, payload);
 
+        // ── Native commands (no shell needed) ──────────────────────────
         match name {
+            "discord_leave_channel" => {
+                let keybind = state
+                    .config
+                    .read()
+                    .await
+                    .discord_keybind
+                    .clone()
+                    .unwrap_or_else(|| "ctrl+f6".to_string());
+                send_keybind_linux(&keybind);
+                return Ok(());
+            }
             "Wake" => {
                 wake_display();
                 return Ok(());
             }
             "notification" => {
                 if !payload.is_empty() {
-                    // Use notify-send for desktop notifications
-                    let _ = Command::new("notify-send")
-                        .args(["PC Bridge", payload])
-                        .spawn();
+                    notification::show_toast(payload)?;
                 }
+                return Ok(());
+            }
+            "volume_set" => {
+                if let Ok(level) = payload.parse::<f32>() {
+                    audio::set_volume(level);
+                }
+                return Ok(());
+            }
+            "volume_mute" => {
+                if payload.eq_ignore_ascii_case("press") || payload.is_empty() {
+                    audio::toggle_mute();
+                } else {
+                    let mute = payload.eq_ignore_ascii_case("true") || payload == "1";
+                    audio::set_mute(mute);
+                }
+                return Ok(());
+            }
+            "volume_toggle_mute" => {
+                audio::toggle_mute();
+                return Ok(());
+            }
+            "media_play_pause" => {
+                audio::send_media_key(MediaKey::PlayPause);
+                return Ok(());
+            }
+            "media_next" => {
+                audio::send_media_key(MediaKey::Next);
+                return Ok(());
+            }
+            "media_previous" => {
+                audio::send_media_key(MediaKey::Previous);
+                return Ok(());
+            }
+            "media_stop" => {
+                audio::send_media_key(MediaKey::Stop);
                 return Ok(());
             }
             _ => {}
         }
 
-        // Get command string
+        // ── Custom commands ────────────────────────────────────────────
+        if execute_custom_command(state, name).await? {
+            return Ok(());
+        }
+
+        // ── Shell commands (predefined → raw → not found) ─────────────
         let cmd_str = match get_predefined_command(name) {
             Some(cmd) => cmd.to_string(),
             None if !payload.is_empty() => {
-                // Raw payload execution: only allowed if configured
                 let config = state.config.read().await;
                 if !config.allow_raw_commands {
                     warn!("Raw command blocked (allow_raw_commands=false): {}", name);
@@ -143,5 +197,36 @@ impl CommandExecutor {
         });
 
         Ok(())
+    }
+}
+
+/// Send a keybind via xdotool (Linux equivalent of Windows keybd_event).
+///
+/// Converts our format ("ctrl+f6") to xdotool format ("ctrl+F6").
+fn send_keybind_linux(keybind: &str) {
+    let xdotool_keybind: String = keybind
+        .split('+')
+        .map(|part| {
+            let lower = part.trim().to_lowercase();
+            match lower.as_str() {
+                "ctrl" | "control" => "ctrl".to_string(),
+                "shift" => "shift".to_string(),
+                "alt" => "alt".to_string(),
+                "win" | "super" => "super".to_string(),
+                // Function keys: xdotool expects uppercase F
+                k if k.starts_with('f') && k[1..].parse::<u32>().is_ok() => k.to_uppercase(),
+                k => k.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+");
+
+    info!("Sending keybind via xdotool: {}", xdotool_keybind);
+    match Command::new("xdotool")
+        .args(["key", &xdotool_keybind])
+        .spawn()
+    {
+        Ok(_) => {}
+        Err(e) => warn!("Failed to send keybind via xdotool: {}", e),
     }
 }

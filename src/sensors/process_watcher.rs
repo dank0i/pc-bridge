@@ -180,44 +180,18 @@ impl ProcessWatcher {
     }
 
     /// Perform initial process enumeration using ToolHelp API.
-    /// Win32 snapshot runs on a blocking thread to avoid stalling the async runtime.
+    /// Reuses `snapshot_all_processes` to avoid code duplication.
     async fn initial_enumeration(state: &Arc<RwLock<ProcessState>>) {
-        let processes = tokio::task::spawn_blocking(|| -> Vec<(String, u32)> {
-            let mut results = Vec::with_capacity(256);
-            unsafe {
-                if let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
-                    let mut entry = PROCESSENTRY32W {
-                        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-                        ..Default::default()
-                    };
-
-                    if Process32FirstW(snapshot, &raw mut entry).is_ok() {
-                        loop {
-                            let mut name = String::from_utf16_lossy(&entry.szExeFile);
-                            if let Some(pos) = name.find('\0') {
-                                name.truncate(pos);
-                            }
-
-                            if !name.is_empty() {
-                                results.push((name, entry.th32ProcessID));
-                            }
-
-                            if Process32NextW(snapshot, &raw mut entry).is_err() {
-                                break;
-                            }
-                        }
-                    }
-
-                    let _ = CloseHandle(snapshot);
-                }
+        let processes = match tokio::task::spawn_blocking(Self::snapshot_all_processes).await {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Initial process enumeration failed: {}", e);
+                return;
             }
-            results
-        })
-        .await
-        .unwrap_or_default();
+        };
 
         let mut guard = state.write().await;
-        for (name, pid) in processes {
+        for (pid, name) in processes {
             guard.add_process(name, pid);
         }
 
@@ -383,11 +357,29 @@ impl ProcessWatcher {
                         }
                         None => {
                             // WMI event channel closed — thread died due to error.
-                            // Continue with reconciliation-only mode at minimum interval.
-                            warn!("WMI event stream lost, falling back to reconciliation every {}s", MIN_RECONCILE_SECS);
-                            wmi_alive = false;
-                            reconcile_secs = MIN_RECONCILE_SECS;
-                            consecutive_clean = 0;
+                            // Attempt to restart the WMI thread before falling back.
+                            warn!("WMI event stream lost, attempting restart...");
+                            let (new_tx, new_rx) = mpsc::channel::<ProcessEvent>(256);
+                            match Self::setup_wmi_events(new_tx).await {
+                                Ok(()) => {
+                                    info!("WMI event thread restarted successfully");
+                                    event_rx = new_rx;
+                                    // Reconcile immediately to catch anything missed
+                                    let (pruned, added) = Self::reconcile(state).await;
+                                    if pruned > 0 || added > 0 {
+                                        let _ = change_tx.send(ProcessChangeNotification);
+                                    }
+                                    reconcile_secs = MIN_RECONCILE_SECS;
+                                    consecutive_clean = 0;
+                                }
+                                Err(e) => {
+                                    // Restart failed — fall back to reconciliation-only mode
+                                    warn!("WMI restart failed: {}, falling back to reconciliation every {}s", e, MIN_RECONCILE_SECS);
+                                    wmi_alive = false;
+                                    reconcile_secs = MIN_RECONCILE_SECS;
+                                    consecutive_clean = 0;
+                                }
+                            }
                             next_reconcile = tokio::time::Instant::now() + Duration::from_secs(reconcile_secs);
                         }
                     }
@@ -447,10 +439,13 @@ impl ProcessWatcher {
             }
         }
 
-        // Reclaim excess capacity after churn (short-lived processes, installers, etc.)
-        guard.pid_to_name.shrink_to(256);
-        guard.name_counts.shrink_to(256);
-        guard.names.shrink_to(256);
+        // Reclaim excess capacity only when significantly oversized (>2x target)
+        // Avoids churning the allocator on small fluctuations
+        if guard.pid_to_name.capacity() > 512 {
+            guard.pid_to_name.shrink_to(256);
+            guard.name_counts.shrink_to(256);
+            guard.names.shrink_to(256);
+        }
 
         (pruned, added)
     }

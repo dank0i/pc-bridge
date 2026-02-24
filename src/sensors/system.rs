@@ -25,6 +25,7 @@ struct PrevSystemValues {
     battery_level: String,
     battery_charging: String,
     active_window: String,
+    health_uptime: u64,
 }
 
 impl PrevSystemValues {
@@ -35,6 +36,7 @@ impl PrevSystemValues {
             battery_level: String::new(),
             battery_charging: String::new(),
             active_window: String::new(),
+            health_uptime: 0,
         }
     }
 }
@@ -54,8 +56,13 @@ impl SystemSensor {
     }
 
     pub async fn run(self) {
-        let mut tick = interval(Duration::from_secs(10));
+        let config = self.state.config.read().await;
+        let interval_secs = config.intervals.system_sensors.max(1);
+        drop(config);
+
+        let mut tick = interval(Duration::from_secs(interval_secs));
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
+        let mut config_rx = self.state.config_generation.subscribe();
 
         // CPU calculation needs previous sample
         let mut prev_cpu = get_cpu_times();
@@ -86,6 +93,9 @@ impl SystemSensor {
         // Initial publish (force all by using empty prev_vals)
         self.publish_all(&mut prev_cpu, &mut prev_vals).await;
 
+        // Track health publish separately (once per ~60s)
+        let mut last_health_publish = tokio::time::Instant::now();
+
         info!("System sensor started (CPU/memory: polled, battery/active_window: event-driven)");
 
         loop {
@@ -95,9 +105,23 @@ impl SystemSensor {
                     debug!("System sensor shutting down");
                     break;
                 }
+                // Hot-reload: pick up new interval from config changes
+                Ok(()) = config_rx.recv() => {
+                    let config = self.state.config.read().await;
+                    let new_interval = config.intervals.system_sensors.max(1);
+                    drop(config);
+                    tick = interval(Duration::from_secs(new_interval));
+                    debug!("System sensor: interval updated to {}s", new_interval);
+                }
                 _ = tick.tick() => {
                     // Polled: CPU and memory only
                     self.publish_cpu_mem(&mut prev_cpu, &mut prev_vals).await;
+
+                    // Bridge health diagnostics (~every 60s)
+                    if last_health_publish.elapsed() >= Duration::from_secs(60) {
+                        last_health_publish = tokio::time::Instant::now();
+                        self.publish_health(&mut prev_vals).await;
+                    }
                 }
                 Some(event) = event_rx.recv() => {
                     match event {
@@ -153,6 +177,9 @@ impl SystemSensor {
         // CPU and memory (polled metrics)
         self.publish_cpu_mem(prev_cpu, prev).await;
 
+        // Bridge health (initial publish)
+        self.publish_health(prev).await;
+
         // Battery (event-driven, but publish initial state)
         if let Some((percent, charging)) = get_battery_status() {
             let level_str = percent.to_string();
@@ -184,6 +211,26 @@ impl SystemSensor {
                 .publish_sensor("active_window", &title)
                 .await;
             prev.active_window = title;
+        }
+    }
+
+    /// Publish bridge health diagnostics (uptime, version)
+    async fn publish_health(&self, prev: &mut PrevSystemValues) {
+        let uptime_secs = self.state.start_time.elapsed().as_secs();
+        // Only publish when uptime actually changed (avoids duplicate on rapid calls)
+        if uptime_secs != prev.health_uptime {
+            self.state
+                .mqtt
+                .publish_sensor("bridge_health", &uptime_secs.to_string())
+                .await;
+            let attrs = serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"),
+            });
+            self.state
+                .mqtt
+                .publish_sensor_attributes("bridge_health", &attrs)
+                .await;
+            prev.health_uptime = uptime_secs;
         }
     }
 }
@@ -714,6 +761,20 @@ fn get_battery_status() -> Option<(u8, bool)> {
 // Active Window Title - Native via GetForegroundWindow
 // ============================================================================
 
+/// Truncate window titles longer than 256 bytes to prevent oversized MQTT payloads.
+/// Ensures truncation happens on a UTF-8 character boundary.
+fn truncate_title(title: String) -> String {
+    if title.len() <= 256 {
+        return title;
+    }
+    // Find a safe truncation point that doesn't split a UTF-8 char
+    let mut end = 253;
+    while end > 0 && !title.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\u{2026}", &title[..end]) // \u{2026} = '…'
+}
+
 #[cfg(windows)]
 fn get_active_window_title() -> String {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW};
@@ -728,7 +789,7 @@ fn get_active_window_title() -> String {
         let len = GetWindowTextW(hwnd, &mut buffer);
 
         if len > 0 {
-            String::from_utf16_lossy(&buffer[..len as usize])
+            truncate_title(String::from_utf16_lossy(&buffer[..len as usize]))
         } else {
             String::new()
         }
@@ -758,7 +819,7 @@ fn get_active_window_title_blocking() -> String {
         .output()
         && output.status.success()
     {
-        return String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return truncate_title(String::from_utf8_lossy(&output.stdout).trim().to_string());
     }
     String::new()
 }

@@ -38,6 +38,11 @@ pub struct Config {
     #[serde(default)]
     pub allow_raw_commands: bool,
 
+    /// Custom keybind for Discord "leave channel" (e.g. "ctrl+f6", "ctrl+shift+m").
+    /// When absent, defaults to ctrl+f6 (Discord's default disconnect keybind).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord_keybind: Option<String>,
+
     #[serde(default)]
     pub custom_sensors: Vec<CustomSensor>,
     #[serde(default)]
@@ -255,6 +260,8 @@ pub struct IntervalConfig {
     pub availability: u64,
     #[serde(default = "default_steam_check")]
     pub steam_check: u64,
+    #[serde(default = "default_system_sensors")]
+    pub system_sensors: u64,
 }
 
 impl Default for IntervalConfig {
@@ -264,6 +271,7 @@ impl Default for IntervalConfig {
             last_active: default_last_active(),
             availability: default_availability(),
             steam_check: default_steam_check(),
+            system_sensors: default_system_sensors(),
         }
     }
 }
@@ -279,6 +287,9 @@ fn default_availability() -> u64 {
 }
 fn default_steam_check() -> u64 {
     30
+}
+fn default_system_sensors() -> u64 {
+    10
 }
 
 impl Config {
@@ -337,6 +348,10 @@ impl Config {
             }
             if intervals.get("availability").and_then(|v| v.as_u64()) == Some(0) {
                 intervals.insert("availability".to_string(), serde_json::json!(30));
+                migrated = true;
+            }
+            if intervals.get("system_sensors").and_then(|v| v.as_u64()) == Some(0) {
+                intervals.insert("system_sensors".to_string(), serde_json::json!(10));
                 migrated = true;
             }
         }
@@ -715,6 +730,9 @@ async fn reload_games(state: &AppState) {
             let old_count = config.games.len();
             config.games = new_config.games;
 
+            // Reload intervals (sensors pick up changes via config_generation)
+            config.intervals = new_config.intervals;
+
             // Also reload custom sensors/commands config
             let old_sensors_enabled = config.custom_sensors_enabled;
             let old_commands_enabled = config.custom_commands_enabled;
@@ -789,6 +807,7 @@ mod tests {
             custom_commands_enabled: false,
             custom_command_privileges_allowed: false,
             allow_raw_commands: false,
+            discord_keybind: None,
             custom_sensors: vec![],
             custom_commands: vec![],
         }
