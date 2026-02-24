@@ -9,11 +9,6 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-// Use mimalloc as the global allocator — reduces RSS by 10-20% vs system allocator
-// through better fragmentation handling in long-running single-threaded workloads.
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 mod audio;
 mod commands;
 mod config;
