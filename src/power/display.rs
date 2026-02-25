@@ -1,6 +1,6 @@
 //! Display wake functions - handles waking display after WoL
 
-use log::info;
+use log::{error, info};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use windows::Win32::Foundation::{LPARAM, WPARAM};
