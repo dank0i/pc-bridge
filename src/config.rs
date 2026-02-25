@@ -663,16 +663,22 @@ pub async fn watch_config(state: Arc<AppState>) {
     let filename_clone = filename.clone();
     let _watch_handle = tokio::task::spawn_blocking(move || {
         let tx = tx;
-        let mut watcher = notify::recommended_watcher(move |res: Result<Event, _>| {
+        let mut watcher = match notify::recommended_watcher(move |res: Result<Event, _>| {
             if let Ok(event) = res {
                 let _ = tx.blocking_send(event);
             }
-        })
-        .expect("Failed to create file watcher");
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                error!("Failed to create file watcher: {}", e);
+                return;
+            }
+        };
 
-        watcher
-            .watch(&dir, RecursiveMode::NonRecursive)
-            .expect("Failed to watch directory");
+        if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
+            error!("Failed to watch config directory: {}", e);
+            return;
+        }
 
         info!("Watching for changes to {:?}", dir.join(&filename_clone));
 
@@ -702,7 +708,7 @@ pub async fn watch_config(state: Arc<AppState>) {
                     match event.kind {
                         EventKind::Modify(_) | EventKind::Create(_) => {
                             info!("Config file changed, reloading...");
-                            reload_games(&state).await;
+                            reload_hot_config(&state).await;
                         }
                         _ => {}
                     }
@@ -712,8 +718,8 @@ pub async fn watch_config(state: Arc<AppState>) {
     }
 }
 
-/// Reload just the games section from config
-async fn reload_games(state: &AppState) {
+/// Reload hot-reloadable config fields (games, intervals, commands, sensors, security flags)
+async fn reload_hot_config(state: &AppState) {
     match Config::load() {
         Ok(new_config) => {
             let mut config = state.config.write().await;
@@ -722,6 +728,12 @@ async fn reload_games(state: &AppState) {
 
             // Reload intervals (sensors pick up changes via config_generation)
             config.intervals = new_config.intervals;
+
+            // Security-relevant flags
+            config.allow_raw_commands = new_config.allow_raw_commands;
+
+            // Discord keybind
+            config.discord_keybind = new_config.discord_keybind;
 
             // Also reload custom sensors/commands config
             let old_sensors_enabled = config.custom_sensors_enabled;

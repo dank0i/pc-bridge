@@ -286,7 +286,7 @@ impl ProcessWatcher {
                     }
                 }
             })
-            .expect("failed to spawn WMI events thread");
+            .map_err(|e| anyhow::anyhow!("Failed to spawn WMI events thread: {e}"))?;
 
         // Wait for the WMI thread to confirm subscription succeeded
         match ready_rx.await {

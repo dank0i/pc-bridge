@@ -89,13 +89,18 @@ impl PowerEventListener {
         // Store hwnd so we can post WM_QUIT on shutdown
         let (hwnd_tx, hwnd_rx) = tokio::sync::oneshot::channel::<isize>();
 
-        std::thread::Builder::new()
+        match std::thread::Builder::new()
             .name("power-events".into())
             .stack_size(256 * 1024)
             .spawn(move || {
                 Self::message_pump(event_tx, hwnd_tx);
-            })
-            .expect("failed to spawn power events thread");
+            }) {
+            Ok(_) => {}
+            Err(e) => {
+                error!("Failed to spawn power events thread: {}", e);
+                return;
+            }
+        }
 
         // Wait for hwnd from the message pump thread
         let pump_hwnd = hwnd_rx.await.ok();

@@ -384,7 +384,7 @@ fn kill_existing_instances() {
 fn kill_existing_instances() {
     use std::process::Command;
 
-    let _my_pid = std::process::id();
+    let my_pid = std::process::id();
     let exe_name = std::env::current_exe()
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
@@ -394,11 +394,19 @@ fn kill_existing_instances() {
         return;
     }
 
-    // Use pkill to kill other instances, excluding our PID
-    // This is a safe approach - pkill won't kill itself
-    let _ = Command::new("pkill")
-        .args(["-f", &exe_name, "--signal", "TERM"])
-        .spawn();
+    // Use pgrep to find other instances, then kill them excluding our PID
+    if let Ok(output) = Command::new("pgrep").args(["-f", &exe_name]).output() {
+        let pids = String::from_utf8_lossy(&output.stdout);
+        for line in pids.lines() {
+            if let Ok(pid) = line.trim().parse::<u32>()
+                && pid != my_pid
+            {
+                let _ = Command::new("kill")
+                    .args(["-TERM", &pid.to_string()])
+                    .spawn();
+            }
+        }
+    }
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 }

@@ -277,7 +277,7 @@ fn start_window_focus_monitor(
     // Spawn a thread with a message pump for SetWinEventHook
     let (hwnd_tx, hwnd_rx) = tokio::sync::oneshot::channel::<isize>();
 
-    std::thread::Builder::new()
+    match std::thread::Builder::new()
         .name("window-focus".into())
         .stack_size(256 * 1024)
         .spawn(move || unsafe {
@@ -362,8 +362,13 @@ fn start_window_focus_monitor(
             }
 
             let _ = DestroyWindow(hwnd);
-        })
-        .expect("failed to spawn window focus thread");
+        }) {
+        Ok(_) => {}
+        Err(e) => {
+            error!("Failed to spawn window focus thread: {}", e);
+            return;
+        }
+    }
 
     // Spawn task to post WM_QUIT on shutdown
     tokio::spawn(async move {
@@ -452,7 +457,7 @@ fn start_battery_monitor(
 
     let (hwnd_tx, hwnd_rx) = tokio::sync::oneshot::channel::<isize>();
 
-    std::thread::Builder::new()
+    match std::thread::Builder::new()
         .name("battery-monitor".into())
         .stack_size(256 * 1024)
         .spawn(move || unsafe {
@@ -530,8 +535,13 @@ fn start_battery_monitor(
             // Cleanup
             let _ = Box::from_raw(event_tx_ptr);
             let _ = DestroyWindow(hwnd);
-        })
-        .expect("failed to spawn battery monitor thread");
+        }) {
+        Ok(_) => {}
+        Err(e) => {
+            error!("Failed to spawn battery monitor thread: {}", e);
+            return;
+        }
+    }
 
     // Spawn task to post WM_USER on shutdown
     tokio::spawn(async move {

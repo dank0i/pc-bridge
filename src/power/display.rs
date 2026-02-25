@@ -151,7 +151,7 @@ fn prevent_sleep_temporary(duration: Duration) {
         return;
     }
 
-    std::thread::Builder::new()
+    match std::thread::Builder::new()
         .name("sleep-prevent".into())
         .stack_size(64 * 1024)
         .spawn(move || {
@@ -172,6 +172,11 @@ fn prevent_sleep_temporary(duration: Duration) {
                 SLEEP_PREVENTION_ACTIVE.store(false, Ordering::SeqCst);
                 info!("WakeDisplay: Sleep prevention ended");
             }
-        })
-        .expect("failed to spawn sleep prevention thread");
+        }) {
+        Ok(_) => {}
+        Err(e) => {
+            error!("Failed to spawn sleep prevention thread: {}", e);
+            SLEEP_PREVENTION_ACTIVE.store(false, Ordering::SeqCst);
+        }
+    }
 }

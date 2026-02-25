@@ -134,7 +134,7 @@ impl CommandExecutor {
             }
             "VolumeSet" => {
                 if let Ok(level) = payload.parse::<f32>() {
-                    audio::set_volume(level);
+                    tokio::task::spawn_blocking(move || audio::set_volume(level));
                 }
                 return Ok(());
             }
@@ -142,10 +142,10 @@ impl CommandExecutor {
                 // Button sends "PRESS" - toggle mute
                 // Service call can send "true"/"false" to set specific state
                 if payload.eq_ignore_ascii_case("press") || payload.is_empty() {
-                    audio::toggle_mute();
+                    tokio::task::spawn_blocking(audio::toggle_mute);
                 } else {
                     let mute = payload.eq_ignore_ascii_case("true") || payload == "1";
-                    audio::set_mute(mute);
+                    tokio::task::spawn_blocking(move || audio::set_mute(mute));
                 }
                 return Ok(());
             }
@@ -258,8 +258,11 @@ impl CommandExecutor {
                 Ok(Ok(Err(e))) => error!("Command wait error: {}", e),
                 Ok(Err(e)) => error!("Task join error: {}", e),
                 Err(_) => {
-                    warn!("Command timed out after 5 minutes");
-                    // Process already dropped, will be cleaned up
+                    // Timeout: the spawn_blocking task still owns `child` and is
+                    // blocked on child.wait(). We can't reach it to kill the
+                    // process, but dropping a Child on Windows does NOT kill it.
+                    // Log clearly so the user knows the process is still running.
+                    warn!("Command timed out after 5 minutes (process may still be running)");
                 }
             }
         });

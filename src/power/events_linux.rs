@@ -27,11 +27,17 @@ impl PowerEventListener {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<bool>(4);
 
         // Spawn blocking thread that reads gdbus monitor output line-by-line
-        std::thread::Builder::new()
+        match std::thread::Builder::new()
             .name("power-dbus".into())
             .stack_size(128 * 1024)
             .spawn(move || Self::dbus_monitor_thread(event_tx))
-            .expect("failed to spawn dbus monitor thread");
+        {
+            Ok(_) => {}
+            Err(e) => {
+                error!("Failed to spawn dbus monitor thread: {}", e);
+                return;
+            }
+        }
 
         info!("Power event listener started (D-Bus monitor mode)");
 
