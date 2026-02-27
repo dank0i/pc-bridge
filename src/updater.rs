@@ -163,11 +163,14 @@ async fn download_update(
         std::io::copy(&mut body.as_reader(), &mut file)?;
         drop(file);
 
-        // Verify SHA-256 if checksum asset is available
+        // Verify SHA-256 — refuse to install if no checksum is available
         if let Some(checksum_url) = checksum_url {
             verify_sha256(&path, &checksum_url)?;
         } else {
-            warn!("No .sha256 checksum asset in release — skipping integrity check");
+            let _ = std::fs::remove_file(&path);
+            anyhow::bail!(
+                "No .sha256 checksum asset in release — refusing to install unverified binary"
+            );
         }
 
         Ok(())

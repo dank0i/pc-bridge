@@ -289,12 +289,15 @@ fn default_system_sensors() -> u64 {
 impl Config {
     /// Check if this is a first run (no config file exists)
     pub fn is_first_run() -> Result<bool> {
+        Self::migrate_config_location()?;
         let config_path = Self::config_path()?;
         Ok(!config_path.exists())
     }
 
-    /// Load configuration from userConfig.json next to the executable
+    /// Load configuration from userConfig.json
     pub fn load() -> Result<Self> {
+        Self::migrate_config_location()?;
+
         let config_path = Self::config_path()?;
 
         if !config_path.exists() {
@@ -384,11 +387,73 @@ impl Config {
         }
     }
 
-    /// Get the path to userConfig.json
+    /// Get the path to userConfig.json in the platform config directory
     pub fn config_path() -> Result<PathBuf> {
+        let dir = Self::config_dir()?;
+        Ok(dir.join("userConfig.json"))
+    }
+
+    /// Get the platform-specific config directory
+    fn config_dir() -> Result<PathBuf> {
+        #[cfg(windows)]
+        {
+            let appdata =
+                std::env::var("APPDATA").context("APPDATA environment variable not set")?;
+            Ok(PathBuf::from(appdata).join("pc-bridge"))
+        }
+        #[cfg(not(windows))]
+        {
+            let config_home = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                format!("{}/.config", home)
+            });
+            Ok(PathBuf::from(config_home).join("pc-bridge"))
+        }
+    }
+
+    /// Legacy config path (next to the executable) — used for migration only
+    fn legacy_config_path() -> Result<PathBuf> {
         let exe = std::env::current_exe()?;
         let dir = exe.parent().context("No parent directory")?;
         Ok(dir.join("userConfig.json"))
+    }
+
+    /// Migrate config from legacy location (next to exe) to platform config directory
+    fn migrate_config_location() -> Result<()> {
+        let new_path = Self::config_path()?;
+        if new_path.exists() {
+            return Ok(()); // Already at new location
+        }
+
+        let old_path = match Self::legacy_config_path() {
+            Ok(p) if p.exists() => p,
+            _ => return Ok(()), // No legacy config to migrate
+        };
+
+        // Create new directory
+        if let Some(parent) = new_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create config directory {:?}", parent))?;
+        }
+
+        // Copy to new location (then remove old)
+        std::fs::copy(&old_path, &new_path).with_context(|| {
+            format!(
+                "Failed to migrate config from {:?} to {:?}",
+                old_path, new_path
+            )
+        })?;
+
+        if let Err(e) = std::fs::remove_file(&old_path) {
+            warn!(
+                "Config migrated but failed to remove old file {:?}: {}",
+                old_path, e
+            );
+        } else {
+            info!("Migrated config from {:?} to {:?}", old_path, new_path);
+        }
+
+        Ok(())
     }
 
     /// Merge Steam-discovered games into the config and save
@@ -443,6 +508,13 @@ impl Config {
     /// Save current config to userConfig.json
     pub fn save(&self) -> Result<()> {
         let config_path = Self::config_path()?;
+
+        // Ensure directory exists (needed for first save to AppData)
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create config directory {:?}", parent))?;
+        }
+
         let content = serde_json::to_string_pretty(self)?;
         std::fs::write(&config_path, content)
             .with_context(|| format!("Failed to write config to {:?}", config_path))?;

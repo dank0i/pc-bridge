@@ -192,10 +192,17 @@ jobs:
           chmod +x pc-bridge-linux
           rm -rf windows linux
 
+      - name: Generate SHA-256 checksums
+        run: |
+          sha256sum pc-bridge-windows.exe > pc-bridge-windows.exe.sha256
+          sha256sum pc-bridge-linux > pc-bridge-linux.sha256
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             pc-bridge-windows.exe
+            pc-bridge-windows.exe.sha256
             pc-bridge-linux
+            pc-bridge-linux.sha256
           generate_release_notes: true

@@ -1,6 +1,6 @@
 [package]
 name = "pc-bridge"
-version = "3.3.2"
+version = "3.3.3"
 edition = "2024"
 authors = ["dank0i"]
 description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
@@ -19,7 +19,7 @@ default = []
 # Async runtime
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "signal"] }
 
-# MQTT (TLS disabled - local broker uses plain TCP)
+# MQTT (local broker uses plain TCP)
 rumqttc = { version = "0.25", default-features = false }
 
 # Serialization

@@ -385,17 +385,9 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
         custom_commands: Vec::new(),
     };
 
+    full_config.save().map_err(std::io::Error::other)?;
+
     let config_path = crate::config::Config::config_path().map_err(std::io::Error::other)?;
-
-    // Create directory if needed
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let json = serde_json::to_string_pretty(&full_config).map_err(std::io::Error::other)?;
-
-    std::fs::write(&config_path, json)?;
-
     info!("Configuration saved to {:?}", config_path);
     Ok(config_path)
 }
