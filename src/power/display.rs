@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, keybd_event,
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
 };
 use windows::Win32::UI::WindowsAndMessaging::{HWND_BROADCAST, SendMessageW};
 
@@ -128,11 +128,26 @@ fn turn_on_monitor() {
 /// F15 is rarely used by applications, won't trigger actions
 fn send_benign_keypress() {
     unsafe {
+        let mut input = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(VK_F15),
+                    wScan: 0,
+                    dwFlags: KEYBD_EVENT_FLAGS(0),
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+
         // Key down F15
-        keybd_event(VK_F15 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
+        SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
         std::thread::sleep(Duration::from_millis(10));
+
         // Key up F15
-        keybd_event(VK_F15 as u8, 0, KEYEVENTF_KEYUP, 0);
+        input.Anonymous.ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
     }
 }
 

@@ -97,7 +97,7 @@ impl CommandExecutor {
             // Discord: Leave the current voice channel by simulating a keybind
             // (default: Ctrl+F6, Discord's "Disconnect from Voice Channel").
             // Configurable via discord_keybind in userConfig.json.
-            // Runs on a blocking thread because keybd_event uses sleep() between
+            // Runs on a blocking thread because SendInput uses sleep() between
             // key-down and key-up events.
             "DiscordLeaveChannel" => {
                 let keybind = state
@@ -464,11 +464,12 @@ fn expand_env_vars(s: &str) -> String {
 /// Send a configurable keybind (e.g. "ctrl+f6", "ctrl+shift+m").
 ///
 /// Parses the keybind string into modifiers + key, then simulates
-/// the keypresses via `keybd_event`. Spaced 10ms apart to ensure
+/// the keypresses via `SendInput`. Spaced 10ms apart to ensure
 /// the OS input queue processes them in order.
 fn send_keybind(keybind: &str) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, keybd_event,
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
+        VIRTUAL_KEY,
     };
 
     let parts: Vec<&str> = keybind.split('+').map(str::trim).collect();
@@ -502,21 +503,38 @@ fn send_keybind(keybind: &str) {
         return;
     };
 
+    let make_input = |vk_code: u8, flags: KEYBD_EVENT_FLAGS| -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(vk_code as u16),
+                    wScan: 0,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    };
+
+    let input_size = std::mem::size_of::<INPUT>() as i32;
+
     unsafe {
         // Press modifiers
         for &m in &modifiers {
-            keybd_event(m, 0, KEYBD_EVENT_FLAGS(0), 0);
+            SendInput(&[make_input(m, KEYBD_EVENT_FLAGS(0))], input_size);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         // Press key
-        keybd_event(vk, 0, KEYBD_EVENT_FLAGS(0), 0);
+        SendInput(&[make_input(vk, KEYBD_EVENT_FLAGS(0))], input_size);
         std::thread::sleep(std::time::Duration::from_millis(10));
         // Release key
-        keybd_event(vk, 0, KEYEVENTF_KEYUP, 0);
+        SendInput(&[make_input(vk, KEYEVENTF_KEYUP)], input_size);
         std::thread::sleep(std::time::Duration::from_millis(10));
         // Release modifiers (reverse order)
         for &m in modifiers.iter().rev() {
-            keybd_event(m, 0, KEYEVENTF_KEYUP, 0);
+            SendInput(&[make_input(m, KEYEVENTF_KEYUP)], input_size);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }

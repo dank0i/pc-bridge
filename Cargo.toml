@@ -1,6 +1,6 @@
 [package]
 name = "pc-bridge"
-version = "3.3.3"
+version = "3.3.4"
 edition = "2024"
 authors = ["dank0i"]
 description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
