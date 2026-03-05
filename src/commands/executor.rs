@@ -23,10 +23,8 @@ fn get_predefined_command(name: &str) -> Option<&'static str> {
     match name {
         "Screensaver" => Some(r#"%windir%\System32\scrnsave.scr /s"#),
         // These are handled natively in execute_command
-        "Wake" | "Lock" | "Hibernate" | "Restart" | "VolumeSet" | "VolumeMute"
-        | "MediaPlayPause" | "MediaNext" | "MediaPrevious" | "MediaStop" => None,
-        "Shutdown" => Some("shutdown -s -t 0"),
-        "Sleep" => Some("Rundll32.exe powrprof.dll,SetSuspendState 0,1,0"),
+        "Wake" | "Lock" | "Hibernate" | "Restart" | "Shutdown" | "Sleep" | "VolumeSet"
+        | "VolumeMute" | "MediaPlayPause" | "MediaNext" | "MediaPrevious" | "MediaStop" => None,
         _ => None,
     }
 }
@@ -122,6 +120,14 @@ impl CommandExecutor {
             }
             "Lock" => {
                 lock_workstation();
+                return Ok(());
+            }
+            "Shutdown" => {
+                shutdown();
+                return Ok(());
+            }
+            "Sleep" => {
+                sleep();
                 return Ok(());
             }
             "Hibernate" => {
@@ -316,6 +322,8 @@ pub(crate) fn resolve_command_action(
         "DiscordLeaveChannel" => return CommandAction::Native("DiscordLeaveChannel"),
         "Wake" => return CommandAction::Native("Wake"),
         "Lock" => return CommandAction::Native("Lock"),
+        "Shutdown" => return CommandAction::Native("Shutdown"),
+        "Sleep" => return CommandAction::Native("Sleep"),
         "Hibernate" => return CommandAction::Native("Hibernate"),
         "Restart" => return CommandAction::Native("Restart"),
         "notification" => {
@@ -586,6 +594,55 @@ fn lock_workstation() {
     }
 }
 
+/// Shutdown system (native, no PowerShell)
+fn shutdown() {
+    use windows::Win32::Foundation::{HANDLE, LUID};
+    use windows::Win32::Security::{
+        AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
+        TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Shutdown::{
+        EWX_POWEROFF, EWX_SHUTDOWN, ExitWindowsEx, SHUTDOWN_REASON,
+    };
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    use windows::Win32::System::Threading::OpenProcessToken;
+    use windows::core::w;
+
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &raw mut token,
+        )
+        .is_ok()
+        {
+            let mut luid = LUID::default();
+            if LookupPrivilegeValueW(None, w!("SeShutdownPrivilege"), &raw mut luid).is_ok() {
+                let tp = TOKEN_PRIVILEGES {
+                    PrivilegeCount: 1,
+                    Privileges: [LUID_AND_ATTRIBUTES {
+                        Luid: luid,
+                        Attributes: SE_PRIVILEGE_ENABLED,
+                    }],
+                };
+                let _ = AdjustTokenPrivileges(token, false, Some(&raw const tp), 0, None, None);
+            }
+        }
+
+        let _ = ExitWindowsEx(EWX_SHUTDOWN | EWX_POWEROFF, SHUTDOWN_REASON(0));
+    }
+}
+
+/// Sleep (native, no PowerShell)
+fn sleep() {
+    use windows::Win32::System::Power::SetSuspendState;
+    unsafe {
+        // SetSuspendState(hibernate=false, force=false, wakeupEventsDisabled=false)
+        let _ = SetSuspendState(false, false, false);
+    }
+}
+
 /// Hibernate (native, no PowerShell)
 fn hibernate() {
     use windows::Win32::System::Power::SetSuspendState;
@@ -660,20 +717,17 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_predefined_shutdown() {
+    fn test_resolve_shutdown_returns_not_found() {
+        // Shutdown is now handled natively, not via shell
         let result = resolve_shell_command("Shutdown", "", false);
-        assert_eq!(
-            result,
-            ShellResolution::Predefined("shutdown -s -t 0".to_string())
-        );
+        assert_eq!(result, ShellResolution::NotFound);
     }
 
     #[test]
-    fn test_resolve_predefined_sleep() {
+    fn test_resolve_sleep_returns_not_found() {
+        // Sleep is now handled natively, not via shell
         let result = resolve_shell_command("Sleep", "", false);
-        assert!(
-            matches!(result, ShellResolution::Predefined(ref cmd) if cmd.contains("SetSuspendState")),
-        );
+        assert_eq!(result, ShellResolution::NotFound);
     }
 
     #[test]
@@ -915,15 +969,15 @@ mod tests {
     }
 
     #[test]
-    fn test_predefined_shutdown() {
-        assert_eq!(get_predefined_command("Shutdown"), Some("shutdown -s -t 0"));
+    fn test_predefined_shutdown_returns_none() {
+        // Shutdown is now handled natively
+        assert_eq!(get_predefined_command("Shutdown"), None);
     }
 
     #[test]
-    fn test_predefined_sleep() {
-        let cmd = get_predefined_command("Sleep");
-        assert!(cmd.is_some());
-        assert!(cmd.unwrap().contains("SetSuspendState"));
+    fn test_predefined_sleep_returns_none() {
+        // Sleep is now handled natively
+        assert_eq!(get_predefined_command("Sleep"), None);
     }
 
     #[test]
@@ -932,6 +986,8 @@ mod tests {
         for name in &[
             "Wake",
             "Lock",
+            "Shutdown",
+            "Sleep",
             "Hibernate",
             "Restart",
             "VolumeSet",
@@ -1236,25 +1292,15 @@ mod tests {
     }
 
     #[test]
-    fn test_action_shutdown_produces_shell() {
+    fn test_action_shutdown_is_native() {
         let action = resolve_command_action("Shutdown", "", false);
-        assert_eq!(
-            action,
-            CommandAction::Shell(ShellResolution::Predefined("shutdown -s -t 0".to_string()))
-        );
+        assert_eq!(action, CommandAction::Native("Shutdown"));
     }
 
     #[test]
-    fn test_action_sleep_produces_shell() {
+    fn test_action_sleep_is_native() {
         let action = resolve_command_action("Sleep", "", false);
-        assert!(
-            matches!(
-                action,
-                CommandAction::Shell(ShellResolution::Predefined(ref cmd))
-                if cmd.contains("SetSuspendState")
-            ),
-            "Sleep should produce shell command: {action:?}"
-        );
+        assert_eq!(action, CommandAction::Native("Sleep"));
     }
 
     // -- THE CRITICAL BUG TEST --
