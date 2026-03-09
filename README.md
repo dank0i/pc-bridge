@@ -128,7 +128,32 @@ All features are opt-in via the `features` object (except `power_events` which d
 
 The `games` object maps process names to game IDs:
 - **Key**: Part of the process name to match (case-insensitive)
-- **Value**: The game ID reported to Home Assistant
+- **Value**: The game ID reported to Home Assistant (string or object)
+
+**Full format** (used by Steam auto-discovery):
+
+```json
+{
+  "games": {
+    "bg3": {
+      "game_id": "baldurs_gate_3",
+      "app_id": 1086940,
+      "name": "Baldur's Gate 3",
+      "entity_id": "baldur_s_gate_3",
+      "exposed": true
+    }
+  }
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `game_id` | Yes | Identifier reported to Home Assistant |
+| `app_id` | No | Steam App ID (set automatically by Steam discovery) |
+| `name` | No | Display name (defaults to title-cased `game_id`) |
+| `entity_id` | No | HA switch entity slug override — lowercase alphanumeric + underscores only, no `switch.` prefix (defaults to `game_id`) |
+| `exposed` | No | Whether to include in the game catalog sensor (default: `true`) |
+| `auto_discovered` | No | Set automatically by Steam discovery |
 
 ## Custom Sensors & Commands
 
@@ -434,6 +459,7 @@ PC Bridge auto-discovers via MQTT. After connecting, you'll get:
 - `sensor.<device>_battery_level` - Battery percentage — instant via OS power events
 - `sensor.<device>_battery_charging` - "true" or "false" — instant via OS power events
 - `sensor.<device>_active_window` - Current foreground window title — instant via SetWinEventHook
+- `sensor.<device>_game_catalog` - Number of exposed games, with full game list as attributes (retained)
 - `sensor.<device>_steam_updating` - "on"/"off" with game list — instant via filesystem watcher
 - `sensor.<device>_volume_level` - System volume percentage
 - `sensor.<device>_<custom>` - Any custom sensors you define

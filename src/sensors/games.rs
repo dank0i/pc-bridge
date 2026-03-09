@@ -5,12 +5,24 @@
 //! 2. Manual config `games` map (pattern → game_id)
 //!
 //! Uses push notifications from ProcessWatcher for instant detection.
+//!
+//! Also publishes a `game_catalog` sensor listing all exposed games from config.
 
 use log::{debug, info};
+use serde::Serialize;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::AppState;
+
+#[derive(Serialize)]
+struct CatalogEntry {
+    game_id: String,
+    name: String,
+    entity_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    app_id: Option<u32>,
+}
 
 /// Cached lowered game patterns to avoid recomputing on every WMI event
 struct CachedGamePatterns {
@@ -52,6 +64,8 @@ impl GameSensor {
         // Build cached patterns once at startup
         let config = self.state.config.read().await;
         let mut cached = CachedGamePatterns::build(&config.games);
+        // Publish initial game catalog
+        self.publish_game_catalog(&config.games).await;
         drop(config);
 
         // Publish initial state
@@ -74,6 +88,7 @@ impl GameSensor {
                 Ok(()) = config_rx.recv() => {
                     let config = self.state.config.read().await;
                     cached = CachedGamePatterns::build(&config.games);
+                    self.publish_game_catalog(&config.games).await;
                     drop(config);
                     debug!("Game sensor: rebuilt cached patterns");
                     // Re-detect with new patterns
@@ -86,6 +101,9 @@ impl GameSensor {
                 // MQTT reconnected — force republish retained state
                 Ok(()) = reconnect_rx.recv() => {
                     info!("Game sensor: MQTT reconnected, republishing current state");
+                    let config = self.state.config.read().await;
+                    self.publish_game_catalog(&config.games).await;
+                    drop(config);
                     let (game_id, display_name) = self.detect_game(&cached).await;
                     self.publish_game(&game_id, &display_name).await;
                     last_game_id = game_id;
@@ -131,6 +149,41 @@ impl GameSensor {
             .mqtt
             .publish_sensor_attributes("runninggames", &attrs)
             .await;
+    }
+
+    /// Publish the game catalog sensor — a retained list of all exposed games from config.
+    async fn publish_game_catalog(
+        &self,
+        games: &std::collections::HashMap<String, crate::config::GameConfig>,
+    ) {
+        // Collect into typed structs, sort by name, then serialize once
+        let mut entries: Vec<CatalogEntry> = games
+            .values()
+            .filter(|gc| gc.is_exposed())
+            .map(|gc| CatalogEntry {
+                game_id: gc.game_id().to_owned(),
+                name: gc.display_name(),
+                entity_id: gc.entity_id(),
+                app_id: gc.app_id(),
+            })
+            .collect();
+
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let count = entries.len();
+        self.state
+            .mqtt
+            .publish_sensor_retained("game_catalog", &count.to_string())
+            .await;
+        let attrs = serde_json::json!({
+            "games": entries,
+            "count": count,
+        });
+        self.state
+            .mqtt
+            .publish_sensor_attributes("game_catalog", &attrs)
+            .await;
+        debug!("Published game catalog with {} exposed games", count);
     }
 
     async fn detect_game(&self, cached: &CachedGamePatterns) -> (String, String) {
@@ -308,7 +361,9 @@ mod tests {
                 game_id: "helldivers_2".into(),
                 app_id: Some(553850),
                 name: Some("HELLDIVERS 2".into()),
+                entity_id: None,
                 auto_discovered: true,
+                exposed: true,
             },
         )]);
         let processes = procs(&["helldivers2.exe"]);
@@ -325,7 +380,9 @@ mod tests {
                 game_id: "call_of_duty_mw".into(),
                 app_id: None,
                 name: None,
+                entity_id: None,
                 auto_discovered: false,
+                exposed: true,
             },
         )]);
         let processes = procs(&["cod_mw.exe"]);
@@ -428,7 +485,9 @@ mod tests {
                 game_id: "battlefield_6".into(),
                 app_id: Some(1517290),
                 name: Some("Battlefield 2042".into()),
+                entity_id: None,
                 auto_discovered: true,
+                exposed: true,
             },
         )]);
         let processes = procs(&["bf2042.exe", "chrome.exe", "explorer.exe"]);
@@ -443,5 +502,199 @@ mod tests {
             serde_json::to_string(&attrs).unwrap(),
             r#"{"display_name":"Battlefield 2042"}"#
         );
+    }
+
+    // ===== CatalogEntry serialization =====
+
+    #[test]
+    fn test_catalog_entry_with_app_id() {
+        let entry = CatalogEntry {
+            game_id: "battlefield_6".into(),
+            name: "Battlefield 2042".into(),
+            entity_id: "switch.battlefield_6".into(),
+            app_id: Some(1517290),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["game_id"], "battlefield_6");
+        assert_eq!(json["name"], "Battlefield 2042");
+        assert_eq!(json["entity_id"], "switch.battlefield_6");
+        assert_eq!(json["app_id"], 1517290);
+    }
+
+    #[test]
+    fn test_catalog_entry_without_app_id_omits_field() {
+        let entry = CatalogEntry {
+            game_id: "minecraft".into(),
+            name: "Minecraft".into(),
+            entity_id: "switch.minecraft".into(),
+            app_id: None,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["game_id"], "minecraft");
+        assert!(
+            json.get("app_id").is_none(),
+            "app_id should be omitted when None"
+        );
+    }
+
+    #[test]
+    fn test_catalog_entry_with_entity_id_override() {
+        let entry = CatalogEntry {
+            game_id: "baldurs_gate_3".into(),
+            name: "Baldur's Gate 3".into(),
+            entity_id: "switch.baldur_s_gate_3".into(),
+            app_id: Some(1086940),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        // entity_id should reflect the override, not the game_id
+        assert_eq!(json["entity_id"], "switch.baldur_s_gate_3");
+        assert_ne!(
+            json["entity_id"].as_str().unwrap(),
+            &format!("switch.{}", json["game_id"].as_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_catalog_entries_sort_by_name() {
+        let mut entries = vec![
+            CatalogEntry {
+                game_id: "zelda".into(),
+                name: "Zelda".into(),
+                entity_id: "switch.zelda".into(),
+                app_id: None,
+            },
+            CatalogEntry {
+                game_id: "apex".into(),
+                name: "Apex Legends".into(),
+                entity_id: "switch.apex".into(),
+                app_id: Some(1172470),
+            },
+            CatalogEntry {
+                game_id: "minecraft".into(),
+                name: "Minecraft".into(),
+                entity_id: "switch.minecraft".into(),
+                app_id: None,
+            },
+        ];
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(entries[0].name, "Apex Legends");
+        assert_eq!(entries[1].name, "Minecraft");
+        assert_eq!(entries[2].name, "Zelda");
+    }
+
+    // ===== is_exposed filtering =====
+
+    #[test]
+    fn test_simple_config_always_exposed() {
+        let gc = GameConfig::Simple("test_game".into());
+        assert!(gc.is_exposed());
+    }
+
+    #[test]
+    fn test_full_config_exposed_default_true() {
+        let json = r#"{"game_id": "test"}"#;
+        let gc: GameConfig = serde_json::from_str(json).unwrap();
+        assert!(gc.is_exposed());
+    }
+
+    #[test]
+    fn test_full_config_exposed_false_filtered() {
+        let gc = GameConfig::Full {
+            game_id: "hidden_game".into(),
+            app_id: None,
+            name: None,
+            entity_id: None,
+            auto_discovered: false,
+            exposed: false,
+        };
+        assert!(!gc.is_exposed());
+
+        // Should be filtered out of catalog
+        let games: HashMap<String, GameConfig> = [("hidden".into(), gc)].into_iter().collect();
+        let exposed: Vec<_> = games.values().filter(|g| g.is_exposed()).collect();
+        assert!(exposed.is_empty());
+    }
+
+    #[test]
+    fn test_mixed_exposed_filtering() {
+        let games: HashMap<String, GameConfig> = [
+            ("bf2042".into(), GameConfig::Simple("battlefield_6".into())),
+            (
+                "hidden".into(),
+                GameConfig::Full {
+                    game_id: "hidden_game".into(),
+                    app_id: None,
+                    name: None,
+                    entity_id: None,
+                    auto_discovered: false,
+                    exposed: false,
+                },
+            ),
+            (
+                "cs2".into(),
+                GameConfig::Full {
+                    game_id: "counter_strike_2".into(),
+                    app_id: Some(730),
+                    name: Some("Counter-Strike 2".into()),
+                    entity_id: None,
+                    auto_discovered: true,
+                    exposed: true,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        let exposed: Vec<_> = games.values().filter(|g| g.is_exposed()).collect();
+        assert_eq!(exposed.len(), 2);
+    }
+
+    // ===== entity_id method =====
+
+    #[test]
+    fn test_entity_id_simple_config() {
+        let gc = GameConfig::Simple("battlefield_6".into());
+        assert_eq!(gc.entity_id(), "switch.battlefield_6");
+    }
+
+    #[test]
+    fn test_entity_id_full_no_override() {
+        let gc = GameConfig::Full {
+            game_id: "counter_strike_2".into(),
+            app_id: Some(730),
+            name: None,
+            entity_id: None,
+            auto_discovered: false,
+            exposed: true,
+        };
+        assert_eq!(gc.entity_id(), "switch.counter_strike_2");
+    }
+
+    #[test]
+    fn test_entity_id_full_with_override() {
+        let gc = GameConfig::Full {
+            game_id: "baldurs_gate_3".into(),
+            app_id: Some(1086940),
+            name: Some("Baldur's Gate 3".into()),
+            entity_id: Some("baldur_s_gate_3".into()),
+            auto_discovered: false,
+            exposed: true,
+        };
+        assert_eq!(gc.entity_id(), "switch.baldur_s_gate_3");
+    }
+
+    #[test]
+    fn test_entity_id_override_prepends_switch_prefix() {
+        let gc = GameConfig::Full {
+            game_id: "repo".into(),
+            app_id: None,
+            name: None,
+            entity_id: Some("r_e_p_o".into()),
+            auto_discovered: false,
+            exposed: true,
+        };
+        let eid = gc.entity_id();
+        assert!(eid.starts_with("switch."));
+        assert_eq!(eid, "switch.r_e_p_o");
     }
 }

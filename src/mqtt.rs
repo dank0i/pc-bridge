@@ -59,6 +59,7 @@ impl CachedTopics {
             "memory_usage",
             "steam_updating",
             "bridge_health",
+            "game_catalog",
         ];
 
         for name in sensors {
@@ -340,6 +341,15 @@ impl MqttClient {
                 "runninggames",
                 "Running Game",
                 "mdi:gamepad-variant",
+                None,
+                None,
+            )
+            .await;
+            self.register_sensor_with_attributes(
+                device,
+                "game_catalog",
+                "Game Catalog",
+                "mdi:gamepad-variant-outline",
                 None,
                 None,
             )
