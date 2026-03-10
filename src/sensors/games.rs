@@ -234,7 +234,7 @@ fn match_games_in_processes(
     } else {
         let ids: Vec<&str> = found_games.iter().map(|(id, _)| id.as_str()).collect();
         let names: Vec<&str> = found_games.iter().map(|(_, name)| name.as_str()).collect();
-        (ids.join(","), names.join(","))
+        (ids.join(","), names.join(", "))
     }
 }
 
