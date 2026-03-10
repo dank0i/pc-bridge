@@ -19,7 +19,6 @@ use crate::AppState;
 struct CatalogEntry {
     game_id: String,
     name: String,
-    entity_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     app_id: Option<u32>,
     /// Process name used for detection and close commands
@@ -168,7 +167,6 @@ impl GameSensor {
             .map(|(process_pattern, gc)| CatalogEntry {
                 game_id: gc.game_id().to_owned(),
                 name: gc.display_name(),
-                entity_id: gc.entity_id(),
                 app_id: gc.app_id(),
                 process_name: process_pattern.clone(),
                 launch_command: gc.launch_command(),
@@ -368,7 +366,6 @@ mod tests {
                 game_id: "helldivers_2".into(),
                 app_id: Some(553850),
                 name: Some("HELLDIVERS 2".into()),
-                entity_id: None,
                 auto_discovered: true,
                 exposed: true,
             },
@@ -387,7 +384,6 @@ mod tests {
                 game_id: "call_of_duty_mw".into(),
                 app_id: None,
                 name: None,
-                entity_id: None,
                 auto_discovered: false,
                 exposed: true,
             },
@@ -492,7 +488,6 @@ mod tests {
                 game_id: "battlefield_6".into(),
                 app_id: Some(1517290),
                 name: Some("Battlefield 2042".into()),
-                entity_id: None,
                 auto_discovered: true,
                 exposed: true,
             },
@@ -518,7 +513,6 @@ mod tests {
         let entry = CatalogEntry {
             game_id: "battlefield_6".into(),
             name: "Battlefield 2042".into(),
-            entity_id: "switch.battlefield_6".into(),
             app_id: Some(1517290),
             process_name: "bf2042".into(),
             launch_command: Some("steam:1517290".into()),
@@ -526,7 +520,6 @@ mod tests {
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json["game_id"], "battlefield_6");
         assert_eq!(json["name"], "Battlefield 2042");
-        assert_eq!(json["entity_id"], "switch.battlefield_6");
         assert_eq!(json["app_id"], 1517290);
         assert_eq!(json["process_name"], "bf2042");
         assert_eq!(json["launch_command"], "steam:1517290");
@@ -537,7 +530,6 @@ mod tests {
         let entry = CatalogEntry {
             game_id: "minecraft".into(),
             name: "Minecraft".into(),
-            entity_id: "switch.minecraft".into(),
             app_id: None,
             process_name: "javaw".into(),
             launch_command: None,
@@ -556,31 +548,11 @@ mod tests {
     }
 
     #[test]
-    fn test_catalog_entry_with_entity_id_override() {
-        let entry = CatalogEntry {
-            game_id: "baldurs_gate_3".into(),
-            name: "Baldur's Gate 3".into(),
-            entity_id: "switch.baldur_s_gate_3".into(),
-            app_id: Some(1086940),
-            process_name: "bg3_dx11".into(),
-            launch_command: Some("steam:1086940".into()),
-        };
-        let json = serde_json::to_value(&entry).unwrap();
-        // entity_id should reflect the override, not the game_id
-        assert_eq!(json["entity_id"], "switch.baldur_s_gate_3");
-        assert_ne!(
-            json["entity_id"].as_str().unwrap(),
-            &format!("switch.{}", json["game_id"].as_str().unwrap())
-        );
-    }
-
-    #[test]
     fn test_catalog_entries_sort_by_name() {
         let mut entries = vec![
             CatalogEntry {
                 game_id: "zelda".into(),
                 name: "Zelda".into(),
-                entity_id: "switch.zelda".into(),
                 app_id: None,
                 process_name: "zelda".into(),
                 launch_command: None,
@@ -588,7 +560,6 @@ mod tests {
             CatalogEntry {
                 game_id: "apex".into(),
                 name: "Apex Legends".into(),
-                entity_id: "switch.apex".into(),
                 app_id: Some(1172470),
                 process_name: "r5apex_dx12".into(),
                 launch_command: Some("steam:1172470".into()),
@@ -596,7 +567,6 @@ mod tests {
             CatalogEntry {
                 game_id: "minecraft".into(),
                 name: "Minecraft".into(),
-                entity_id: "switch.minecraft".into(),
                 app_id: None,
                 process_name: "javaw".into(),
                 launch_command: None,
@@ -629,7 +599,6 @@ mod tests {
             game_id: "hidden_game".into(),
             app_id: None,
             name: None,
-            entity_id: None,
             auto_discovered: false,
             exposed: false,
         };
@@ -651,7 +620,6 @@ mod tests {
                     game_id: "hidden_game".into(),
                     app_id: None,
                     name: None,
-                    entity_id: None,
                     auto_discovered: false,
                     exposed: false,
                 },
@@ -662,7 +630,6 @@ mod tests {
                     game_id: "counter_strike_2".into(),
                     app_id: Some(730),
                     name: Some("Counter-Strike 2".into()),
-                    entity_id: None,
                     auto_discovered: true,
                     exposed: true,
                 },
@@ -673,54 +640,5 @@ mod tests {
 
         let exposed: Vec<_> = games.values().filter(|g| g.is_exposed()).collect();
         assert_eq!(exposed.len(), 2);
-    }
-
-    // ===== entity_id method =====
-
-    #[test]
-    fn test_entity_id_simple_config() {
-        let gc = GameConfig::Simple("battlefield_6".into());
-        assert_eq!(gc.entity_id(), "switch.battlefield_6");
-    }
-
-    #[test]
-    fn test_entity_id_full_no_override() {
-        let gc = GameConfig::Full {
-            game_id: "counter_strike_2".into(),
-            app_id: Some(730),
-            name: None,
-            entity_id: None,
-            auto_discovered: false,
-            exposed: true,
-        };
-        assert_eq!(gc.entity_id(), "switch.counter_strike_2");
-    }
-
-    #[test]
-    fn test_entity_id_full_with_override() {
-        let gc = GameConfig::Full {
-            game_id: "baldurs_gate_3".into(),
-            app_id: Some(1086940),
-            name: Some("Baldur's Gate 3".into()),
-            entity_id: Some("baldur_s_gate_3".into()),
-            auto_discovered: false,
-            exposed: true,
-        };
-        assert_eq!(gc.entity_id(), "switch.baldur_s_gate_3");
-    }
-
-    #[test]
-    fn test_entity_id_override_prepends_switch_prefix() {
-        let gc = GameConfig::Full {
-            game_id: "repo".into(),
-            app_id: None,
-            name: None,
-            entity_id: Some("r_e_p_o".into()),
-            auto_discovered: false,
-            exposed: true,
-        };
-        let eid = gc.entity_id();
-        assert!(eid.starts_with("switch."));
-        assert_eq!(eid, "switch.r_e_p_o");
     }
 }

@@ -66,11 +66,6 @@ pub enum GameConfig {
         app_id: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
-        /// HA switch entity slug override (e.g. "baldur_s_gate_3").
-        /// When absent, defaults to game_id. Prepended with "switch." in output.
-        /// Must be lowercase alphanumeric + underscores only.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        entity_id: Option<String>,
         /// Non-Steam launch command (e.g. "lnk:C:\\Users\\...\\Fortnite.lnk").
         /// For Steam games this is derived from app_id automatically.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,19 +127,6 @@ impl GameConfig {
         }
     }
 
-    /// Get the HA switch entity_id for this game.
-    /// Returns "switch.{entity_id}" if override is set, otherwise "switch.{game_id}".
-    pub fn entity_id(&self) -> String {
-        match self {
-            GameConfig::Simple(id) => format!("switch.{id}"),
-            GameConfig::Full {
-                entity_id: Some(slug),
-                ..
-            } => format!("switch.{slug}"),
-            GameConfig::Full { game_id, .. } => format!("switch.{game_id}"),
-        }
-    }
-
     /// Get app_id if available
     pub fn app_id(&self) -> Option<u32> {
         match self {
@@ -174,7 +156,6 @@ impl GameConfig {
             game_id,
             app_id: Some(app_id),
             name: Some(name),
-            entity_id: None,
             launch_command: None,
             auto_discovered: true,
             exposed: true,
@@ -604,36 +585,6 @@ impl Config {
             Self::validate_custom_command(cmd, self.custom_command_privileges_allowed)?;
         }
 
-        // Validate game entity_id overrides
-        for (pattern, gc) in &self.games {
-            if let GameConfig::Full {
-                entity_id: Some(slug),
-                ..
-            } = gc
-            {
-                if slug.is_empty() {
-                    bail!("game '{}': entity_id cannot be empty", pattern);
-                }
-                if let Some(stripped) = slug.strip_prefix("switch.") {
-                    bail!(
-                        "game '{}': entity_id should not include 'switch.' prefix (just use '{}')",
-                        pattern,
-                        stripped
-                    );
-                }
-                if !slug
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-                {
-                    bail!(
-                        "game '{}': entity_id '{}' must be lowercase alphanumeric + underscores only",
-                        pattern,
-                        slug
-                    );
-                }
-            }
-        }
-
         Ok(())
     }
 
@@ -983,7 +934,6 @@ mod tests {
             game_id: "counter_strike_2".to_string(),
             app_id: Some(730),
             name: Some("Counter-Strike 2".to_string()),
-            entity_id: None,
             launch_command: None,
             auto_discovered: true,
             exposed: true,
@@ -1004,7 +954,6 @@ mod tests {
             game_id: "cs2".to_string(),
             app_id: Some(730),
             name: Some("Counter-Strike 2".to_string()),
-            entity_id: None,
             launch_command: None,
             auto_discovered: false,
             exposed: true,
@@ -1045,7 +994,6 @@ mod tests {
             game_id: "cs2".into(),
             app_id: Some(730),
             name: None,
-            entity_id: None,
             launch_command: None,
             auto_discovered: false,
             exposed: true,
@@ -1059,7 +1007,6 @@ mod tests {
             game_id: "fortnite".into(),
             app_id: None,
             name: None,
-            entity_id: None,
             launch_command: Some("lnk:C:\\Users\\danke\\Desktop\\Fortnite.lnk".into()),
             auto_discovered: false,
             exposed: true,
@@ -1082,7 +1029,6 @@ mod tests {
             game_id: "unknown".into(),
             app_id: None,
             name: None,
-            entity_id: None,
             launch_command: None,
             auto_discovered: false,
             exposed: true,
@@ -1328,153 +1274,6 @@ mod tests {
         let mut config = minimal_config();
         config.mqtt.client_id = Some("custom-id".to_string());
         assert_eq!(config.client_id(), "custom-id");
-    }
-
-    // ===== Entity ID validation =====
-
-    #[test]
-    fn test_validate_entity_id_valid_slug() {
-        let mut config = minimal_config();
-        config.games.insert(
-            "bg3".into(),
-            GameConfig::Full {
-                game_id: "baldurs_gate_3".into(),
-                app_id: None,
-                name: None,
-                entity_id: Some("baldur_s_gate_3".into()),
-                launch_command: None,
-                auto_discovered: false,
-                exposed: true,
-            },
-        );
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_entity_id_empty_rejected() {
-        let mut config = minimal_config();
-        config.games.insert(
-            "bg3".into(),
-            GameConfig::Full {
-                game_id: "baldurs_gate_3".into(),
-                app_id: None,
-                name: None,
-                entity_id: Some(String::new()),
-                launch_command: None,
-                auto_discovered: false,
-                exposed: true,
-            },
-        );
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("cannot be empty"));
-    }
-
-    #[test]
-    fn test_validate_entity_id_switch_prefix_rejected() {
-        let mut config = minimal_config();
-        config.games.insert(
-            "bg3".into(),
-            GameConfig::Full {
-                game_id: "baldurs_gate_3".into(),
-                app_id: None,
-                name: None,
-                entity_id: Some("switch.baldur_s_gate_3".into()),
-                launch_command: None,
-                auto_discovered: false,
-                exposed: true,
-            },
-        );
-        let err = config.validate().unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("should not include 'switch.' prefix")
-        );
-        // Should suggest the fix
-        assert!(err.to_string().contains("baldur_s_gate_3"));
-    }
-
-    #[test]
-    fn test_validate_entity_id_uppercase_rejected() {
-        let mut config = minimal_config();
-        config.games.insert(
-            "bg3".into(),
-            GameConfig::Full {
-                game_id: "baldurs_gate_3".into(),
-                app_id: None,
-                name: None,
-                entity_id: Some("Baldurs_Gate_3".into()),
-                launch_command: None,
-                auto_discovered: false,
-                exposed: true,
-            },
-        );
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("lowercase alphanumeric"));
-    }
-
-    #[test]
-    fn test_validate_entity_id_special_chars_rejected() {
-        let mut config = minimal_config();
-        config.games.insert(
-            "bg3".into(),
-            GameConfig::Full {
-                game_id: "baldurs_gate_3".into(),
-                app_id: None,
-                name: None,
-                entity_id: Some("baldur's-gate-3".into()),
-                launch_command: None,
-                auto_discovered: false,
-                exposed: true,
-            },
-        );
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("lowercase alphanumeric"));
-    }
-
-    #[test]
-    fn test_validate_entity_id_none_passes() {
-        let mut config = minimal_config();
-        config.games.insert(
-            "bf2042".into(),
-            GameConfig::Full {
-                game_id: "battlefield_6".into(),
-                app_id: None,
-                name: None,
-                entity_id: None,
-                launch_command: None,
-                auto_discovered: false,
-                exposed: true,
-            },
-        );
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_entity_id_numeric_slug_ok() {
-        let mut config = minimal_config();
-        config.games.insert(
-            "fc26".into(),
-            GameConfig::Full {
-                game_id: "ea_sports_fc_26".into(),
-                app_id: None,
-                name: None,
-                entity_id: Some("fc_26".into()),
-                launch_command: None,
-                auto_discovered: false,
-                exposed: true,
-            },
-        );
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_entity_id_simple_config_skips_validation() {
-        // Simple configs don't have entity_id — validation should not touch them
-        let mut config = minimal_config();
-        config
-            .games
-            .insert("bf2042".into(), GameConfig::Simple("battlefield_6".into()));
-        assert!(config.validate().is_ok());
     }
 
     // ===== Interval defaults =====
