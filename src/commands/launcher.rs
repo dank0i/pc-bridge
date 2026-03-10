@@ -90,7 +90,7 @@ pub fn expand_launcher_shortcut(cmd: &str) -> Option<String> {
             }
             info!("Closing process: {}", arg);
             Some(format!(
-                r#"Get-Process | Where-Object {{ $_.ProcessName -eq '{}' }} | ForEach-Object {{ $_.CloseMainWindow() }}"#,
+                r#"Get-Process | Where-Object {{ $_.ProcessName -like '{}*' }} | ForEach-Object {{ $_.CloseMainWindow() }}"#,
                 process_name
             ))
         }
