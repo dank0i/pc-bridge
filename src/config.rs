@@ -71,6 +71,10 @@ pub enum GameConfig {
         /// Must be lowercase alphanumeric + underscores only.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         entity_id: Option<String>,
+        /// Non-Steam launch command (e.g. "lnk:C:\\Users\\...\\Fortnite.lnk").
+        /// For Steam games this is derived from app_id automatically.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        launch_command: Option<String>,
         /// Whether this was auto-discovered from Steam
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         auto_discovered: bool,
@@ -149,6 +153,21 @@ impl GameConfig {
         }
     }
 
+    /// Get the launch command for this game.
+    /// Steam games: "steam:{app_id}", non-Steam: explicit launch_command field.
+    pub fn launch_command(&self) -> Option<String> {
+        match self {
+            GameConfig::Simple(_) => None,
+            GameConfig::Full {
+                app_id,
+                launch_command,
+                ..
+            } => launch_command
+                .clone()
+                .or_else(|| app_id.map(|id| format!("steam:{id}"))),
+        }
+    }
+
     /// Create from Steam discovery
     pub fn from_steam(game_id: String, app_id: u32, name: String) -> Self {
         GameConfig::Full {
@@ -156,6 +175,7 @@ impl GameConfig {
             app_id: Some(app_id),
             name: Some(name),
             entity_id: None,
+            launch_command: None,
             auto_discovered: true,
             exposed: true,
         }
@@ -964,6 +984,7 @@ mod tests {
             app_id: Some(730),
             name: Some("Counter-Strike 2".to_string()),
             entity_id: None,
+            launch_command: None,
             auto_discovered: true,
             exposed: true,
         };
@@ -984,6 +1005,7 @@ mod tests {
             app_id: Some(730),
             name: Some("Counter-Strike 2".to_string()),
             entity_id: None,
+            launch_command: None,
             auto_discovered: false,
             exposed: true,
         };
@@ -1016,6 +1038,64 @@ mod tests {
     }
 
     // ===== GameConfig JSON serialization tests =====
+
+    #[test]
+    fn test_launch_command_steam_game() {
+        let config = GameConfig::Full {
+            game_id: "cs2".into(),
+            app_id: Some(730),
+            name: None,
+            entity_id: None,
+            launch_command: None,
+            auto_discovered: false,
+            exposed: true,
+        };
+        assert_eq!(config.launch_command(), Some("steam:730".into()));
+    }
+
+    #[test]
+    fn test_launch_command_explicit_overrides_steam() {
+        let config = GameConfig::Full {
+            game_id: "fortnite".into(),
+            app_id: None,
+            name: None,
+            entity_id: None,
+            launch_command: Some("lnk:C:\\Users\\danke\\Desktop\\Fortnite.lnk".into()),
+            auto_discovered: false,
+            exposed: true,
+        };
+        assert_eq!(
+            config.launch_command(),
+            Some("lnk:C:\\Users\\danke\\Desktop\\Fortnite.lnk".into())
+        );
+    }
+
+    #[test]
+    fn test_launch_command_simple_none() {
+        let config = GameConfig::Simple("test".into());
+        assert_eq!(config.launch_command(), None);
+    }
+
+    #[test]
+    fn test_launch_command_no_app_id_no_explicit() {
+        let config = GameConfig::Full {
+            game_id: "unknown".into(),
+            app_id: None,
+            name: None,
+            entity_id: None,
+            launch_command: None,
+            auto_discovered: false,
+            exposed: true,
+        };
+        assert_eq!(config.launch_command(), None);
+    }
+
+    #[test]
+    fn test_launch_command_deserializes_from_json() {
+        let json = r#"{"game_id": "fortnite", "launch_command": "lnk:C:\\Fortnite.lnk"}"#;
+        let config: GameConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.launch_command(), Some("lnk:C:\\Fortnite.lnk".into()));
+    }
 
     #[test]
     fn test_game_config_deserialize_simple() {
@@ -1262,6 +1342,7 @@ mod tests {
                 app_id: None,
                 name: None,
                 entity_id: Some("baldur_s_gate_3".into()),
+                launch_command: None,
                 auto_discovered: false,
                 exposed: true,
             },
@@ -1279,6 +1360,7 @@ mod tests {
                 app_id: None,
                 name: None,
                 entity_id: Some(String::new()),
+                launch_command: None,
                 auto_discovered: false,
                 exposed: true,
             },
@@ -1297,6 +1379,7 @@ mod tests {
                 app_id: None,
                 name: None,
                 entity_id: Some("switch.baldur_s_gate_3".into()),
+                launch_command: None,
                 auto_discovered: false,
                 exposed: true,
             },
@@ -1320,6 +1403,7 @@ mod tests {
                 app_id: None,
                 name: None,
                 entity_id: Some("Baldurs_Gate_3".into()),
+                launch_command: None,
                 auto_discovered: false,
                 exposed: true,
             },
@@ -1338,6 +1422,7 @@ mod tests {
                 app_id: None,
                 name: None,
                 entity_id: Some("baldur's-gate-3".into()),
+                launch_command: None,
                 auto_discovered: false,
                 exposed: true,
             },
@@ -1356,6 +1441,7 @@ mod tests {
                 app_id: None,
                 name: None,
                 entity_id: None,
+                launch_command: None,
                 auto_discovered: false,
                 exposed: true,
             },
@@ -1373,6 +1459,7 @@ mod tests {
                 app_id: None,
                 name: None,
                 entity_id: Some("fc_26".into()),
+                launch_command: None,
                 auto_discovered: false,
                 exposed: true,
             },
