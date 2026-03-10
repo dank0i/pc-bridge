@@ -813,6 +813,7 @@ impl MqttClient {
         // Core commands
         let commands = [
             "Launch",
+            "RefreshSteamGames",
             "Screensaver",
             "Wake",
             "Shutdown",
@@ -1464,6 +1465,9 @@ mod tests {
 
         // Default features: power_events=true, all others false
         // Core commands are always subscribed
+        assert!(
+            topics.contains(&"homeassistant/button/test-pc/RefreshSteamGames/action".to_string())
+        );
         assert!(topics.contains(&"homeassistant/button/test-pc/Sleep/action".to_string()));
         assert!(topics.contains(&"homeassistant/button/test-pc/Shutdown/action".to_string()));
         assert!(topics.contains(&"homeassistant/button/test-pc/Lock/action".to_string()));
@@ -1558,10 +1562,10 @@ mod tests {
         let config = test_config("test-pc", features);
         let topics = MqttClient::build_subscribe_topics("test-pc", &config);
 
-        // Should have core (10) + audio (6) + notifications (1) = 17 topics
+        // Should have core (11) + audio (6) + notifications (1) = 18 topics
         assert!(
-            topics.len() >= 17,
-            "Expected at least 17 topics with all features, got {}",
+            topics.len() >= 18,
+            "Expected at least 18 topics with all features, got {}",
             topics.len()
         );
     }
@@ -2410,14 +2414,15 @@ mod tests {
 
             let (_mqtt, _cmd_rx) = MqttClient::new(&config).await.unwrap();
 
-            // subscribe_commands + ConnAck handler both subscribe → 17 * 2 = 34
-            wait_for_subscribes(&state, 17).await;
+            // subscribe_commands + ConnAck handler both subscribe → 18 * 2 = 36
+            wait_for_subscribes(&state, 18).await;
 
             let guard = state.lock().unwrap();
             let topics: Vec<&str> = guard.subscribed.iter().map(|t| t.as_str()).collect();
 
             let expected = [
                 "homeassistant/button/test-pc/Launch/action",
+                "homeassistant/button/test-pc/RefreshSteamGames/action",
                 "homeassistant/button/test-pc/Screensaver/action",
                 "homeassistant/button/test-pc/Wake/action",
                 "homeassistant/button/test-pc/Shutdown/action",
