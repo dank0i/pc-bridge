@@ -150,10 +150,11 @@ impl CommandExecutor {
                     Some(discovery) => {
                         let mut config = state.config.write().await;
                         match config.merge_steam_games(&discovery) {
-                            Ok(added) if added > 0 => {
+                            Ok((added, removed)) if added > 0 || removed > 0 => {
                                 info!(
-                                    "Steam refresh: added {} new games ({}ms{})",
+                                    "Steam refresh: +{} added, -{} removed ({}ms{})",
                                     added,
+                                    removed,
                                     discovery.build_time_ms,
                                     if discovery.from_cache { ", cached" } else { "" }
                                 );
@@ -162,7 +163,7 @@ impl CommandExecutor {
                             }
                             Ok(_) => {
                                 info!(
-                                    "Steam refresh: no new games ({}ms{})",
+                                    "Steam refresh: no changes ({}ms{})",
                                     discovery.build_time_ms,
                                     if discovery.from_cache { ", cached" } else { "" }
                                 );

@@ -127,6 +127,16 @@ impl GameConfig {
         }
     }
 
+    /// Whether this game was auto-discovered from Steam
+    pub fn is_auto_discovered(&self) -> bool {
+        match self {
+            GameConfig::Simple(_) => false,
+            GameConfig::Full {
+                auto_discovered, ..
+            } => *auto_discovered,
+        }
+    }
+
     /// Get app_id if available
     pub fn app_id(&self) -> Option<u32> {
         match self {
@@ -490,17 +500,17 @@ impl Config {
 
     /// Merge Steam-discovered games into the config and save
     ///
-    /// Only adds games that don't already exist (by process pattern).
-    /// Returns the number of new games added.
+    /// Adds newly installed games and removes auto-discovered games that are
+    /// no longer in the Steam library. Manual entries are never removed.
+    /// Returns (added, removed) counts.
     pub fn merge_steam_games(
         &mut self,
         steam_games: &crate::steam::SteamGameDiscovery,
-    ) -> Result<usize> {
+    ) -> Result<(usize, usize)> {
         let mut added = 0;
 
         for (exe_key, game) in &steam_games.games {
             // exe_key is already lowercase, no extension (e.g., "cs2")
-            // Check if this pattern already exists
             if self.games.contains_key(exe_key) {
                 continue;
             }
@@ -521,7 +531,6 @@ impl Config {
                 })
                 .collect();
 
-            // Add to games map
             self.games.insert(
                 exe_key.clone(),
                 GameConfig::from_steam(game_id, game.app_id, game.name.clone()),
@@ -529,12 +538,23 @@ impl Config {
             added += 1;
         }
 
-        if added > 0 {
-            // Save updated config
+        // Remove auto-discovered games no longer in Steam library (single-pass, zero alloc)
+        let mut removed = 0usize;
+        self.games.retain(|key, gc| {
+            if gc.is_auto_discovered() && !steam_games.games.contains_key(key.as_str()) {
+                info!("Removing uninstalled Steam game: {}", key);
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+
+        if added > 0 || removed > 0 {
             self.save()?;
         }
 
-        Ok(added)
+        Ok((added, removed))
     }
 
     /// Save current config to userConfig.json

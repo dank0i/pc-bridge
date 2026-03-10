@@ -206,7 +206,7 @@ fn match_games_in_processes(
     process_names: &HashSet<Arc<str>>,
     cached: &CachedGamePatterns,
 ) -> (String, String) {
-    let mut found_games: Vec<(String, String)> = Vec::new();
+    let mut found_games: Vec<(String, String)> = Vec::with_capacity(2);
     let mut seen_ids: HashSet<&str> = HashSet::with_capacity(cached.patterns.len());
 
     for proc_name in process_names {
@@ -225,6 +225,7 @@ fn match_games_in_processes(
                 || base_name.eq_ignore_ascii_case(pattern_lower);
             if matches && seen_ids.insert(game_id.as_str()) {
                 found_games.push((game_id.clone(), display_name.clone()));
+                break; // This process matched — no need to check remaining patterns
             }
         }
     }
