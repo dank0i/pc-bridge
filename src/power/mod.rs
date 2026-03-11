@@ -1,5 +1,9 @@
 //! Power management module
 
+// On non-Windows targets sync_mqtt functions are only exercised by tests.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub mod sync_mqtt;
+
 #[cfg(windows)]
 mod display;
 #[cfg(windows)]

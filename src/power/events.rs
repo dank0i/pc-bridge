@@ -5,11 +5,16 @@
 //!
 //! Also monitors display power state via GUID_CONSOLE_DISPLAY_STATE to detect
 //! when Windows turns off the monitor (separate from screensaver).
+//!
+//! Sleep event publishing uses a **synchronous TCP connection** from the
+//! power-events thread to guarantee the MQTT PUBLISH packet reaches the
+//! broker before `wnd_proc` returns. The async event loop cannot provide
+//! this guarantee because Windows may suspend the NIC before the tokio
+//! runtime flushes the message to TCP.
 
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::Duration;
 use tokio::sync::mpsc;
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Power::RegisterPowerSettingNotification;
@@ -20,6 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::display::wake_display_with_retry;
+use super::sync_mqtt::{SyncMqttConfig, parse_broker_url, sync_mqtt_publish_sleep};
 use crate::AppState;
 
 const WM_POWERBROADCAST: u32 = 0x218;
@@ -47,15 +53,16 @@ struct PowerBroadcastSetting {
 
 #[derive(Debug)]
 pub enum PowerEvent {
-    /// Sleep event with ack channel - wnd_proc blocks until MQTT publish completes.
-    /// Without this, Windows completes the sleep transition before the message
-    /// reaches the broker, and it only arrives after wake.
-    Sleep {
-        ack: std::sync::mpsc::SyncSender<()>,
-    },
+    Sleep,
     Wake,
     DisplayOff,
     DisplayOn,
+}
+
+/// Context stored in the power-monitor window's user data.
+struct WndProcContext {
+    event_tx: mpsc::Sender<PowerEvent>,
+    sync_mqtt: SyncMqttConfig,
 }
 
 // State machine: 0 = awake, 1 = sleeping
@@ -91,6 +98,27 @@ impl PowerEventListener {
         let (event_tx, mut event_rx) = mpsc::channel::<PowerEvent>(10);
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
 
+        // Build sync MQTT config for the power-events thread.
+        // This lets wnd_proc publish the sleep message over a dedicated TCP
+        // connection, independent of the async event loop.
+        let sync_mqtt = {
+            let config = self.state.config.read().await;
+            let broker = &config.mqtt.broker;
+            let (host, port) = parse_broker_url(broker);
+            SyncMqttConfig {
+                host,
+                port,
+                user: config.mqtt.user.clone(),
+                pass: config.mqtt.pass.clone(),
+                // Use a distinct client_id so the broker doesn't kick our main connection
+                client_id: format!("{}-sleep", config.client_id()),
+                sleep_topic: format!(
+                    "homeassistant/sensor/{}/sleep_state/state",
+                    config.device_name
+                ),
+            }
+        };
+
         // Spawn blocking thread for Windows message pump
         // Store hwnd so we can post WM_QUIT on shutdown
         let (hwnd_tx, hwnd_rx) = tokio::sync::oneshot::channel::<isize>();
@@ -99,7 +127,7 @@ impl PowerEventListener {
             .name("power-events".into())
             .stack_size(256 * 1024)
             .spawn(move || {
-                Self::message_pump(event_tx, hwnd_tx);
+                Self::message_pump(event_tx, sync_mqtt, hwnd_tx);
             }) {
             Ok(_) => {}
             Err(e) => {
@@ -128,12 +156,8 @@ impl PowerEventListener {
                 }
                 Some(event) = event_rx.recv() => {
                     match event {
-                        PowerEvent::Sleep { ack } => {
-                            info!("Power event: SLEEP");
-                            self.state.mqtt.publish_sensor_retained("sleep_state", "sleeping").await;
-                            // Grace period for rumqttc event loop to flush to TCP
-                            tokio::time::sleep(Duration::from_millis(150)).await;
-                            let _ = ack.send(());
+                        PowerEvent::Sleep => {
+                            info!("Power event: SLEEP (sync TCP publish already sent by wnd_proc)");
                         }
                         PowerEvent::Wake => {
                             info!("Power event: WAKE");
@@ -171,6 +195,7 @@ impl PowerEventListener {
 
     fn message_pump(
         event_tx: mpsc::Sender<PowerEvent>,
+        sync_mqtt: SyncMqttConfig,
         hwnd_tx: tokio::sync::oneshot::Sender<isize>,
     ) {
         unsafe {
@@ -218,10 +243,13 @@ impl PowerEventListener {
                 info!("Registered for display power state notifications");
             }
 
-            // Store event_tx in window's user data
-            let event_tx_box = Box::new(event_tx);
-            let event_tx_ptr = Box::into_raw(event_tx_box);
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, event_tx_ptr as isize);
+            // Store context (event_tx + sync mqtt config) in window's user data
+            let ctx = Box::new(WndProcContext {
+                event_tx,
+                sync_mqtt,
+            });
+            let ctx_ptr = Box::into_raw(ctx);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, ctx_ptr as isize);
 
             info!("Power event listener started (hwnd: {:?})", hwnd);
 
@@ -245,7 +273,7 @@ impl PowerEventListener {
             }
 
             // Cleanup
-            let _ = Box::from_raw(event_tx_ptr);
+            let _ = Box::from_raw(ctx_ptr);
             let _ = DestroyWindow(hwnd);
         }
     }
@@ -258,11 +286,10 @@ impl PowerEventListener {
     ) -> LRESULT {
         unsafe {
             if msg == WM_POWERBROADCAST {
-                let event_tx_ptr =
-                    GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const mpsc::Sender<PowerEvent>;
+                let ctx_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndProcContext;
 
-                if !event_tx_ptr.is_null() {
-                    let event_tx = &*event_tx_ptr;
+                if !ctx_ptr.is_null() {
+                    let ctx = &*ctx_ptr;
 
                     match wparam.0 {
                         PBT_APMSUSPEND => {
@@ -270,11 +297,15 @@ impl PowerEventListener {
                             // Only fire if transitioning from awake to sleeping
                             if try_transition_to_sleep() {
                                 info!("State transition: awake -> sleeping");
-                                // Block wnd_proc until MQTT publish completes.
-                                // Windows won't finalize sleep until we return.
-                                let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(0);
-                                let _ = event_tx.blocking_send(PowerEvent::Sleep { ack: ack_tx });
-                                let _ = ack_rx.recv_timeout(Duration::from_secs(2));
+                                // Synchronous MQTT publish over a dedicated TCP connection.
+                                // This blocks wnd_proc until the packet is on the wire,
+                                // guaranteeing delivery before Windows suspends the NIC.
+                                match sync_mqtt_publish_sleep(&ctx.sync_mqtt) {
+                                    Ok(()) => info!("Sleep state published via sync TCP"),
+                                    Err(e) => warn!("Sync MQTT publish failed: {}", e),
+                                }
+                                // Also notify the async handler (redundant publish + logging)
+                                let _ = ctx.event_tx.blocking_send(PowerEvent::Sleep);
                             } else {
                                 debug!("Ignoring duplicate sleep event");
                             }
@@ -284,7 +315,7 @@ impl PowerEventListener {
                             // Only fire if transitioning from sleeping to awake
                             if try_transition_to_awake() {
                                 info!("State transition: sleeping -> awake");
-                                let _ = event_tx.blocking_send(PowerEvent::Wake);
+                                let _ = ctx.event_tx.blocking_send(PowerEvent::Wake);
                             } else {
                                 debug!("Ignoring duplicate wake event");
                             }
@@ -309,10 +340,12 @@ impl PowerEventListener {
                                     );
                                     match display_state {
                                         0 => {
-                                            let _ = event_tx.blocking_send(PowerEvent::DisplayOff);
+                                            let _ =
+                                                ctx.event_tx.blocking_send(PowerEvent::DisplayOff);
                                         }
                                         1 => {
-                                            let _ = event_tx.blocking_send(PowerEvent::DisplayOn);
+                                            let _ =
+                                                ctx.event_tx.blocking_send(PowerEvent::DisplayOn);
                                         }
                                         2 => {
                                             // Dimmed - treat as still on (display is visible)
@@ -332,5 +365,24 @@ impl PowerEventListener {
 
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_state_machine_transitions() {
+        // Reset to known state
+        POWER_STATE.store(0, Ordering::SeqCst);
+
+        assert!(try_transition_to_sleep());
+        assert!(!try_transition_to_sleep()); // duplicate
+        assert!(try_transition_to_awake());
+        assert!(!try_transition_to_awake()); // duplicate
+
+        // Reset for other tests
+        POWER_STATE.store(0, Ordering::SeqCst);
     }
 }

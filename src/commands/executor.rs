@@ -127,6 +127,9 @@ impl CommandExecutor {
                 return Ok(());
             }
             "Sleep" => {
+                // The sync TCP publish in wnd_proc's PBT_APMSUSPEND handler
+                // guarantees the "sleeping" message reaches the broker before
+                // Windows powers down the NIC — no async pre-publish needed.
                 sleep();
                 return Ok(());
             }
