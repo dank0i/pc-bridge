@@ -127,13 +127,26 @@ impl CommandExecutor {
                 return Ok(());
             }
             "Sleep" => {
-                // The sync TCP publish in wnd_proc's PBT_APMSUSPEND handler
-                // guarantees the "sleeping" message reaches the broker before
-                // Windows powers down the NIC — no async pre-publish needed.
+                // Pre-publish via async client as first attempt. The sync TCP
+                // publish in wnd_proc's PBT_APMSUSPEND handler is the hard
+                // guarantee, but this async publish often lands too and gives
+                // an extra safety margin.
+                state
+                    .mqtt
+                    .publish_sensor_retained("sleep_state", "sleeping")
+                    .await;
+                tokio::task::yield_now().await;
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 sleep();
                 return Ok(());
             }
             "Hibernate" => {
+                state
+                    .mqtt
+                    .publish_sensor_retained("sleep_state", "sleeping")
+                    .await;
+                tokio::task::yield_now().await;
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 hibernate();
                 return Ok(());
             }

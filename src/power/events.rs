@@ -157,7 +157,11 @@ impl PowerEventListener {
                 Some(event) = event_rx.recv() => {
                     match event {
                         PowerEvent::Sleep => {
-                            info!("Power event: SLEEP (sync TCP publish already sent by wnd_proc)");
+                            info!("Power event: SLEEP (async fallback — sync TCP already attempted in wnd_proc)");
+                            // Fallback publish via the async client. Harmless if the
+                            // sync TCP publish already landed (retained = last-write-wins).
+                            // Catches cases where sync fails (TLS broker, Modern Standby, etc.).
+                            self.state.mqtt.publish_sensor_retained("sleep_state", "sleeping").await;
                         }
                         PowerEvent::Wake => {
                             info!("Power event: WAKE");

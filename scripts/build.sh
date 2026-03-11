@@ -20,6 +20,7 @@ RELEASE=false
 CHECK_ONLY=false
 NEW_VERSION=""
 CREATE_TAG=false
+PUBLISH_TAG=""
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -40,6 +41,10 @@ while [[ $# -gt 0 ]]; do
             CREATE_TAG=true
             shift
             ;;
+        --publish|-p)
+            PUBLISH_TAG="$2"
+            shift 2
+            ;;
         --help|-h)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -48,6 +53,7 @@ while [[ $# -gt 0 ]]; do
             echo "  -c, --check-only     Run quality checks without building"
             echo "  -v, --version X.Y.Z  Bump version in Cargo.toml (e.g., 2.5.0)"
             echo "  -t, --tag            Commit, tag, and push (requires --version, skips local build)"
+            echo "  -p, --publish TAG    Wait for CI and publish a draft release (e.g., v3.6.0)"
             echo "  -h, --help           Show this help"
             echo ""
             echo "Examples:"
@@ -55,6 +61,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --version 2.5.0 --release        # Bump version and build locally"
             echo "  $0 --version 2.5.0 --tag            # Full release (GitHub builds binary)"
             echo "  $0 --check-only                     # Just run checks"
+            echo "  $0 --publish v3.6.0                   # Wait for CI, then publish release"
             echo ""
             echo "The --tag option will:"
             echo "  1. Run quality checks (fmt, clippy, tests, audit, deny)"
@@ -70,6 +77,28 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Handle --publish (standalone command, exits early)
+if [[ -n "$PUBLISH_TAG" ]]; then
+    if ! command -v gh &> /dev/null; then
+        echo -e "${RED}Error: gh CLI required for --publish${NC}"
+        exit 1
+    fi
+
+    echo -e "${BLUE}Waiting for CI to finish for ${PUBLISH_TAG}...${NC}"
+    echo -e "  Watching: ${BLUE}https://github.com/dank0i/pc-bridge/actions${NC}"
+
+    # Wait for the workflow run triggered by the tag push
+    if gh run list --branch "${PUBLISH_TAG}" --limit 1 --json status -q '.[0].status' &>/dev/null; then
+        gh run watch --exit-status "$(gh run list --branch "${PUBLISH_TAG}" --limit 1 --json databaseId -q '.[0].databaseId')" 2>&1 || true
+    fi
+
+    echo -e "  Publishing release..."
+    gh release edit "${PUBLISH_TAG}" --draft=false
+    echo -e "  ${GREEN}OK${NC} Release ${PUBLISH_TAG} is now public"
+    echo -e "  ${BLUE}https://github.com/dank0i/pc-bridge/releases/tag/${PUBLISH_TAG}${NC}"
+    exit 0
+fi
 
 # Validate --tag requires --version
 if $CREATE_TAG && [[ -z "$NEW_VERSION" ]]; then
@@ -230,6 +259,9 @@ if $CREATE_TAG; then
     echo ""
     echo -e "${YELLOW}Release is hidden (draft) until CI finishes building.${NC}"
     echo -e "Track progress: ${BLUE}https://github.com/dank0i/pc-bridge/actions${NC}"
+    echo ""
+    echo -e "To wait for CI and publish automatically:"
+    echo -e "  ${YELLOW}./scripts/build.sh --publish ${TAG}${NC}"
     exit 0
 fi
 

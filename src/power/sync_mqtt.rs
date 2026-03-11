@@ -9,7 +9,7 @@
 //! that the full test suite runs on macOS/Linux CI as well as Windows.
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 /// MQTT broker config for synchronous publish from the power-events thread.
@@ -47,12 +47,15 @@ pub fn sync_mqtt_publish_sleep(cfg: &SyncMqttConfig) -> std::io::Result<()> {
     let addr = format!("{}:{}", cfg.host, cfg.port);
     let timeout = Duration::from_secs(2);
 
-    let mut stream = TcpStream::connect_timeout(
-        &addr
-            .parse()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?,
-        timeout,
-    )?;
+    // Resolve hostname to IP — ToSocketAddrs handles both hostnames and IPs.
+    let socket_addr = addr.to_socket_addrs()?.next().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("DNS resolution failed for {addr}"),
+        )
+    })?;
+
+    let mut stream = TcpStream::connect_timeout(&socket_addr, timeout)?;
     stream.set_write_timeout(Some(timeout))?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_nodelay(true)?;
