@@ -9,6 +9,7 @@
 use log::{debug, error, info};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Power::RegisterPowerSettingNotification;
@@ -44,9 +45,14 @@ struct PowerBroadcastSetting {
     data: [u8; 1],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug)]
 pub enum PowerEvent {
-    Sleep,
+    /// Sleep event with ack channel - wnd_proc blocks until MQTT publish completes.
+    /// Without this, Windows completes the sleep transition before the message
+    /// reaches the broker, and it only arrives after wake.
+    Sleep {
+        ack: std::sync::mpsc::SyncSender<()>,
+    },
     Wake,
     DisplayOff,
     DisplayOn,
@@ -122,9 +128,12 @@ impl PowerEventListener {
                 }
                 Some(event) = event_rx.recv() => {
                     match event {
-                        PowerEvent::Sleep => {
+                        PowerEvent::Sleep { ack } => {
                             info!("Power event: SLEEP");
                             self.state.mqtt.publish_sensor_retained("sleep_state", "sleeping").await;
+                            // Grace period for rumqttc event loop to flush to TCP
+                            tokio::time::sleep(Duration::from_millis(150)).await;
+                            let _ = ack.send(());
                         }
                         PowerEvent::Wake => {
                             info!("Power event: WAKE");
@@ -261,7 +270,11 @@ impl PowerEventListener {
                             // Only fire if transitioning from awake to sleeping
                             if try_transition_to_sleep() {
                                 info!("State transition: awake -> sleeping");
-                                let _ = event_tx.blocking_send(PowerEvent::Sleep);
+                                // Block wnd_proc until MQTT publish completes.
+                                // Windows won't finalize sleep until we return.
+                                let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(0);
+                                let _ = event_tx.blocking_send(PowerEvent::Sleep { ack: ack_tx });
+                                let _ = ack_rx.recv_timeout(Duration::from_secs(2));
                             } else {
                                 debug!("Ignoring duplicate sleep event");
                             }
