@@ -204,16 +204,32 @@ if $CREATE_TAG; then
     echo -e "  Pushing to origin..."
     git push origin main --tags
     echo -e "  ${GREEN}OK${NC} Pushed to origin"
+
+    # Create draft release (CI will publish after build + asset upload)
+    echo -e "  Creating draft release..."
+    if command -v gh &> /dev/null; then
+        NOTES_FILE=$(mktemp)
+        # Check for release notes file in repo
+        if [[ -f "RELEASE_NOTES.md" ]]; then
+            gh release create "${TAG}" --draft --title "${TAG}" --notes-file RELEASE_NOTES.md
+            rm -f RELEASE_NOTES.md
+        else
+            gh release create "${TAG}" --draft --title "${TAG}" --generate-notes
+        fi
+        rm -f "$NOTES_FILE"
+        echo -e "  ${GREEN}OK${NC} Draft release created (CI will publish after build)"
+    else
+        echo -e "  ${YELLOW}!!${NC} gh CLI not installed — create release manually:"
+        echo -e "      ${BLUE}https://github.com/dank0i/pc-bridge/releases/new?tag=${TAG}${NC}"
+    fi
     
     echo ""
     echo -e "${GREEN}--------------------------------------------------------------------------${NC}"
     echo -e "${GREEN}Release ${TAG} complete!${NC}"
     echo -e "${GREEN}--------------------------------------------------------------------------${NC}"
     echo ""
-    echo -e "${YELLOW}Next steps:${NC}"
-    echo -e "  1. Go to: ${BLUE}https://github.com/dank0i/pc-bridge/releases/new?tag=${TAG}${NC}"
-    echo -e "  2. Create release notes (or let GitHub auto-generate)"
-    echo -e "  3. GitHub Actions will build and attach the Windows binary"
+    echo -e "${YELLOW}Release is hidden (draft) until CI finishes building.${NC}"
+    echo -e "Track progress: ${BLUE}https://github.com/dank0i/pc-bridge/actions${NC}"
     exit 0
 fi
 

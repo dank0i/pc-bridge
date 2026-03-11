@@ -197,7 +197,7 @@ jobs:
           sha256sum pc-bridge-windows.exe > pc-bridge-windows.exe.sha256
           sha256sum pc-bridge-linux > pc-bridge-linux.sha256
 
-      - name: Create Release
+      - name: Upload assets to release
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -205,4 +205,8 @@ jobs:
             pc-bridge-windows.exe.sha256
             pc-bridge-linux
             pc-bridge-linux.sha256
-          generate_release_notes: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit ${{ github.ref_name }} --draft=false
