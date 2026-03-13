@@ -281,7 +281,7 @@ pub enum CustomCommandType {
     Shell,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MqttConfig {
     pub broker: String,
     #[serde(default)]
@@ -290,6 +290,17 @@ pub struct MqttConfig {
     pub pass: String,
     #[serde(default)]
     pub client_id: Option<String>,
+}
+
+impl std::fmt::Debug for MqttConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MqttConfig")
+            .field("broker", &self.broker)
+            .field("user", &self.user)
+            .field("pass", &"[REDACTED]")
+            .field("client_id", &self.client_id)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -356,12 +367,87 @@ impl Config {
         // Migrate config if needed (adds missing fields)
         let content = Self::migrate_config(&config_path, &content)?;
 
-        let config: Config =
+        let mut config: Config =
             serde_json::from_str(&content).with_context(|| "Failed to parse userConfig.json")?;
+
+        // Load MQTT password from credential file (or migrate from inline JSON)
+        Self::load_credential(&mut config, &config_path)?;
 
         config.validate()?;
 
         Ok(config)
+    }
+
+    /// Load config without decrypting the credential.
+    /// Used by `--reset-password` when the existing credential can't be decrypted.
+    pub fn load_without_credential() -> Result<Self> {
+        Self::migrate_config_location()?;
+
+        let config_path = Self::config_path()?;
+
+        if !config_path.exists() {
+            bail!(
+                "Configuration file not found at {:?}\n\
+                 Run the setup wizard first.",
+                config_path
+            );
+        }
+
+        let content = std::fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read {:?}", config_path))?;
+
+        let content = Self::migrate_config(&config_path, &content)?;
+
+        let mut config: Config =
+            serde_json::from_str(&content).with_context(|| "Failed to parse userConfig.json")?;
+
+        // Clear any inline password remnant without decrypting
+        config.mqtt.pass = String::new();
+
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Load the MQTT credential from the separate file, or migrate from inline JSON.
+    fn load_credential(config: &mut Config, config_path: &PathBuf) -> Result<()> {
+        let inline_pass = std::mem::take(&mut config.mqtt.pass);
+        let cred_path = crate::credential::credential_path()?;
+
+        if cred_path.exists() {
+            // Credential file takes priority
+            config.mqtt.pass = crate::credential::load_from_file().map_err(|e| {
+                anyhow::Error::new(crate::credential::CredentialDecryptFailed).context(e.message)
+            })?;
+
+            // Clean up stale inline password from JSON if present
+            if !inline_pass.is_empty() {
+                Self::clear_inline_password(config_path).ok();
+            }
+        } else if !inline_pass.is_empty() {
+            // Migration: password was stored inline in JSON — move to credential file
+            let plaintext = crate::credential::decrypt(&inline_pass).map_err(|e| {
+                anyhow::Error::new(crate::credential::CredentialDecryptFailed).context(e.message)
+            })?;
+            config.mqtt.pass = plaintext;
+            crate::credential::save_to_file(&config.mqtt.pass)?;
+            Self::clear_inline_password(config_path).ok();
+            info!("Migrated MQTT password to credential file");
+        }
+        // else: no password configured (anonymous MQTT)
+
+        Ok(())
+    }
+
+    /// Blank out the `mqtt.pass` field in the JSON config file.
+    fn clear_inline_password(config_path: &PathBuf) -> Result<()> {
+        let content = std::fs::read_to_string(config_path)?;
+        let mut json: serde_json::Value = serde_json::from_str(&content)?;
+        if let Some(mqtt) = json.get_mut("mqtt").and_then(|v| v.as_object_mut()) {
+            mqtt.insert("pass".to_string(), serde_json::Value::String(String::new()));
+        }
+        let content = serde_json::to_string_pretty(&json)?;
+        std::fs::write(config_path, content)?;
+        Ok(())
     }
 
     /// Migrate config by adding missing fields with defaults
@@ -557,7 +643,10 @@ impl Config {
         Ok((added, removed))
     }
 
-    /// Save current config to userConfig.json
+    /// Save current config to userConfig.json.
+    ///
+    /// The MQTT password is stored in a separate credential file (encrypted
+    /// via DPAPI on Windows).  The JSON config always has `pass: ""`.
     pub fn save(&self) -> Result<()> {
         let config_path = Self::config_path()?;
 
@@ -567,7 +656,15 @@ impl Config {
                 .with_context(|| format!("Failed to create config directory {:?}", parent))?;
         }
 
-        let content = serde_json::to_string_pretty(self)?;
+        // Save encrypted password to separate credential file
+        crate::credential::save_to_file(&self.mqtt.pass)
+            .with_context(|| "Failed to save MQTT credential")?;
+
+        // Write config JSON without the password
+        let mut to_save = self.clone();
+        to_save.mqtt.pass = String::new();
+
+        let content = serde_json::to_string_pretty(&to_save)?;
         std::fs::write(&config_path, content)
             .with_context(|| format!("Failed to write config to {:?}", config_path))?;
         Ok(())

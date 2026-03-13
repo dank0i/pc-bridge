@@ -12,6 +12,7 @@
 mod audio;
 mod commands;
 mod config;
+mod credential;
 mod mqtt;
 mod notification;
 mod power;
@@ -95,17 +96,32 @@ async fn main() -> anyhow::Result<()> {
 
     info!("PC Bridge starting...");
 
+    // Parse CLI arguments
+    let args: Vec<String> = std::env::args().collect();
+    let force_setup = args.iter().any(|a| a == "--setup");
+    let reset_password = args.iter().any(|a| a == "--reset-password");
+
     // Kill any existing instances
     kill_existing_instances();
 
     // Clean up leftover .old files from a previous update
     updater::cleanup_old_files();
 
-    // Check for first run - show setup wizard if no config exists
-    if Config::is_first_run()? {
-        info!("First run detected - launching setup wizard");
+    // --reset-password: prompt for new MQTT password, encrypt, save, and exit
+    if reset_password {
+        return reset_mqtt_password();
+    }
 
-        if let Some(setup_config) = setup::run_setup_wizard() {
+    // Check for first run or --setup flag
+    let first_run = Config::is_first_run()?;
+    if force_setup || first_run {
+        let existing_config = !first_run;
+
+        if first_run {
+            info!("First run detected - launching setup wizard");
+        }
+
+        if let Some(setup_config) = setup::run_setup_wizard(existing_config) {
             setup::save_setup_config(&setup_config)?;
             info!("Setup complete! Configuration saved.");
         } else {
@@ -130,8 +146,17 @@ async fn main() -> anyhow::Result<()> {
     // Check for updates (non-blocking, continues after check)
     tokio::spawn(updater::check_for_updates());
 
-    // Load configuration
-    let config = Config::load()?;
+    // Load configuration (prompt interactively if credential can't be decrypted)
+    let config = match Config::load() {
+        Ok(c) => c,
+        Err(e)
+            if e.downcast_ref::<credential::CredentialDecryptFailed>()
+                .is_some() =>
+        {
+            handle_credential_failure()?
+        }
+        Err(e) => return Err(e),
+    };
     info!("Loaded config for device: {}", config.device_name);
 
     // Log enabled features
@@ -314,6 +339,139 @@ fn log_enabled_features(config: &Config) {
         info!("No features enabled - running in minimal mode");
     } else {
         info!("Features enabled: {}", count);
+    }
+}
+
+/// Reset just the MQTT password: load existing config, prompt for new password,
+/// encrypt, save, and exit.  Keeps all other settings intact.
+fn reset_mqtt_password() -> anyhow::Result<()> {
+    use std::io::{self, Write};
+
+    // Allocate console on Windows (GUI subsystem)
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::Console::{AllocConsole, SetConsoleTitleW};
+        use windows::core::w;
+        let _ = AllocConsole();
+        let _ = SetConsoleTitleW(w!("PC Bridge - Reset Password"));
+    }
+
+    // Load config, ignoring credential errors (we're replacing the password anyway)
+    let config = Config::load().or_else(|e| {
+        if e.downcast_ref::<credential::CredentialDecryptFailed>()
+            .is_some()
+        {
+            Config::load_without_credential()
+        } else {
+            Err(e)
+        }
+    });
+
+    let config = config.unwrap_or_else(|e| {
+        eprintln!("Failed to load config: {e}");
+        eprintln!("Run with --setup to create a new configuration.");
+        std::process::exit(1);
+    });
+
+    println!();
+    println!("  ╔══════════════════════════════════════════╗");
+    println!("  ║        Reset MQTT Password                ║");
+    println!("  ╚══════════════════════════════════════════╝");
+    println!();
+    println!("  Current MQTT broker: {}", config.mqtt.broker);
+    println!("  Current MQTT user:   {}", config.mqtt.user);
+    println!();
+    println!("  Type your new password and press Enter.");
+    println!("  Leave blank to cancel.");
+    println!();
+    print!("  New MQTT password: ");
+    io::stdout().flush().ok();
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).ok();
+    let new_pass = input.trim().to_string();
+
+    if new_pass.is_empty() {
+        println!();
+        println!("  No changes made.");
+    } else {
+        credential::save_to_file(&new_pass)?;
+        println!();
+        println!("  Password updated and encrypted.");
+        println!("  Restart PC Bridge for the change to take effect.");
+    }
+
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::Console::FreeConsole;
+        let _ = FreeConsole();
+    }
+
+    // Print newline to ensure terminal prompt is on its own line
+    println!();
+
+    Ok(())
+}
+
+/// Pop up a console and prompt for the MQTT password when decryption fails.
+fn handle_credential_failure() -> anyhow::Result<Config> {
+    use std::io::{self, Write};
+
+    // Allocate console on Windows (GUI subsystem)
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::Console::{AllocConsole, SetConsoleTitleW};
+        use windows::core::w;
+        let _ = AllocConsole();
+        let _ = SetConsoleTitleW(w!("PC Bridge - Credential Error"));
+    }
+
+    println!();
+    println!("  ╔══════════════════════════════════════════╗");
+    println!("  ║   MQTT Password Could Not Be Decrypted   ║");
+    println!("  ╚══════════════════════════════════════════╝");
+    println!();
+    println!("  The stored credential could not be decrypted.");
+    println!("  This usually means the config was copied");
+    println!("  from another machine or Windows user.");
+    println!();
+    println!("  Type your MQTT password to re-encrypt it");
+    println!("  for this machine, or press Enter to skip.");
+    println!();
+    print!("  MQTT Password: ");
+    io::stdout().flush().ok();
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).ok();
+    let new_pass = input.trim().to_string();
+
+    if new_pass.is_empty() {
+        println!();
+        println!("  Skipped. MQTT authentication will fail.");
+        println!("  You can set it later with --reset-password.");
+        println!();
+        println!("  Press Enter to continue...");
+        let _ = io::stdin().read_line(&mut String::new());
+    } else {
+        credential::save_to_file(&new_pass)?;
+        println!();
+        println!("  Password saved and encrypted for this machine.");
+        println!();
+    }
+
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::Console::FreeConsole;
+        let _ = FreeConsole();
+    }
+
+    // Reload config with the new (or empty) credential
+    if new_pass.is_empty() {
+        let mut config = Config::load_without_credential()?;
+        config.mqtt.pass = String::new();
+        Ok(config)
+    } else {
+        Config::load()
     }
 }
 

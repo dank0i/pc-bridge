@@ -768,9 +768,10 @@ dependencies = [
 
 [[package]]
 name = "pc-bridge"
-version = "3.6.0"
+version = "3.7.0"
 dependencies = [
  "anyhow",
+ "base64",
  "env_logger",
  "log",
  "notify",

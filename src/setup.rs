@@ -119,7 +119,7 @@ fn read_input(prompt: &str) -> String {
 
 /// Run the setup wizard (Windows)
 #[cfg(windows)]
-pub fn run_setup_wizard() -> Option<SetupConfig> {
+pub fn run_setup_wizard(existing_config: bool) -> Option<SetupConfig> {
     use windows::Win32::System::Console::{AllocConsole, FreeConsole, SetConsoleTitleW};
     use windows::core::w;
 
@@ -130,7 +130,7 @@ pub fn run_setup_wizard() -> Option<SetupConfig> {
         let _ = SetConsoleTitleW(w!("PC Bridge Setup"));
     }
 
-    let result = run_wizard_flow();
+    let result = run_wizard_flow(existing_config);
 
     unsafe {
         let _ = FreeConsole();
@@ -140,8 +140,28 @@ pub fn run_setup_wizard() -> Option<SetupConfig> {
 }
 
 /// The actual wizard flow (shared logic)
-fn run_wizard_flow() -> Option<SetupConfig> {
+fn run_wizard_flow(existing_config: bool) -> Option<SetupConfig> {
     let mut config = SetupConfig::default();
+
+    // Warn if overwriting an existing configuration
+    if existing_config {
+        clear_screen();
+        print_header("Existing Config Found");
+        println!("  A configuration already exists.");
+        println!();
+        println!("  Running setup will REPLACE your current");
+        println!("  settings including MQTT credentials,");
+        println!("  features, and device name.");
+        println!();
+        println!("  Game mappings and custom commands will");
+        println!("  be reset to defaults.");
+        println!();
+        let input = read_input("  Continue? [y/N]: ");
+        if !input.to_lowercase().starts_with('y') {
+            println!("\n  Setup cancelled.");
+            return None;
+        }
+    }
 
     // Welcome
     clear_screen();
@@ -394,6 +414,6 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
 
 /// Non-Windows stub
 #[cfg(not(windows))]
-pub fn run_setup_wizard() -> Option<SetupConfig> {
-    run_wizard_flow()
+pub fn run_setup_wizard(existing_config: bool) -> Option<SetupConfig> {
+    run_wizard_flow(existing_config)
 }
