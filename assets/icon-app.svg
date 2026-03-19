@@ -4,7 +4,14 @@
       <stop offset="0%" stop-color="#A78BFA"/>
       <stop offset="100%" stop-color="#7C3AED"/>
     </linearGradient>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1E1B2E"/>
+      <stop offset="100%" stop-color="#13111C"/>
+    </linearGradient>
   </defs>
+
+  <!-- Background -->
+  <rect width="512" height="512" rx="96" fill="url(#bgGrad)"/>
 
   <!-- Left: Monitor (center x=100, y=256) -->
   <rect x="40" y="202" width="120" height="86" rx="9" fill="url(#grad)"/>

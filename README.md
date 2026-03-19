@@ -1,52 +1,80 @@
-# PC Bridge
+<p align="center">
+  <img src="assets/icon.svg" alt="PC Bridge" width="128" height="128">
+</p>
 
-A lightweight cross-platform agent that bridges your PC with Home Assistant via MQTT.
+<h1 align="center">PC Bridge</h1>
 
-## Features
+<p align="center">
+  A lightweight cross-platform agent that bridges your PC with Home Assistant via MQTT.
+</p>
 
-- **Game Detection** - Monitors running processes and reports current game
-- **Idle Tracking** - Reports last user input time
-- **Power Events** - Detects sleep/wake/display state instantly via OS events
-- **System Sensors** - CPU usage, memory usage, battery level, active window (native APIs)
-- **Audio Control** - Volume, mute, media keys via Home Assistant
-- **Discord** - Join/leave voice channel commands
-- **Display Wake** - Wakes display after WoL, dismisses screensaver
-- **Remote Commands** - Lock, hibernate, restart, shutdown, sleep, screensaver
-- **Notifications** - Native Windows toast notifications from Home Assistant
-- **Steam Updates** - Detect when Steam games are updating
-- **Hot-Reload** - Updates game mappings without restart
-- **First-Run Wizard** - Interactive setup for MQTT and feature selection
+<p align="center">
+  <a href="https://github.com/dank0i/pc-bridge/releases/latest"><img src="https://img.shields.io/github/v/release/dank0i/pc-bridge?style=flat-square&color=7C3AED" alt="release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/dank0i/pc-bridge?style=flat-square" alt="license"></a>
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-A78BFA?style=flat-square" alt="platform">
+  <a href="https://github.com/dank0i/pc-bridge/releases"><img src="https://img.shields.io/github/downloads/dank0i/pc-bridge/total?style=flat-square&color=7C3AED" alt="downloads"></a>
+</p>
 
-## Supported Platforms
+---
+
+## What does it do?
+
+PC Bridge runs on your PC and connects to Home Assistant over MQTT. It exposes your PC as a fully controllable device — detect games, send commands, get notifications, and automate everything.
+
+### Features
+
+| | Feature | Description |
+|---|---------|-------------|
+| 🎮 | **Game Detection** | Monitors running processes and reports current game |
+| ⏱️ | **Idle Tracking** | Reports last user input time |
+| ⚡ | **Power Events** | Detects sleep/wake/display state instantly via OS events |
+| 📊 | **System Sensors** | CPU, memory, battery, active window (native APIs) |
+| 🔊 | **Audio Control** | Volume, mute, media keys via Home Assistant |
+| 🎙️ | **Discord** | Join/leave voice channel commands |
+| 🖥️ | **Display Wake** | Wakes display after WoL, dismisses screensaver |
+| 🔒 | **Remote Commands** | Lock, hibernate, restart, shutdown, sleep, screensaver |
+| 🔔 | **Notifications** | Native Windows toast notifications from Home Assistant |
+| 🎯 | **Steam Updates** | Detect when Steam games are updating |
+| ♻️ | **Hot-Reload** | Updates game mappings without restart |
+| 🧙 | **First-Run Wizard** | Interactive setup for MQTT and feature selection |
+
+### Supported Platforms
 
 | Platform | Status |
 |----------|--------|
-| Windows 10/11 | Full support |
-| Linux (X11) | Full support |
-| Linux (Wayland) | Partial (idle tracking requires qdbus) |
-| macOS | Build supported, limited features |
+| Windows 10/11 | ✅ Full support |
+| Linux (X11) | ✅ Full support |
+| Linux (Wayland) | ⚠️ Partial (idle tracking requires qdbus) |
+| macOS | 🔨 Build supported, limited features |
 
-## Quick Start
+---
+
+## Getting Started
 
 ### Download
 
-Download the latest release from [GitHub Releases](https://github.com/dank0i/pc-bridge/releases):
-- `pc-bridge-windows.exe` - Windows binary
-- `pc-bridge-linux` - Linux binary
+Grab the latest release from [**GitHub Releases**](https://github.com/dank0i/pc-bridge/releases):
+
+| Platform | Binary |
+|----------|--------|
+| Windows | `pc-bridge-windows.exe` |
+| Linux | `pc-bridge-linux` |
 
 ### First Run
 
-1. Run the binary - the **setup wizard** will guide you through:
+1. **Run the binary** — the setup wizard will guide you through:
    - MQTT broker connection
    - Device name
    - Feature selection (all opt-in)
-2. Configuration saved to `userConfig.json`
-3. PC Bridge connects and registers with Home Assistant
+2. Configuration is saved to `userConfig.json`
+3. PC Bridge connects and auto-discovers with Home Assistant
 
-## Breaking Changes in v3.3.0
+---
 
-**All MQTT button names are now PascalCase.** If you have Home Assistant automations or scripts
-referencing old button topics, you must update them.
+## ⚠️ Breaking Changes in v3.3.0
+
+<details>
+<summary><strong>MQTT button names are now PascalCase</strong> — click to see migration table</summary>
 
 | Old Name | New Name |
 |----------|----------|
@@ -60,12 +88,16 @@ referencing old button topics, you must update them.
 | `discord_join` | `DiscordJoin` |
 | `discord_leave_channel` | `DiscordLeaveChannel` |
 
-Other names (`Screensaver`, `Wake`, `Lock`, `Shutdown`, `Hibernate`, `Restart`, `Launch`) were already PascalCase and are unchanged.
+Names already PascalCase (`Screensaver`, `Wake`, `Lock`, `Shutdown`, `Hibernate`, `Restart`, `Launch`) are unchanged.
 
-**Other breaking changes:**
-- The `intervals.availability` config field has been removed (availability is now handled automatically via MQTT LWT)
-- The `VolumeToggleMute` command has been removed (use `VolumeMute` instead)
-- Steam game discovery no longer runs at startup — press the `RefreshSteamGames` button in HA to trigger it on demand
+</details>
+
+**Other changes:**
+- `intervals.availability` removed — availability is now automatic via MQTT LWT
+- `VolumeToggleMute` removed — use `VolumeMute` instead
+- Steam game discovery no longer runs at startup — press `RefreshSteamGames` in HA to trigger on demand
+
+---
 
 ## Configuration
 
@@ -154,6 +186,8 @@ The `games` object maps process names to game IDs:
 | `entity_id` | No | HA switch entity slug override — lowercase alphanumeric + underscores only, no `switch.` prefix (defaults to `game_id`) |
 | `exposed` | No | Whether to include in the game catalog sensor (default: `true`) |
 | `auto_discovered` | No | Set automatically by Steam discovery |
+
+---
 
 ## Custom Sensors & Commands
 
@@ -267,6 +301,8 @@ Execute custom actions from Home Assistant:
 - Admin commands run via `Start-Process -Verb RunAs` (UAC prompt may appear)
 - Non-admin commands run in current user context
 
+---
+
 ## Notifications
 
 PC Bridge can display Windows toast notifications sent from Home Assistant. Uses native WinRT APIs for ~10ms latency (no PowerShell overhead).
@@ -358,6 +394,8 @@ script:
           entity_id: notify.my_pc_notification
 ```
 
+---
+
 ## MQTT Commands
 
 Send commands via MQTT button topics:
@@ -444,6 +482,8 @@ discord_leave:
 
 > **Tip:** You can find the server and channel IDs in Discord by enabling Developer Mode (Settings → App Settings → Advanced → Developer Mode), then right-clicking a server or channel and selecting "Copy ID".
 
+---
+
 ## Home Assistant Integration
 
 PC Bridge auto-discovers via MQTT. After connecting, you'll get:
@@ -489,6 +529,8 @@ PC Bridge auto-discovers via MQTT. After connecting, you'll get:
 
 Where `<device>` is your configured `device_name` with dashes replaced by underscores.
 
+---
+
 ## Linux Requirements
 
 For full functionality on Linux, install these optional dependencies:
@@ -510,6 +552,8 @@ sudo pacman -S xdotool xprintidle xdg-utils libxdo gtk3 libappindicator-gtk3
 | `xprintidle` | Idle time tracking (X11) |
 | `xdg-utils` | Screensaver activation |
 | `pactl` | Audio control (usually pre-installed with PulseAudio/PipeWire) |
+
+---
 
 ## Run as Service
 
@@ -551,6 +595,8 @@ sudo systemctl enable pc-bridge
 sudo systemctl start pc-bridge
 ```
 
+---
+
 ## Performance
 
 All system sensors use native APIs for minimal overhead:
@@ -575,6 +621,8 @@ All system sensors use native APIs for minimal overhead:
 - Memory: +~100 bytes per sensor for state tracking
 - Recommended: Keep intervals ≥30s for PowerShell sensors
 
+---
+
 ## Building from Source
 
 ```bash
@@ -596,6 +644,8 @@ rustup target add x86_64-pc-windows-gnu
 cargo build --release --target x86_64-pc-windows-gnu
 ```
 
+---
+
 ## License
 
-MIT
+This project is licensed under the [MIT License](LICENSE).

@@ -1,5 +1,5 @@
 # cargo-deny configuration
-# Run: cargo install cargo-deny && cargo deny check
+# Run: cargo install cargo-deny && cargo deny --config .cargo/deny.toml check
 # Docs: https://embarkstudios.github.io/cargo-deny/
 
 [advisories]
