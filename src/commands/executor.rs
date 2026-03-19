@@ -299,6 +299,7 @@ impl CommandExecutor {
 /// Captures every branch of `execute_command`'s routing logic in a testable
 /// enum.  `execute_command` uses this internally, and tests can exercise the
 /// whole routing table without needing Windows APIs or an `AppState`.
+#[cfg(test)]
 #[derive(Debug, PartialEq)]
 pub(crate) enum CommandAction {
     /// Native side-effect handled inline (Wake, Lock, media keys, etc.)
@@ -321,6 +322,7 @@ pub(crate) enum CommandAction {
 /// instead of performing side effects.  Custom commands are NOT checked here
 /// (they require async config access); in `execute_command` they're tried
 /// before falling through to `resolve_shell_command`.
+#[cfg(test)]
 pub(crate) fn resolve_command_action(
     name: &str,
     payload: &str,

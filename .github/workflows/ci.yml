@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          arguments: --config .cargo/deny.toml
+          command-arguments: --config .cargo/deny.toml
 
   gitleaks:
     name: Secret Detection
