@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/icon.svg" alt="PC Bridge" width="128" height="128">
+  <img src="assets/icon-app.svg" alt="PC Bridge" width="128" height="128">
 </p>
 
 <h1 align="center">PC Bridge</h1>
