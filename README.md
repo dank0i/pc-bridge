@@ -23,29 +23,29 @@ PC Bridge runs on your PC and connects to Home Assistant over MQTT. It exposes y
 
 ### Features
 
-| | Feature | Description |
-|---|---------|-------------|
-| 🎮 | **Game Detection** | Monitors running processes and reports current game |
-| ⏱️ | **Idle Tracking** | Reports last user input time |
-| ⚡ | **Power Events** | Detects sleep/wake/display state instantly via OS events |
-| 📊 | **System Sensors** | CPU, memory, battery, active window (native APIs) |
-| 🔊 | **Audio Control** | Volume, mute, media keys via Home Assistant |
-| 🎙️ | **Discord** | Join/leave voice channel commands |
-| 🖥️ | **Display Wake** | Wakes display after WoL, dismisses screensaver |
-| 🔒 | **Remote Commands** | Lock, hibernate, restart, shutdown, sleep, screensaver |
-| 🔔 | **Notifications** | Native Windows toast notifications from Home Assistant |
-| 🎯 | **Steam Updates** | Detect when Steam games are updating |
-| ♻️ | **Hot-Reload** | Updates game mappings without restart |
-| 🧙 | **First-Run Wizard** | Interactive setup for MQTT and feature selection |
+| Feature | Description |
+|---------|-------------|
+| **Game Detection** | Monitors running processes and reports current game |
+| **Idle Tracking** | Reports last user input time |
+| **Power Events** | Detects sleep/wake/display state instantly via OS events |
+| **System Sensors** | CPU, memory, battery, active window (native APIs) |
+| **Audio Control** | Volume, mute, media keys via Home Assistant |
+| **Discord** | Join/leave voice channel commands |
+| **Display Wake** | Wakes display after WoL, dismisses screensaver |
+| **Remote Commands** | Lock, hibernate, restart, shutdown, sleep, screensaver |
+| **Notifications** | Native Windows toast notifications from Home Assistant |
+| **Steam Updates** | Detect when Steam games are updating |
+| **Hot-Reload** | Updates game mappings without restart |
+| **First-Run Wizard** | Interactive setup for MQTT and feature selection |
 
 ### Supported Platforms
 
 | Platform | Status |
 |----------|--------|
-| Windows 10/11 | ✅ Full support |
-| Linux (X11) | ✅ Full support |
-| Linux (Wayland) | ⚠️ Partial (idle tracking requires qdbus) |
-| macOS | 🔨 Build supported, limited features |
+| Windows 10/11 | Full support |
+| Linux (X11) | Full support |
+| Linux (Wayland) | Partial (idle tracking requires qdbus) |
+| macOS | Build supported, limited features |
 
 ---
 
