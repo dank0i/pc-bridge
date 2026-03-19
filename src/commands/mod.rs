@@ -9,6 +9,8 @@ mod launcher;
 
 #[cfg(unix)]
 mod executor_linux;
+#[cfg(unix)]
+mod launcher_linux;
 
 #[cfg(windows)]
 pub use executor::CommandExecutor;

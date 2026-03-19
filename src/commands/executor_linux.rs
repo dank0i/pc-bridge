@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use super::custom::execute_custom_command;
+use super::launcher_linux::expand_launcher_shortcut;
 use crate::AppState;
 use crate::audio::{self, MediaKey};
 use crate::mqtt::CommandReceiver;
@@ -187,20 +188,24 @@ impl CommandExecutor {
             return Ok(());
         }
 
-        // ── Shell commands (predefined → raw → not found) ─────────────
+        // ── Shell commands (predefined → launcher → raw → not found) ─────────────
         let cmd_str = match get_predefined_command(name) {
             Some(cmd) => cmd.to_string(),
-            None if !payload.is_empty() => {
-                let config = state.config.read().await;
-                if !config.allow_raw_commands {
-                    warn!("Raw command blocked (allow_raw_commands=false): {}", name);
+            None => {
+                // Try launcher shortcuts (always allowed — validated and safe)
+                if let Some(expanded) = expand_launcher_shortcut(payload) {
+                    expanded
+                } else if !payload.is_empty() {
+                    let config = state.config.read().await;
+                    if !config.allow_raw_commands {
+                        warn!("Raw command blocked (allow_raw_commands=false): {}", name);
+                        return Ok(());
+                    }
+                    payload.to_string()
+                } else {
+                    warn!("No command configured for: {}", name);
                     return Ok(());
                 }
-                payload.to_string()
-            }
-            None => {
-                warn!("No command configured for: {}", name);
-                return Ok(());
             }
         };
 

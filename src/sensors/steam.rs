@@ -14,7 +14,10 @@ use tokio::sync::mpsc;
 static IDLE_STEAM_ATTRS: LazyLock<serde_json::Value> =
     LazyLock::new(|| serde_json::json!({"updating_games": [], "count": 0}));
 use tokio::time::{Duration, Instant};
+
+#[cfg(windows)]
 use winreg::RegKey;
+#[cfg(windows)]
 use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 
 use crate::AppState;
@@ -80,8 +83,8 @@ impl SteamSensor {
 
         // Set up filesystem watcher for ACF changes
         let (fs_tx, mut fs_rx) = mpsc::channel::<()>(16);
-        let _watcher = self.setup_fs_watcher(&fs_tx);
-        let using_watcher = _watcher.is_some();
+        let watcher = self.setup_fs_watcher(&fs_tx);
+        let using_watcher = watcher.is_some();
 
         if using_watcher {
             info!("Steam sensor using filesystem watcher (instant detection)");
@@ -187,7 +190,7 @@ impl SteamSensor {
         let steam_path = match self.get_steam_path() {
             Some(p) => p,
             None => {
-                debug!("Steam not found in registry");
+                debug!("Steam installation not found");
                 return;
             }
         };
@@ -200,13 +203,14 @@ impl SteamSensor {
 
         // Parse libraryfolders.vdf for additional libraries
         let vdf_path = primary_steamapps.join("libraryfolders.vdf");
-        if vdf_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&vdf_path) {
-                self.parse_library_folders_vdf(&content);
-            }
+        if vdf_path.exists()
+            && let Ok(content) = std::fs::read_to_string(&vdf_path)
+        {
+            self.parse_library_folders_vdf(&content);
         }
     }
 
+    #[cfg(windows)]
     fn get_steam_path(&self) -> Option<PathBuf> {
         // Try HKCU first (current user), then HKLM (all users)
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
@@ -244,6 +248,28 @@ impl SteamSensor {
         }
 
         None
+    }
+
+    #[cfg(unix)]
+    fn get_steam_path(&self) -> Option<PathBuf> {
+        // Check STEAM_DIR env var first (custom installs)
+        if let Ok(dir) = std::env::var("STEAM_DIR") {
+            let p = PathBuf::from(dir);
+            if p.join("steamapps").is_dir() {
+                return Some(p);
+            }
+        }
+
+        let home = PathBuf::from(std::env::var("HOME").ok()?);
+        let candidates = [
+            home.join(".steam/steam"),
+            home.join(".local/share/Steam"),
+            home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
+            home.join("snap/steam/common/.local/share/Steam"),
+        ];
+        candidates
+            .into_iter()
+            .find(|p| p.join("steamapps").is_dir())
     }
 
     fn parse_library_folders_vdf(&mut self, content: &str) {
@@ -317,10 +343,10 @@ impl SteamSensor {
                         parse_acf_file(&path)
                     };
 
-                    if let Some(gs) = game_state {
-                        if is_updating(&gs) {
-                            updating.insert(gs.app_id.clone(), gs);
-                        }
+                    if let Some(gs) = game_state
+                        && is_updating(&gs)
+                    {
+                        updating.insert(gs.app_id.clone(), gs);
                     }
                 }
             }
@@ -410,10 +436,10 @@ fn parse_acf_content(content: &str, manifest_path: &Path) -> Option<GameUpdateSt
             if let Some(val) = extract_vdf_value(trimmed) {
                 name = val;
             }
-        } else if trimmed.starts_with("\"StateFlags\"") || trimmed.starts_with("\"stateflags\"") {
-            if let Some(val) = extract_vdf_value(trimmed) {
-                state_flags = val.parse().unwrap_or(0);
-            }
+        } else if (trimmed.starts_with("\"StateFlags\"") || trimmed.starts_with("\"stateflags\""))
+            && let Some(val) = extract_vdf_value(trimmed)
+        {
+            state_flags = val.parse().unwrap_or(0);
         }
     }
 

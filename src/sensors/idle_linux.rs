@@ -1,4 +1,7 @@
-//! Idle time sensor for Linux - tracks last user input
+//! Idle time sensor for Linux - tracks last user input and screensaver state
+//!
+//! Screensaver detection uses D-Bus org.freedesktop.ScreenSaver or xdg-screensaver.
+//! Last-active time uses xprintidle (X11) or qdbus (KDE/Wayland).
 
 use log::{debug, info, warn};
 use std::process::Command;
@@ -45,6 +48,16 @@ impl IdleSensor {
             .await;
         prev_last_active = formatted;
 
+        // Publish initial screensaver state (retained so HA picks it up)
+        let screensaver_active = is_screensaver_active();
+        let screensaver_state = if screensaver_active { "on" } else { "off" };
+        debug!("Initial screensaver state: {}", screensaver_state);
+        self.state
+            .mqtt
+            .publish_sensor_retained("screensaver", screensaver_state)
+            .await;
+        let mut prev_screensaver_state = screensaver_active;
+
         loop {
             tokio::select! {
                 biased;
@@ -76,6 +89,15 @@ impl IdleSensor {
                     if formatted != prev_last_active {
                         self.state.mqtt.publish_sensor("lastactive", &formatted).await;
                         prev_last_active = formatted;
+                    }
+
+                    // Check screensaver state (polled alongside idle time)
+                    let screensaver_active = is_screensaver_active();
+                    if screensaver_active != prev_screensaver_state {
+                        let state_str = if screensaver_active { "on" } else { "off" };
+                        debug!("Screensaver state changed: {}", state_str);
+                        self.state.mqtt.publish_sensor_retained("screensaver", state_str).await;
+                        prev_screensaver_state = screensaver_active;
                     }
                 }
             }
@@ -118,4 +140,56 @@ impl IdleSensor {
         warn!("No idle time detection available (install xprintidle for X11)");
         OffsetDateTime::now_utc()
     }
+}
+
+/// Check if a screensaver is currently active on Linux.
+///
+/// Tries multiple detection methods:
+/// 1. xdg-screensaver status (most portable)
+/// 2. D-Bus org.freedesktop.ScreenSaver.GetActive (GNOME/KDE)
+/// 3. D-Bus org.gnome.ScreenSaver.GetActive (GNOME-specific)
+fn is_screensaver_active() -> bool {
+    // Try xdg-screensaver status (returns "enabled" when active)
+    if let Ok(output) = Command::new("xdg-screensaver").arg("status").output()
+        && output.status.success()
+        && let Ok(status) = String::from_utf8(output.stdout)
+    {
+        return status.trim() == "enabled";
+    }
+
+    // Try freedesktop D-Bus interface
+    if let Ok(output) = Command::new("dbus-send")
+        .args([
+            "--session",
+            "--dest=org.freedesktop.ScreenSaver",
+            "--type=method_call",
+            "--print-reply",
+            "/org/freedesktop/ScreenSaver",
+            "org.freedesktop.ScreenSaver.GetActive",
+        ])
+        .output()
+        && output.status.success()
+        && let Ok(reply) = String::from_utf8(output.stdout)
+    {
+        return reply.contains("boolean true");
+    }
+
+    // Try GNOME-specific D-Bus interface
+    if let Ok(output) = Command::new("dbus-send")
+        .args([
+            "--session",
+            "--dest=org.gnome.ScreenSaver",
+            "--type=method_call",
+            "--print-reply",
+            "/org/gnome/ScreenSaver",
+            "org.gnome.ScreenSaver.GetActive",
+        ])
+        .output()
+        && output.status.success()
+        && let Ok(reply) = String::from_utf8(output.stdout)
+    {
+        return reply.contains("boolean true");
+    }
+
+    false
 }

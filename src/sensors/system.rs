@@ -42,7 +42,6 @@ impl PrevSystemValues {
 }
 
 /// Events from background threads monitoring window focus and battery state
-#[cfg_attr(not(windows), allow(dead_code))]
 enum SystemEvent {
     /// Foreground window changed
     WindowFocusChanged,
@@ -87,8 +86,22 @@ impl SystemSensor {
             start_battery_monitor(tx, shutdown);
         }
 
-        // Suppress unused warning on non-Windows
-        let _ = &event_tx;
+        // Linux: poll-based event monitors via background tasks
+        #[cfg(unix)]
+        {
+            let tx = event_tx.clone();
+            let shutdown = self.state.shutdown_tx.subscribe();
+            start_window_focus_monitor_linux(tx, shutdown);
+        }
+        #[cfg(unix)]
+        {
+            let tx = event_tx.clone();
+            let shutdown = self.state.shutdown_tx.subscribe();
+            start_battery_monitor_linux(tx, shutdown);
+        }
+
+        // Suppress unused warning when neither platform uses event_tx further
+        drop(event_tx);
 
         // Initial publish (force all by using empty prev_vals)
         self.publish_all(&mut prev_cpu, &mut prev_vals).await;
@@ -126,7 +139,10 @@ impl SystemSensor {
                 Some(event) = event_rx.recv() => {
                     match event {
                         SystemEvent::WindowFocusChanged => {
+                            #[cfg(windows)]
                             let title = get_active_window_title();
+                            #[cfg(unix)]
+                            let title = get_active_window_title_async().await;
                             if title != prev_vals.active_window {
                                 self.state.mqtt.publish_sensor("active_window", &title).await;
                                 prev_vals.active_window = title;
@@ -806,13 +822,6 @@ fn get_active_window_title() -> String {
     }
 }
 
-#[cfg(unix)]
-fn get_active_window_title() -> String {
-    // Blocking subprocess — must not run directly on the single-threaded async runtime.
-    // Callers that need async should use spawn_blocking(get_active_window_title).
-    get_active_window_title_blocking()
-}
-
 /// Async wrapper for use from tokio tasks on Linux
 #[cfg(unix)]
 pub async fn get_active_window_title_async() -> String {
@@ -832,4 +841,101 @@ fn get_active_window_title_blocking() -> String {
         return truncate_title(String::from_utf8_lossy(&output.stdout).trim().to_string());
     }
     String::new()
+}
+
+// ============================================================================
+// Linux Event Monitors - poll-based background tasks
+// ============================================================================
+
+/// Monitor active window changes on Linux using xprop -spy.
+///
+/// xprop -spy -root _NET_ACTIVE_WINDOW prints a line every time the active
+/// window changes, giving us near-instant detection without polling.
+/// Falls back to periodic polling if xprop is unavailable.
+#[cfg(unix)]
+fn start_window_focus_monitor_linux(
+    event_tx: mpsc::Sender<SystemEvent>,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+) {
+    use std::io::BufRead;
+
+    std::thread::Builder::new()
+        .name("window-focus-linux".into())
+        .spawn(move || {
+            // Try xprop -spy for event-driven detection
+            let child = std::process::Command::new("xprop")
+                .args(["-spy", "-root", "_NET_ACTIVE_WINDOW"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+
+            match child {
+                Ok(mut child) => {
+                    let stdout = child.stdout.take().expect("piped stdout");
+                    let reader = std::io::BufReader::new(stdout);
+
+                    for line in reader.lines() {
+                        // Check for shutdown
+                        if shutdown_rx.try_recv().is_ok() {
+                            let _ = child.kill();
+                            break;
+                        }
+
+                        if line.is_ok() {
+                            let _ = event_tx.blocking_send(SystemEvent::WindowFocusChanged);
+                        }
+                    }
+                    let _ = child.wait();
+                }
+                Err(_) => {
+                    // Fallback: poll every 2 seconds
+                    debug!("xprop not available, falling back to polling for window changes");
+                    let mut prev_title = get_active_window_title_blocking();
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        if shutdown_rx.try_recv().is_ok() {
+                            break;
+                        }
+                        let title = get_active_window_title_blocking();
+                        if title != prev_title {
+                            prev_title = title;
+                            let _ = event_tx.blocking_send(SystemEvent::WindowFocusChanged);
+                        }
+                    }
+                }
+            }
+        })
+        .ok();
+}
+
+/// Monitor battery changes on Linux by polling /sys/class/power_supply.
+///
+/// Checks every 30 seconds for changes in battery level or charging state.
+/// Sends events only when values actually change.
+#[cfg(unix)]
+fn start_battery_monitor_linux(
+    event_tx: mpsc::Sender<SystemEvent>,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+) {
+    std::thread::Builder::new()
+        .name("battery-linux".into())
+        .spawn(move || {
+            let mut prev_status = get_battery_status();
+
+            loop {
+                // Poll every 30 seconds
+                std::thread::sleep(std::time::Duration::from_secs(30));
+
+                if shutdown_rx.try_recv().is_ok() {
+                    break;
+                }
+
+                let current = get_battery_status();
+                if current != prev_status {
+                    prev_status = current;
+                    let _ = event_tx.blocking_send(SystemEvent::BatteryChanged);
+                }
+            }
+        })
+        .ok();
 }

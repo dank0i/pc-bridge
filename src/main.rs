@@ -232,7 +232,6 @@ async fn main() -> anyhow::Result<()> {
         info!("  System sensors enabled (CPU/memory polled, battery/active_window event-driven)");
     }
 
-    #[cfg(windows)]
     if config.features.steam_updates {
         use crate::sensors::SteamSensor;
         let sensor = SteamSensor::new(Arc::clone(&state));

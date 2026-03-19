@@ -50,18 +50,29 @@ fn http_agent() -> ureq::Agent {
     ureq::Agent::new_with_config(config)
 }
 
-/// Clean up leftover `.old` files from a previous update.
+/// Clean up leftover files from a previous update.
 /// Called on startup before the update check.
 pub fn cleanup_old_files() {
     let current_exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return,
     };
+
+    // Windows: pc-bridge.exe.old
     let old_path = current_exe.with_extension("exe.old");
     if old_path.exists() {
         match std::fs::remove_file(&old_path) {
             Ok(()) => info!("Cleaned up old update file: {:?}", old_path),
             Err(e) => warn!("Failed to clean up {:?}: {}", old_path, e),
+        }
+    }
+
+    // Linux: pc-bridge-linux.update (leftover if install failed mid-way)
+    let update_path = current_exe.with_extension("update");
+    if update_path.exists() {
+        match std::fs::remove_file(&update_path) {
+            Ok(()) => info!("Cleaned up leftover update file: {:?}", update_path),
+            Err(e) => warn!("Failed to clean up {:?}: {}", update_path, e),
         }
     }
 }
@@ -78,8 +89,14 @@ pub async fn check_for_updates() {
                     CURRENT_VERSION, remote_version
                 );
 
-                // Find the exe asset
-                if let Some(asset) = release.assets.iter().find(|a| a.name.ends_with(".exe")) {
+                // Find the platform-appropriate asset
+                let asset = if cfg!(windows) {
+                    release.assets.iter().find(|a| a.name.ends_with(".exe"))
+                } else {
+                    release.assets.iter().find(|a| a.name == "pc-bridge-linux")
+                };
+
+                if let Some(asset) = asset {
                     // Look for a .sha256 sidecar (e.g. "pc-bridge.exe.sha256")
                     let checksum_asset = release
                         .assets
@@ -102,7 +119,7 @@ pub async fn check_for_updates() {
                         }
                     }
                 } else {
-                    warn!("No exe asset found in release");
+                    warn!("No matching asset found in release for this platform");
                 }
             } else {
                 info!("Already up to date (v{})", CURRENT_VERSION);
