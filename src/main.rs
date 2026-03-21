@@ -27,6 +27,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{RwLock, broadcast};
 
+/// Saved console mode for restoration on exit (Windows only).
+/// Set when AttachConsole succeeds; used during shutdown to restore the
+/// parent terminal's input mode so that echo and line editing work again.
+#[cfg(windows)]
+static ORIGINAL_CONSOLE_MODE: std::sync::OnceLock<(
+    windows::Win32::Foundation::HANDLE,
+    windows::Win32::System::Console::CONSOLE_MODE,
+)> = std::sync::OnceLock::new();
+
 use crate::commands::CommandExecutor;
 use crate::config::Config;
 use crate::mqtt::MqttClient;
@@ -54,14 +63,12 @@ pub struct AppState {
 type TaskHandle = tokio::task::JoinHandle<()>;
 
 #[cfg(windows)]
-unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> windows::Win32::Foundation::BOOL {
-    use windows::Win32::Foundation::BOOL;
-    // CTRL_C_EVENT = 0, CTRL_BREAK_EVENT = 1, CTRL_CLOSE_EVENT = 2
-    if ctrl_type <= 2 {
-        // Just exit - graceful shutdown doesn't work well with GUI subsystem + attached console
-        std::process::exit(0);
+fn restore_console_mode() {
+    if let Some(&(handle, mode)) = ORIGINAL_CONSOLE_MODE.get() {
+        unsafe {
+            let _ = windows::Win32::System::Console::SetConsoleMode(handle, mode);
+        }
     }
-    BOOL(0) // Not handled
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -69,20 +76,29 @@ async fn main() -> anyhow::Result<()> {
     // On Windows, attach to parent console if launched from terminal
     // This allows seeing output when run from cmd/powershell
     #[cfg(windows)]
+    let console_attached;
+    #[cfg(windows)]
     {
         use windows::Win32::System::Console::{
-            AttachConsole, ENABLE_PROCESSED_INPUT, GetStdHandle, STD_INPUT_HANDLE,
-            SetConsoleCtrlHandler, SetConsoleMode,
+            AttachConsole, ENABLE_PROCESSED_INPUT, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE,
+            SetConsoleMode,
         };
         unsafe {
             // ATTACH_PARENT_PROCESS = -1 (0xFFFFFFFF)
-            if AttachConsole(u32::MAX).is_ok() {
-                // Enable Ctrl+C processing on the attached console
+            console_attached = AttachConsole(u32::MAX).is_ok();
+            if console_attached {
+                // Save original console mode so we can restore it on exit.
+                // Only add ENABLE_PROCESSED_INPUT (Ctrl+C as signal) without
+                // stripping ENABLE_LINE_INPUT / ENABLE_ECHO_INPUT from the
+                // parent shell's console.
                 if let Ok(handle) = GetStdHandle(STD_INPUT_HANDLE) {
-                    let _ = SetConsoleMode(handle, ENABLE_PROCESSED_INPUT);
+                    let mut original_mode =
+                        windows::Win32::System::Console::CONSOLE_MODE::default();
+                    if GetConsoleMode(handle, &mut original_mode).is_ok() {
+                        let _ = ORIGINAL_CONSOLE_MODE.set((handle, original_mode));
+                        let _ = SetConsoleMode(handle, original_mode | ENABLE_PROCESSED_INPUT);
+                    }
                 }
-                // Set up Ctrl+C handler
-                let _ = SetConsoleCtrlHandler(Some(console_ctrl_handler), true);
             }
         }
     }
@@ -166,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
     // Create MQTT client (conditionally registers discovery based on features)
-    let (mqtt, command_rx) = MqttClient::new(&config).await?;
+    let (mqtt, command_rx) = MqttClient::new(&config, shutdown_tx.subscribe()).await?;
 
     // Steam discovery is deferred to the "refresh_steam_games" button in HA
     // (previously ran at startup, causing ~400KB+ heap fragmentation on Windows)
@@ -280,20 +296,35 @@ async fn main() -> anyhow::Result<()> {
         state.mqtt.publish_sensor_retained("display", "on").await;
     }
 
-    // Wait for shutdown signal (Ctrl+C)
+    // Wait for shutdown signal (Ctrl+C or broadcast)
     info!("PC Bridge running. Press Ctrl+C to stop.");
 
     #[cfg(windows)]
     {
-        // Wait for broadcast shutdown signal (no polling — blocks on recv)
-        let mut shutdown_rx = shutdown_tx.subscribe();
-        let _ = shutdown_rx.recv().await;
+        if console_attached {
+            // Terminal mode: wait for Ctrl+C via tokio's signal handler
+            tokio::signal::ctrl_c().await.ok();
+        } else {
+            // Background mode (no console): wait for broadcast shutdown
+            let mut shutdown_rx = shutdown_tx.subscribe();
+            let _ = shutdown_rx.recv().await;
+        }
     }
 
     #[cfg(not(windows))]
     tokio::signal::ctrl_c().await?;
 
     info!("Shutting down...");
+
+    // Second Ctrl+C force-exits (in case shutdown hangs)
+    tokio::spawn(async {
+        tokio::signal::ctrl_c().await.ok();
+        eprintln!("Forced shutdown");
+        #[cfg(windows)]
+        restore_console_mode();
+        std::process::exit(1);
+    });
+
     let _ = shutdown_tx.send(());
 
     // Wait for tasks to finish (with timeout)
@@ -304,10 +335,18 @@ async fn main() -> anyhow::Result<()> {
     })
     .await;
 
-    // Publish offline status
-    state.mqtt.publish_availability(false).await;
+    // Publish offline status (with timeout to avoid hanging on broken MQTT)
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        state.mqtt.publish_availability(false),
+    )
+    .await;
 
     info!("PC Bridge stopped");
+
+    // Restore parent terminal's console mode before exiting
+    #[cfg(windows)]
+    restore_console_mode();
 
     // Print newline to ensure terminal prompt is on its own line
     println!();

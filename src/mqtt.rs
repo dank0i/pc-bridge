@@ -60,6 +60,10 @@ impl CachedTopics {
             "steam_updating",
             "bridge_health",
             "game_catalog",
+            "active_window",
+            "sleep_state",
+            "battery_level",
+            "battery_charging",
         ];
 
         for name in sensors {
@@ -128,7 +132,10 @@ struct HADevice {
 }
 
 impl MqttClient {
-    pub async fn new(config: &Config) -> anyhow::Result<(Self, CommandReceiver)> {
+    pub async fn new(
+        config: &Config,
+        mut shutdown_rx: broadcast::Receiver<()>,
+    ) -> anyhow::Result<(Self, CommandReceiver)> {
         // Parse broker URL
         let broker = &config.mqtt.broker;
         let (host, port) = Self::parse_broker_url(broker)?;
@@ -195,7 +202,14 @@ impl MqttClient {
         tokio::spawn(async move {
             let mut backoff_secs: u64 = 1;
             loop {
-                match eventloop.poll().await {
+                tokio::select! {
+                    biased;
+                    _ = shutdown_rx.recv() => {
+                        debug!("MQTT event loop shutting down");
+                        break;
+                    }
+                    poll_result = eventloop.poll() => {
+                        match poll_result {
                     Ok(Event::Incoming(Packet::Publish(publish))) => {
                         debug!(
                             "MQTT message: {} = {}",
@@ -261,6 +275,8 @@ impl MqttClient {
                         warn!("MQTT error (retrying in {}s): {:?}", backoff_secs, e);
                         tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
                         backoff_secs = (backoff_secs * 2).min(30);
+                    }
+                }
                     }
                 }
             }
@@ -1087,6 +1103,11 @@ mod tests {
             "memory_usage",
             "steam_updating",
             "bridge_health",
+            "game_catalog",
+            "active_window",
+            "sleep_state",
+            "battery_level",
+            "battery_charging",
         ];
         for name in expected {
             assert!(
@@ -2006,6 +2027,14 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+        /// Create a shutdown channel pair for tests. The sender must stay alive
+        /// (assign to `_stx`) for the test's duration so the event loop doesn't
+        /// exit immediately.
+        fn test_shutdown() -> (broadcast::Sender<()>, broadcast::Receiver<()>) {
+            let (tx, rx) = broadcast::channel::<()>(1);
+            (tx, rx)
+        }
+
         /// Decode MQTT v4 variable-length remaining length.
         /// Returns (value, bytes_consumed) or None if incomplete.
         fn decode_remaining_length(bytes: &[u8]) -> Option<(usize, usize)> {
@@ -2272,9 +2301,13 @@ mod tests {
         async fn test_startup_no_deadlock_all_features() {
             let (port, _state, _inject) = start_mini_broker().await;
             let config = broker_config("test-pc", port, all_features());
+            let (_stx, _) = test_shutdown();
 
-            let result =
-                tokio::time::timeout(Duration::from_secs(5), MqttClient::new(&config)).await;
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                MqttClient::new(&config, _stx.subscribe()),
+            )
+            .await;
 
             assert!(
                 result.is_ok(),
@@ -2287,9 +2320,13 @@ mod tests {
         async fn test_startup_no_deadlock_minimal() {
             let (port, _state, _inject) = start_mini_broker().await;
             let config = broker_config("test-pc", port, FeatureConfig::default());
+            let (_stx, _) = test_shutdown();
 
-            let result =
-                tokio::time::timeout(Duration::from_secs(5), MqttClient::new(&config)).await;
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                MqttClient::new(&config, _stx.subscribe()),
+            )
+            .await;
 
             assert!(
                 result.is_ok(),
@@ -2302,6 +2339,7 @@ mod tests {
         async fn test_startup_no_deadlock_with_custom_entities() {
             let (port, _state, _inject) = start_mini_broker().await;
             let mut config = broker_config("test-pc", port, all_features());
+            let (_stx, _) = test_shutdown();
 
             // Add 15 custom commands to stress the buffer
             // (custom commands are added to subscribe_topics, increasing ConnAck
@@ -2319,8 +2357,11 @@ mod tests {
                 });
             }
 
-            let result =
-                tokio::time::timeout(Duration::from_secs(5), MqttClient::new(&config)).await;
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                MqttClient::new(&config, _stx.subscribe()),
+            )
+            .await;
 
             assert!(
                 result.is_ok(),
@@ -2337,8 +2378,9 @@ mod tests {
         async fn test_discovery_registers_all_sensors() {
             let (port, state, _inject) = start_mini_broker().await;
             let config = broker_config("test-pc", port, all_features());
+            let (_stx, _) = test_shutdown();
 
-            let (_mqtt, _cmd_rx) = MqttClient::new(&config).await.unwrap();
+            let (_mqtt, _cmd_rx) = MqttClient::new(&config, _stx.subscribe()).await.unwrap();
 
             // All features: 12 sensors + 15 buttons + 1 notify = 28 discovery
             // + 1 availability from ConnAck handler
@@ -2411,8 +2453,9 @@ mod tests {
         async fn test_subscribes_all_command_topics() {
             let (port, state, _inject) = start_mini_broker().await;
             let config = broker_config("test-pc", port, all_features());
+            let (_stx, _) = test_shutdown();
 
-            let (_mqtt, _cmd_rx) = MqttClient::new(&config).await.unwrap();
+            let (_mqtt, _cmd_rx) = MqttClient::new(&config, _stx.subscribe()).await.unwrap();
 
             // subscribe_commands + ConnAck handler both subscribe → 18 * 2 = 36
             wait_for_subscribes(&state, 18).await;
@@ -2457,8 +2500,9 @@ mod tests {
                 ..FeatureConfig::default()
             };
             let config = broker_config("test-pc", port, features);
+            let (_stx, _) = test_shutdown();
 
-            let (_mqtt, mut cmd_rx) = MqttClient::new(&config).await.unwrap();
+            let (_mqtt, mut cmd_rx) = MqttClient::new(&config, _stx.subscribe()).await.unwrap();
 
             // Wait for subscriptions before injecting
             wait_for_subscribes(&state, 5).await;
@@ -2489,8 +2533,9 @@ mod tests {
                 ..FeatureConfig::default()
             };
             let config = broker_config("test-pc", port, features);
+            let (_stx, _) = test_shutdown();
 
-            let (_mqtt, mut cmd_rx) = MqttClient::new(&config).await.unwrap();
+            let (_mqtt, mut cmd_rx) = MqttClient::new(&config, _stx.subscribe()).await.unwrap();
 
             wait_for_subscribes(&state, 5).await;
 
@@ -2520,8 +2565,9 @@ mod tests {
                 ..FeatureConfig::default()
             };
             let config = broker_config("test-pc", port, features);
+            let (_stx, _) = test_shutdown();
 
-            let (_mqtt, mut cmd_rx) = MqttClient::new(&config).await.unwrap();
+            let (_mqtt, mut cmd_rx) = MqttClient::new(&config, _stx.subscribe()).await.unwrap();
 
             wait_for_subscribes(&state, 5).await;
 
@@ -2560,8 +2606,9 @@ mod tests {
         async fn test_availability_published_on_connect() {
             let (port, state, _inject) = start_mini_broker().await;
             let config = broker_config("test-pc", port, FeatureConfig::default());
+            let (_stx, _) = test_shutdown();
 
-            let (_mqtt, _cmd_rx) = MqttClient::new(&config).await.unwrap();
+            let (_mqtt, _cmd_rx) = MqttClient::new(&config, _stx.subscribe()).await.unwrap();
 
             // Wait for at least one publish (availability or discovery)
             wait_for_publishes(&state, 1).await;

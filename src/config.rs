@@ -909,13 +909,28 @@ pub async fn watch_config(state: Arc<AppState>) {
 
     let mut shutdown_rx = state.shutdown_tx.subscribe();
 
+    // Debounce: editors emit multiple events per save (write temp, rename, update).
+    // Wait 500ms after the last event before reloading to avoid redundant work.
+    let mut debounce_deadline: Option<tokio::time::Instant> = None;
+
     loop {
+        let debounce_sleep = match debounce_deadline {
+            Some(d) => tokio::time::sleep_until(d),
+            None => tokio::time::sleep(std::time::Duration::from_secs(86400)),
+        };
+        tokio::pin!(debounce_sleep);
+
         tokio::select! {
             biased;
             _ = shutdown_rx.recv() => {
                 info!("Config watcher shutting down");
                 drop(stop_tx); // Unblocks the watcher thread instantly
                 break;
+            }
+            () = &mut debounce_sleep, if debounce_deadline.is_some() => {
+                debounce_deadline = None;
+                info!("Config file changed, reloading...");
+                reload_hot_config(&state).await;
             }
             Some(event) = rx.recv() => {
                 // Check if it's our file
@@ -928,8 +943,10 @@ pub async fn watch_config(state: Arc<AppState>) {
                 if is_our_file {
                     match event.kind {
                         EventKind::Modify(_) | EventKind::Create(_) => {
-                            info!("Config file changed, reloading...");
-                            reload_hot_config(&state).await;
+                            debounce_deadline = Some(
+                                tokio::time::Instant::now()
+                                    + std::time::Duration::from_millis(500),
+                            );
                         }
                         _ => {}
                     }
@@ -941,71 +958,80 @@ pub async fn watch_config(state: Arc<AppState>) {
 
 /// Reload hot-reloadable config fields (games, intervals, commands, sensors, security flags)
 async fn reload_hot_config(state: &AppState) {
-    match Config::load() {
-        Ok(new_config) => {
-            let mut config = state.config.write().await;
-            let old_count = config.games.len();
-            config.games = new_config.games;
-
-            // Reload intervals (sensors pick up changes via config_generation)
-            config.intervals = new_config.intervals;
-
-            // Security-relevant flags
-            config.allow_raw_commands = new_config.allow_raw_commands;
-
-            // Discord keybind
-            config.discord_keybind = new_config.discord_keybind;
-
-            // Also reload custom sensors/commands config
-            let old_sensors_enabled = config.custom_sensors_enabled;
-            let old_commands_enabled = config.custom_commands_enabled;
-
-            config.custom_sensors_enabled = new_config.custom_sensors_enabled;
-            config.custom_commands_enabled = new_config.custom_commands_enabled;
-            config.custom_command_privileges_allowed = new_config.custom_command_privileges_allowed;
-            config.custom_sensors = new_config.custom_sensors;
-            config.custom_commands = new_config.custom_commands;
-
-            let new_game_count = config.games.len();
-
-            // Capture values for logging before dropping lock
-            let new_sensors_enabled = config.custom_sensors_enabled;
-            let new_commands_enabled = config.custom_commands_enabled;
-            let new_privileges_allowed = config.custom_command_privileges_allowed;
-
-            // Drop write lock before notifying subscribers
-            drop(config);
-
-            info!("Reloaded games: {} (was {})", new_game_count, old_count);
-
-            // Notify subscribers (e.g., GameSensor) that config changed
-            let _ = state.config_generation.send(());
-
-            // Log security-relevant changes (using captured locals — no lock needed)
-            if new_sensors_enabled != old_sensors_enabled {
-                if new_sensors_enabled {
-                    warn!("custom_sensors_enabled is now TRUE");
-                } else {
-                    info!("custom_sensors_enabled is now false");
-                }
-            }
-            if new_commands_enabled != old_commands_enabled {
-                if new_commands_enabled {
-                    warn!(
-                        "custom_commands_enabled is now TRUE - arbitrary code execution possible via MQTT"
-                    );
-                } else {
-                    info!("custom_commands_enabled is now false");
-                }
-            }
-            if new_privileges_allowed {
-                warn!(
-                    "custom_command_privileges_allowed is TRUE - commands can run with ADMIN privileges"
-                );
-            }
+    // Config::load() does synchronous file I/O — run on the blocking pool to
+    // avoid stalling the single-threaded tokio runtime.
+    let new_config = match tokio::task::spawn_blocking(Config::load).await {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => {
+            warn!("Failed to reload config: {}", e);
+            return;
         }
         Err(e) => {
-            warn!("Failed to reload config: {}", e);
+            error!("Config reload task panicked: {}", e);
+            return;
+        }
+    };
+
+    {
+        let mut config = state.config.write().await;
+        let old_count = config.games.len();
+        config.games = new_config.games;
+
+        // Reload intervals (sensors pick up changes via config_generation)
+        config.intervals = new_config.intervals;
+
+        // Security-relevant flags
+        config.allow_raw_commands = new_config.allow_raw_commands;
+
+        // Discord keybind
+        config.discord_keybind = new_config.discord_keybind;
+
+        // Also reload custom sensors/commands config
+        let old_sensors_enabled = config.custom_sensors_enabled;
+        let old_commands_enabled = config.custom_commands_enabled;
+
+        config.custom_sensors_enabled = new_config.custom_sensors_enabled;
+        config.custom_commands_enabled = new_config.custom_commands_enabled;
+        config.custom_command_privileges_allowed = new_config.custom_command_privileges_allowed;
+        config.custom_sensors = new_config.custom_sensors;
+        config.custom_commands = new_config.custom_commands;
+
+        let new_game_count = config.games.len();
+
+        // Capture values for logging before dropping lock
+        let new_sensors_enabled = config.custom_sensors_enabled;
+        let new_commands_enabled = config.custom_commands_enabled;
+        let new_privileges_allowed = config.custom_command_privileges_allowed;
+
+        // Drop write lock before notifying subscribers
+        drop(config);
+
+        info!("Reloaded games: {} (was {})", new_game_count, old_count);
+
+        // Notify subscribers (e.g., GameSensor) that config changed
+        let _ = state.config_generation.send(());
+
+        // Log security-relevant changes (using captured locals — no lock needed)
+        if new_sensors_enabled != old_sensors_enabled {
+            if new_sensors_enabled {
+                warn!("custom_sensors_enabled is now TRUE");
+            } else {
+                info!("custom_sensors_enabled is now false");
+            }
+        }
+        if new_commands_enabled != old_commands_enabled {
+            if new_commands_enabled {
+                warn!(
+                    "custom_commands_enabled is now TRUE - arbitrary code execution possible via MQTT"
+                );
+            } else {
+                info!("custom_commands_enabled is now false");
+            }
+        }
+        if new_privileges_allowed {
+            warn!(
+                "custom_command_privileges_allowed is TRUE - commands can run with ADMIN privileges"
+            );
         }
     }
 }

@@ -265,6 +265,11 @@ impl CommandExecutor {
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()?;
 
+        // Capture PID before moving child into spawn_blocking so we can kill
+        // the process tree on timeout (calling .kill() is impossible once the
+        // Child is moved into the blocking closure).
+        let pid = child.id();
+
         // Wait with timeout in background
         tokio::spawn(async move {
             match tokio::time::timeout(
@@ -281,11 +286,16 @@ impl CommandExecutor {
                 Ok(Ok(Err(e))) => error!("Command wait error: {}", e),
                 Ok(Err(e)) => error!("Task join error: {}", e),
                 Err(_) => {
-                    // Timeout: the spawn_blocking task still owns `child` and is
-                    // blocked on child.wait(). We can't reach it to kill the
-                    // process, but dropping a Child on Windows does NOT kill it.
-                    // Log clearly so the user knows the process is still running.
-                    warn!("Command timed out after 5 minutes (process may still be running)");
+                    warn!(
+                        "Command timed out after 5 minutes, killing process tree (PID {})",
+                        pid
+                    );
+                    // Kill the entire process tree. The spawn_blocking task
+                    // blocked on child.wait() will unblock once the process dies.
+                    let _ = Command::new("taskkill")
+                        .args(["/F", "/T", "/PID", &pid.to_string()])
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .spawn();
                 }
             }
         });

@@ -78,8 +78,13 @@ impl ProcessState {
         if name.len() >= 4 && name.as_bytes()[name.len() - 4..].eq_ignore_ascii_case(b".scr") {
             self.scr_count += 1;
         }
-        // Single Arc allocation shared across all three data structures
-        let arc_name: Arc<str> = Arc::from(name);
+        // Reuse existing Arc when the process name is already tracked (e.g. svchost.exe),
+        // avoiding a fresh heap allocation per duplicate name.
+        let arc_name: Arc<str> = if let Some(existing) = self.names.get(name.as_str()) {
+            Arc::clone(existing)
+        } else {
+            Arc::from(name)
+        };
         self.pid_to_name.insert(pid, Arc::clone(&arc_name));
         *self.name_counts.entry(Arc::clone(&arc_name)).or_insert(0) += 1;
         self.names.insert(arc_name);
@@ -460,10 +465,14 @@ impl ProcessWatcher {
 
                 if Process32FirstW(snapshot, &raw mut entry).is_ok() {
                     loop {
-                        let mut name = String::from_utf16_lossy(&entry.szExeFile);
-                        if let Some(pos) = name.find('\0') {
-                            name.truncate(pos);
-                        }
+                        // Slice to null terminator before converting, avoiding
+                        // a 260-char allocation for every process entry.
+                        let nul_pos = entry
+                            .szExeFile
+                            .iter()
+                            .position(|&c| c == 0)
+                            .unwrap_or(entry.szExeFile.len());
+                        let name = String::from_utf16_lossy(&entry.szExeFile[..nul_pos]);
                         if !name.is_empty() {
                             pids.insert(entry.th32ProcessID, name);
                         }

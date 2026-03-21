@@ -66,11 +66,11 @@ impl GameSensor {
         let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
 
         // Build cached patterns once at startup
-        let config = self.state.config.read().await;
-        let mut cached = CachedGamePatterns::build(&config.games);
-        // Publish initial game catalog
-        self.publish_game_catalog(&config.games).await;
-        drop(config);
+        // Clone the games map and drop the read lock before any async
+        // work (MQTT publish) to avoid holding the lock across await points.
+        let games = self.state.config.read().await.games.clone();
+        let mut cached = CachedGamePatterns::build(&games);
+        self.publish_game_catalog(&games).await;
 
         // Publish initial state
         let (game_id, display_name) = self.detect_game(&cached).await;
@@ -90,10 +90,9 @@ impl GameSensor {
                 }
                 // Rebuild cached patterns when config changes
                 Ok(()) = config_rx.recv() => {
-                    let config = self.state.config.read().await;
-                    cached = CachedGamePatterns::build(&config.games);
-                    self.publish_game_catalog(&config.games).await;
-                    drop(config);
+                    let games = self.state.config.read().await.games.clone();
+                    cached = CachedGamePatterns::build(&games);
+                    self.publish_game_catalog(&games).await;
                     debug!("Game sensor: rebuilt cached patterns");
                     // Re-detect with new patterns
                     let (game_id, display_name) = self.detect_game(&cached).await;
@@ -105,9 +104,8 @@ impl GameSensor {
                 // MQTT reconnected — force republish retained state
                 Ok(()) = reconnect_rx.recv() => {
                     info!("Game sensor: MQTT reconnected, republishing current state");
-                    let config = self.state.config.read().await;
-                    self.publish_game_catalog(&config.games).await;
-                    drop(config);
+                    let games = self.state.config.read().await.games.clone();
+                    self.publish_game_catalog(&games).await;
                     let (game_id, display_name) = self.detect_game(&cached).await;
                     self.publish_game(&game_id, &display_name).await;
                     last_game_id = game_id;
