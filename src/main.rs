@@ -28,11 +28,11 @@ use std::time::Duration;
 use tokio::sync::{RwLock, broadcast};
 
 /// Saved console mode for restoration on exit (Windows only).
-/// Set when AttachConsole succeeds; used during shutdown to restore the
-/// parent terminal's input mode so that echo and line editing work again.
+/// Stores the raw handle as `isize` (avoiding `*mut c_void` Send/Sync issues)
+/// and the original `CONSOLE_MODE` flags.
 #[cfg(windows)]
 static ORIGINAL_CONSOLE_MODE: std::sync::OnceLock<(
-    windows::Win32::Foundation::HANDLE,
+    isize,
     windows::Win32::System::Console::CONSOLE_MODE,
 )> = std::sync::OnceLock::new();
 
@@ -64,8 +64,9 @@ type TaskHandle = tokio::task::JoinHandle<()>;
 
 #[cfg(windows)]
 fn restore_console_mode() {
-    if let Some(&(handle, mode)) = ORIGINAL_CONSOLE_MODE.get() {
+    if let Some(&(raw_handle, mode)) = ORIGINAL_CONSOLE_MODE.get() {
         unsafe {
+            let handle = windows::Win32::Foundation::HANDLE(raw_handle as *mut core::ffi::c_void);
             let _ = windows::Win32::System::Console::SetConsoleMode(handle, mode);
         }
     }
@@ -95,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
                     let mut original_mode =
                         windows::Win32::System::Console::CONSOLE_MODE::default();
                     if GetConsoleMode(handle, &mut original_mode).is_ok() {
-                        let _ = ORIGINAL_CONSOLE_MODE.set((handle, original_mode));
+                        let _ = ORIGINAL_CONSOLE_MODE.set((handle.0 as isize, original_mode));
                         let _ = SetConsoleMode(handle, original_mode | ENABLE_PROCESSED_INPUT);
                     }
                 }
