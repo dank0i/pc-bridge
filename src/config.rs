@@ -497,7 +497,9 @@ impl Config {
         let features = obj
             .get_mut("features")
             .and_then(|v| v.as_object_mut())
-            .expect("features must exist");
+            .ok_or_else(|| {
+                anyhow::anyhow!("config migration: 'features' key missing after insert")
+            })?;
         if !features.contains_key("power_events") {
             features.insert("power_events".to_string(), serde_json::Value::Bool(true));
             migrated = true;

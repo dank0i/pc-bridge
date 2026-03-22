@@ -104,10 +104,11 @@ impl PowerEventListener {
         let sync_mqtt = {
             let config = self.state.config.read().await;
             let broker = &config.mqtt.broker;
-            let (host, port) = parse_broker_url(broker);
+            let (host, port, use_tls) = parse_broker_url(broker);
             SyncMqttConfig {
                 host,
                 port,
+                use_tls,
                 user: config.mqtt.user.clone(),
                 pass: config.mqtt.pass.clone(),
                 // Use a distinct client_id so the broker doesn't kick our main connection

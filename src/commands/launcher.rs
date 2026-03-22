@@ -155,7 +155,7 @@ fn is_safe_url(s: &str) -> bool {
     }
     // No shell metacharacters in the full URL
     !s.chars()
-        .any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '\'' | '\n' | '\r'))
+        .any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '\'' | '"' | '\n' | '\r'))
 }
 
 #[cfg(test)]
@@ -211,5 +211,57 @@ mod tests {
         assert_eq!(expand_launcher_shortcut("url:discord://x;rm -rf /"), None);
         assert_eq!(expand_launcher_shortcut("url:discord://x|evil"), None);
         assert_eq!(expand_launcher_shortcut("url:discord://x&evil"), None);
+    }
+
+    #[test]
+    fn test_url_shortcut_rejects_quotes() {
+        assert_eq!(
+            expand_launcher_shortcut("url:https://x.com/\"injected"),
+            None
+        );
+        assert_eq!(
+            expand_launcher_shortcut("url:https://x.com/'injected"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_url_shortcut_rejects_backtick_and_dollar() {
+        assert_eq!(expand_launcher_shortcut("url:https://x.com/`cmd`"), None);
+        assert_eq!(expand_launcher_shortcut("url:https://x.com/$HOME"), None);
+    }
+
+    #[test]
+    fn test_is_safe_path_rejects_metacharacters() {
+        assert!(!is_safe_path("C:\\Games\\;evil.exe"));
+        assert!(!is_safe_path("test|pipe"));
+        assert!(!is_safe_path("test&bg"));
+        assert!(!is_safe_path("test$var"));
+        assert!(!is_safe_path("test`cmd`"));
+        assert!(!is_safe_path("test\"quote"));
+        assert!(!is_safe_path("test'quote"));
+        assert!(!is_safe_path("test\nnewline"));
+        assert!(!is_safe_path(""));
+    }
+
+    #[test]
+    fn test_is_safe_path_allows_valid() {
+        assert!(is_safe_path(r"C:\Games\My Game\game.exe"));
+        assert!(is_safe_path("game-name_v2.exe"));
+        assert!(is_safe_path("/usr/local/bin/game"));
+    }
+
+    #[test]
+    fn test_is_safe_identifier_rejects_path_traversal() {
+        assert!(!is_safe_identifier("../../../etc/passwd"));
+        assert!(!is_safe_identifier("game.exe; rm -rf /"));
+        assert!(!is_safe_identifier(""));
+    }
+
+    #[test]
+    fn test_is_safe_identifier_allows_valid() {
+        assert!(is_safe_identifier("notepad"));
+        assert!(is_safe_identifier("game-launcher_v2"));
+        assert!(is_safe_identifier("MyGame.exe"));
     }
 }

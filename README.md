@@ -294,6 +294,8 @@ Execute custom actions from Home Assistant:
 | `executable` | Run an executable | `executable`, optional `args` |
 | `shell` | Run via cmd.exe | `shell_command` |
 
+`powershell` and `shell` are separate types because they use different interpreters. Use `powershell` for PowerShell cmdlets and scripts. Use `shell` for cmd.exe commands (batch scripts, `.bat` files, `dir`, `copy`, etc.) that may not work in PowerShell. Admin `powershell` commands use base64-encoded `-EncodedCommand` to prevent injection. Admin `shell` commands are elevated via `Start-Process cmd -Verb RunAs`.
+
 > **Running script files:** To run `.ps1` files, use the `powershell` type with `"script": "& 'C:\\path\\script.ps1'"`. The `executable` type works for `.bat`/`.cmd` files directly, but `.ps1` files require PowerShell's execution policy handling.
 
 **Security:**
@@ -432,6 +434,8 @@ The `Launch` button accepts special payloads:
 | `exe:C:\path\to.exe` | Run executable directly |
 | `lnk:C:\path\to.lnk` | Run shortcut file |
 | `close:processname` | Close process gracefully |
+
+Paths with spaces work automatically -- no manual quoting needed (e.g., `exe:C:\Program Files\Game\game.exe`). Shell metacharacters (`` ; | & $ ` ' ``and on Windows also `"`) are rejected to prevent command injection.
 
 > **Note:** The `Launch` button requires you to define actions in Home Assistant that send the appropriate payload. Unlike custom commands (which are self-contained), Launch is a generic endpoint that executes whatever payload you send it.
 

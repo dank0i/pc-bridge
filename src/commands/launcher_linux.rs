@@ -126,12 +126,16 @@ fn is_safe_identifier(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
 }
 
-/// Check if path doesn't contain dangerous shell metacharacters
+/// Check if path doesn't contain dangerous shell metacharacters.
+/// Single quotes are blocked because `exe:` wraps paths in `'...'` — a `'`
+/// in the path would break out.  Double quotes are harmless inside single
+/// quotes, so they're allowed (unlike the Windows version which double-quotes
+/// paths and must block `"`).
 fn is_safe_path(s: &str) -> bool {
     !s.is_empty()
         && !s
             .chars()
-            .any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '\n' | '\r'))
+            .any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '\'' | '\n' | '\r'))
 }
 
 /// Check if string is a safe protocol URL (scheme://path, no shell metacharacters)
@@ -147,7 +151,7 @@ fn is_safe_url(s: &str) -> bool {
         return false;
     }
     !s.chars()
-        .any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '\'' | '\n' | '\r'))
+        .any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '\'' | '"' | '\n' | '\r'))
 }
 
 #[cfg(test)]
@@ -228,5 +232,56 @@ mod tests {
     fn test_empty_arg_rejected() {
         assert_eq!(expand_launcher_shortcut("steam:"), None);
         assert_eq!(expand_launcher_shortcut("exe:"), None);
+    }
+
+    #[test]
+    fn test_url_rejects_quotes() {
+        assert_eq!(
+            expand_launcher_shortcut("url:https://x.com/\"injected"),
+            None
+        );
+        assert_eq!(
+            expand_launcher_shortcut("url:https://x.com/'injected"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_url_rejects_backtick_and_dollar() {
+        assert_eq!(expand_launcher_shortcut("url:https://x.com/`cmd`"), None);
+        assert_eq!(expand_launcher_shortcut("url:https://x.com/$HOME"), None);
+    }
+
+    #[test]
+    fn test_is_safe_path_rejects_metacharacters() {
+        assert!(!is_safe_path("/opt/games/;evil"));
+        assert!(!is_safe_path("test|pipe"));
+        assert!(!is_safe_path("test&bg"));
+        assert!(!is_safe_path("test$var"));
+        assert!(!is_safe_path("test`cmd`"));
+        assert!(!is_safe_path("test'quote"));
+        assert!(!is_safe_path("test\nnewline"));
+        assert!(!is_safe_path(""));
+    }
+
+    #[test]
+    fn test_is_safe_path_allows_valid() {
+        assert!(is_safe_path("/opt/games/my-game/launch.sh"));
+        assert!(is_safe_path("game-name_v2"));
+        // Double quotes are harmless inside single-quoted bash strings
+        assert!(is_safe_path(r#"/opt/games/my "game"/run.sh"#));
+    }
+
+    #[test]
+    fn test_is_safe_identifier_rejects_metacharacters() {
+        assert!(!is_safe_identifier("game;evil"));
+        assert!(!is_safe_identifier("game name"));
+        assert!(!is_safe_identifier(""));
+    }
+
+    #[test]
+    fn test_is_safe_identifier_allows_valid() {
+        assert!(is_safe_identifier("my-game_v2.0"));
+        assert!(is_safe_identifier("Fortnite"));
     }
 }

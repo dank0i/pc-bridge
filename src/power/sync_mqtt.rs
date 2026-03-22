@@ -18,25 +18,35 @@ use std::time::Duration;
 pub struct SyncMqttConfig {
     pub host: String,
     pub port: u16,
+    pub use_tls: bool,
     pub user: String,
     pub pass: String,
     pub client_id: String,
     pub sleep_topic: String,
 }
 
-/// Parse a broker URL like "tcp://host:port" into (host, port).
-pub fn parse_broker_url(url: &str) -> (String, u16) {
-    let without_scheme = url
-        .strip_prefix("tcp://")
-        .or_else(|| url.strip_prefix("ssl://"))
-        .or_else(|| url.strip_prefix("ws://"))
-        .or_else(|| url.strip_prefix("wss://"))
-        .unwrap_or(url);
+/// Parse a broker URL like "tcp://host:port" into (host, port, use_tls).
+pub fn parse_broker_url(url: &str) -> (String, u16, bool) {
+    let (without_scheme, use_tls) = if let Some(rest) = url.strip_prefix("ssl://") {
+        (rest, true)
+    } else if let Some(rest) = url.strip_prefix("wss://") {
+        (rest, true)
+    } else if let Some(rest) = url.strip_prefix("tcp://") {
+        (rest, false)
+    } else if let Some(rest) = url.strip_prefix("ws://") {
+        (rest, false)
+    } else {
+        (url, false)
+    };
 
     let parts: Vec<&str> = without_scheme.split(':').collect();
     let host = parts.first().unwrap_or(&"localhost").to_string();
-    let port = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(1883);
-    (host, port)
+    let default_port = if use_tls { 8883 } else { 1883 };
+    let port = parts
+        .get(1)
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(default_port);
+    (host, port, use_tls)
 }
 
 /// Publish "sleeping" to the sleep_state topic using a one-shot synchronous
@@ -55,11 +65,30 @@ pub fn sync_mqtt_publish_sleep(cfg: &SyncMqttConfig) -> std::io::Result<()> {
         )
     })?;
 
-    let mut stream = TcpStream::connect_timeout(&socket_addr, timeout)?;
+    let stream = TcpStream::connect_timeout(&socket_addr, timeout)?;
     stream.set_write_timeout(Some(timeout))?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_nodelay(true)?;
 
+    if cfg.use_tls {
+        let connector = native_tls::TlsConnector::new()
+            .map_err(|e| std::io::Error::other(format!("TLS init failed: {e}")))?;
+        let mut tls_stream = connector.connect(&cfg.host, stream).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                format!("TLS handshake failed: {e}"),
+            )
+        })?;
+        do_mqtt_exchange(&mut tls_stream, cfg)
+    } else {
+        let mut stream = stream;
+        do_mqtt_exchange(&mut stream, cfg)
+    }
+}
+
+/// Perform the MQTT CONNECT/CONNACK/PUBLISH/DISCONNECT exchange over any
+/// Read+Write stream (plain TCP or TLS-wrapped).
+fn do_mqtt_exchange(stream: &mut (impl Read + Write), cfg: &SyncMqttConfig) -> std::io::Result<()> {
     // --- CONNECT ---
     let connect = build_mqtt_connect(&cfg.client_id, &cfg.user, &cfg.pass);
     stream.write_all(&connect)?;
@@ -68,11 +97,16 @@ pub fn sync_mqtt_publish_sleep(cfg: &SyncMqttConfig) -> std::io::Result<()> {
     // --- CONNACK ---
     let mut connack = [0u8; 4];
     stream.read_exact(&mut connack)?;
-    // connack[0] must be 0x20 (CONNACK packet type), connack[3] is return code
-    if connack[0] != 0x20 || connack[3] != 0x00 {
+    // connack[0] must be 0x20 (CONNACK packet type),
+    // connack[1] must be 0x02 (remaining length = 2 bytes),
+    // connack[3] is return code (0x00 = accepted)
+    if connack[0] != 0x20 || connack[1] != 0x02 || connack[3] != 0x00 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
-            format!("CONNACK rejected (rc={})", connack[3]),
+            format!(
+                "CONNACK rejected (type={:#x}, len={}, rc={})",
+                connack[0], connack[1], connack[3]
+            ),
         ));
     }
 
@@ -265,28 +299,47 @@ mod tests {
     fn test_parse_broker_url() {
         assert_eq!(
             parse_broker_url("tcp://192.168.1.1:1883"),
-            ("192.168.1.1".into(), 1883)
+            ("192.168.1.1".into(), 1883, false)
         );
         assert_eq!(
             parse_broker_url("192.168.1.1:1884"),
-            ("192.168.1.1".into(), 1884)
+            ("192.168.1.1".into(), 1884, false)
         );
         assert_eq!(
             parse_broker_url("ssl://broker:8883"),
-            ("broker".into(), 8883)
+            ("broker".into(), 8883, true)
         );
     }
 
     #[test]
     fn test_parse_broker_url_defaults() {
-        assert_eq!(parse_broker_url("myhost"), ("myhost".into(), 1883));
+        assert_eq!(parse_broker_url("myhost"), ("myhost".into(), 1883, false));
         assert_eq!(
             parse_broker_url("ws://broker:9001"),
-            ("broker".into(), 9001)
+            ("broker".into(), 9001, false)
         );
         assert_eq!(
             parse_broker_url("wss://broker:9002"),
-            ("broker".into(), 9002)
+            ("broker".into(), 9002, true)
+        );
+    }
+
+    #[test]
+    fn test_parse_broker_url_tls_default_ports() {
+        // ssl:// without port should default to 8883
+        assert_eq!(
+            parse_broker_url("ssl://mybroker"),
+            ("mybroker".into(), 8883, true)
+        );
+        // wss:// without port should default to 8883
+        assert_eq!(
+            parse_broker_url("wss://mybroker"),
+            ("mybroker".into(), 8883, true)
+        );
+        // tcp:// without port should default to 1883
+        assert_eq!(
+            parse_broker_url("tcp://mybroker"),
+            ("mybroker".into(), 1883, false)
         );
     }
 
@@ -411,6 +464,7 @@ mod tests {
             let cfg = SyncMqttConfig {
                 host: "127.0.0.1".into(),
                 port,
+                use_tls: false,
                 user: String::new(),
                 pass: String::new(),
                 client_id: "test-sleep".into(),
@@ -440,6 +494,7 @@ mod tests {
             let cfg = SyncMqttConfig {
                 host: "127.0.0.1".into(),
                 port,
+                use_tls: false,
                 user: "testuser".into(),
                 pass: "testpass".into(),
                 client_id: "test-auth".into(),
@@ -469,6 +524,7 @@ mod tests {
             let cfg = SyncMqttConfig {
                 host: "127.0.0.1".into(),
                 port,
+                use_tls: false,
                 user: String::new(),
                 pass: String::new(),
                 client_id: "test-fail".into(),
@@ -493,6 +549,7 @@ mod tests {
             let cfg = SyncMqttConfig {
                 host: "127.0.0.1".into(),
                 port,
+                use_tls: false,
                 user: String::new(),
                 pass: String::new(),
                 client_id: "test-timing".into(),
@@ -564,6 +621,7 @@ mod tests {
             let cfg = SyncMqttConfig {
                 host: "127.0.0.1".into(),
                 port,
+                use_tls: false,
                 user: String::new(),
                 pass: String::new(),
                 client_id: "test-nic-death".into(),
@@ -622,6 +680,7 @@ mod tests {
             let cfg = SyncMqttConfig {
                 host: "127.0.0.1".into(),
                 port,
+                use_tls: false,
                 user: String::new(),
                 pass: String::new(),
                 client_id: "test-reject".into(),
@@ -633,6 +692,80 @@ mod tests {
             let err = result.unwrap_err();
             assert_eq!(err.kind(), std::io::ErrorKind::ConnectionRefused);
             assert!(err.to_string().contains("rc=5"));
+
+            let _ = broker_handle.join();
+        }
+
+        /// CONNACK with wrong remaining-length byte (not 0x02) must be rejected.
+        /// This exercises the C2 fix that validates connack[1].
+        #[test]
+        fn sync_publish_rejects_malformed_connack_length() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+
+            let broker_handle = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut buf = [0u8; 512];
+                let _ = stream.read(&mut buf);
+                // Send CONNACK with remaining length = 0x04 instead of 0x02
+                let _ = stream.write_all(&[0x20, 0x04, 0x00, 0x00]);
+                let _ = stream.flush();
+            });
+
+            let cfg = SyncMqttConfig {
+                host: "127.0.0.1".into(),
+                port,
+                use_tls: false,
+                user: String::new(),
+                pass: String::new(),
+                client_id: "test-bad-connack".into(),
+                sleep_topic: "test/sleep".into(),
+            };
+
+            let result = sync_mqtt_publish_sleep(&cfg);
+            assert!(result.is_err());
+            let err = result.unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::ConnectionRefused);
+            assert!(err.to_string().contains("len=4"));
+
+            let _ = broker_handle.join();
+        }
+
+        /// CONNACK with wrong packet type byte must be rejected.
+        #[test]
+        fn sync_publish_rejects_wrong_packet_type() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+
+            let broker_handle = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut buf = [0u8; 512];
+                let _ = stream.read(&mut buf);
+                // Send SUBACK (0x90) instead of CONNACK (0x20)
+                let _ = stream.write_all(&[0x90, 0x02, 0x00, 0x00]);
+                let _ = stream.flush();
+            });
+
+            let cfg = SyncMqttConfig {
+                host: "127.0.0.1".into(),
+                port,
+                use_tls: false,
+                user: String::new(),
+                pass: String::new(),
+                client_id: "test-wrong-type".into(),
+                sleep_topic: "test/sleep".into(),
+            };
+
+            let result = sync_mqtt_publish_sleep(&cfg);
+            assert!(result.is_err());
+            let err = result.unwrap_err();
+            assert!(err.to_string().contains("type=0x90"));
 
             let _ = broker_handle.join();
         }

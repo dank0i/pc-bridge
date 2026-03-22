@@ -221,8 +221,11 @@ fn run_wizard_flow(existing_config: bool) -> Option<SetupConfig> {
     // MQTT Password (only if username provided)
     if !config.mqtt_user.is_empty() {
         println!();
-        let input = read_input("  Password: ");
-        config.mqtt_pass = input;
+        println!("  (input is hidden)");
+        match rpassword::prompt_password("  Password: ") {
+            Ok(pass) => config.mqtt_pass = pass,
+            Err(_) => config.mqtt_pass = read_input("  Password: "),
+        }
     }
 
     // Feature selection with toggle menu

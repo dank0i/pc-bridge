@@ -138,13 +138,20 @@ impl MqttClient {
     ) -> anyhow::Result<(Self, CommandReceiver)> {
         // Parse broker URL
         let broker = &config.mqtt.broker;
-        let (host, port) = Self::parse_broker_url(broker)?;
+        let (host, port, use_tls) = Self::parse_broker_url(broker)?;
 
-        let mut opts = MqttOptions::new(config.client_id(), host, port);
+        let mut opts = MqttOptions::new(config.client_id(), host.clone(), port);
 
         // Authentication
         if !config.mqtt.user.is_empty() {
             opts.set_credentials(&config.mqtt.user, &config.mqtt.pass);
+        }
+
+        // TLS transport (ssl:// or wss:// scheme)
+        if use_tls {
+            let tls_config = rumqttc::TlsConfiguration::Native;
+            opts.set_transport(rumqttc::Transport::tls_with_config(tls_config));
+            info!("MQTT TLS enabled for {}:{}", host, port);
         }
 
         // Connection settings
@@ -312,20 +319,29 @@ impl MqttClient {
         Ok((mqtt, cmd_rx))
     }
 
-    fn parse_broker_url(url: &str) -> anyhow::Result<(String, u16)> {
-        // Remove scheme prefix
-        let without_scheme = url
-            .strip_prefix("tcp://")
-            .or_else(|| url.strip_prefix("ssl://"))
-            .or_else(|| url.strip_prefix("ws://"))
-            .or_else(|| url.strip_prefix("wss://"))
-            .unwrap_or(url);
+    fn parse_broker_url(url: &str) -> anyhow::Result<(String, u16, bool)> {
+        // Determine if TLS is requested from the scheme
+        let (without_scheme, use_tls) = if let Some(rest) = url.strip_prefix("ssl://") {
+            (rest, true)
+        } else if let Some(rest) = url.strip_prefix("wss://") {
+            (rest, true)
+        } else if let Some(rest) = url.strip_prefix("tcp://") {
+            (rest, false)
+        } else if let Some(rest) = url.strip_prefix("ws://") {
+            (rest, false)
+        } else {
+            (url, false)
+        };
 
         let parts: Vec<&str> = without_scheme.split(':').collect();
         let host = parts.first().unwrap_or(&"localhost").to_string();
-        let port = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(1883);
+        let default_port = if use_tls { 8883 } else { 1883 };
+        let port = parts
+            .get(1)
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(default_port);
 
-        Ok((host, port))
+        Ok((host, port, use_tls))
     }
 
     #[cfg(test)]
@@ -1893,44 +1909,60 @@ mod tests {
 
     #[test]
     fn test_parse_broker_url_tcp() {
-        let (host, port) = MqttClient::parse_broker_url("tcp://localhost:1883").unwrap();
+        let (host, port, tls) = MqttClient::parse_broker_url("tcp://localhost:1883").unwrap();
         assert_eq!(host, "localhost");
         assert_eq!(port, 1883);
+        assert!(!tls);
     }
 
     #[test]
     fn test_parse_broker_url_ssl() {
-        let (host, port) = MqttClient::parse_broker_url("ssl://mqtt.example.com:8883").unwrap();
+        let (host, port, tls) =
+            MqttClient::parse_broker_url("ssl://mqtt.example.com:8883").unwrap();
         assert_eq!(host, "mqtt.example.com");
         assert_eq!(port, 8883);
+        assert!(tls);
     }
 
     #[test]
     fn test_parse_broker_url_ws() {
-        let (host, port) = MqttClient::parse_broker_url("ws://192.168.1.100:8083").unwrap();
+        let (host, port, tls) = MqttClient::parse_broker_url("ws://192.168.1.100:8083").unwrap();
         assert_eq!(host, "192.168.1.100");
         assert_eq!(port, 8083);
+        assert!(!tls);
     }
 
     #[test]
     fn test_parse_broker_url_wss() {
-        let (host, port) = MqttClient::parse_broker_url("wss://mqtt.example.com:8084").unwrap();
+        let (host, port, tls) =
+            MqttClient::parse_broker_url("wss://mqtt.example.com:8084").unwrap();
         assert_eq!(host, "mqtt.example.com");
         assert_eq!(port, 8084);
+        assert!(tls);
     }
 
     #[test]
     fn test_parse_broker_url_default_port() {
-        let (host, port) = MqttClient::parse_broker_url("tcp://localhost").unwrap();
+        let (host, port, tls) = MqttClient::parse_broker_url("tcp://localhost").unwrap();
         assert_eq!(host, "localhost");
         assert_eq!(port, 1883);
+        assert!(!tls);
+    }
+
+    #[test]
+    fn test_parse_broker_url_default_port_ssl() {
+        let (host, port, tls) = MqttClient::parse_broker_url("ssl://broker.local").unwrap();
+        assert_eq!(host, "broker.local");
+        assert_eq!(port, 8883);
+        assert!(tls);
     }
 
     #[test]
     fn test_parse_broker_url_ipv4() {
-        let (host, port) = MqttClient::parse_broker_url("tcp://192.168.1.1:1883").unwrap();
+        let (host, port, tls) = MqttClient::parse_broker_url("tcp://192.168.1.1:1883").unwrap();
         assert_eq!(host, "192.168.1.1");
         assert_eq!(port, 1883);
+        assert!(!tls);
     }
 
     // ===== extract_command_name tests =====

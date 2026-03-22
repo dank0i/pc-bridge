@@ -423,12 +423,13 @@ fn reset_mqtt_password() -> anyhow::Result<()> {
     println!("  Type your new password and press Enter.");
     println!("  Leave blank to cancel.");
     println!();
-    print!("  New MQTT password: ");
+    print!("  New MQTT password (input is hidden): ");
     io::stdout().flush().ok();
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).ok();
-    let new_pass = input.trim().to_string();
+    let new_pass = rpassword::prompt_password("")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
 
     if new_pass.is_empty() {
         println!();
@@ -477,12 +478,13 @@ fn handle_credential_failure() -> anyhow::Result<Config> {
     println!("  Type your MQTT password to re-encrypt it");
     println!("  for this machine, or press Enter to skip.");
     println!();
-    print!("  MQTT Password: ");
+    print!("  MQTT Password (input is hidden): ");
     io::stdout().flush().ok();
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).ok();
-    let new_pass = input.trim().to_string();
+    let new_pass = rpassword::prompt_password("")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
 
     if new_pass.is_empty() {
         println!();
@@ -592,7 +594,7 @@ fn kill_existing_instances() {
     }
 
     // Use pgrep to find other instances, then kill them excluding our PID
-    if let Ok(output) = Command::new("pgrep").args(["-f", &exe_name]).output() {
+    if let Ok(output) = Command::new("pgrep").args(["-x", &exe_name]).output() {
         let pids = String::from_utf8_lossy(&output.stdout);
         for line in pids.lines() {
             if let Ok(pid) = line.trim().parse::<u32>()
@@ -600,10 +602,10 @@ fn kill_existing_instances() {
             {
                 let _ = Command::new("kill")
                     .args(["-TERM", &pid.to_string()])
-                    .spawn();
+                    .status();
             }
         }
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    std::thread::sleep(std::time::Duration::from_millis(1000));
 }

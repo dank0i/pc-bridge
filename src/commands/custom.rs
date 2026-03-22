@@ -70,10 +70,13 @@ async fn execute_powershell(cmd: &CustomCommand) -> anyhow::Result<()> {
     tokio::task::spawn_blocking(move || {
         if admin {
             // Run elevated via Start-Process -Verb RunAs
-            let escaped = script.replace('\'', "''");
+            // Use -EncodedCommand (base64-encoded UTF-16LE) to avoid metacharacter injection
+            use base64::Engine;
+            let utf16: Vec<u8> = script.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&utf16);
             let ps_cmd = format!(
-                "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -Command \"{}\"'",
-                escaped
+                "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -EncodedCommand {}'",
+                encoded
             );
 
             Command::new("powershell")
@@ -175,7 +178,7 @@ async fn execute_shell(cmd: &CustomCommand) -> anyhow::Result<()> {
 
     tokio::task::spawn_blocking(move || {
         if admin {
-            let escaped = command.replace('\'', "''");
+            let escaped = command.replace('\'', "''").replace('"', r#"\""#);
             let ps_cmd = format!(
                 "Start-Process cmd -Verb RunAs -ArgumentList '/c {}'",
                 escaped

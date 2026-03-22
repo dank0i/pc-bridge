@@ -15,11 +15,6 @@ static IDLE_STEAM_ATTRS: LazyLock<serde_json::Value> =
     LazyLock::new(|| serde_json::json!({"updating_games": [], "count": 0}));
 use tokio::time::{Duration, Instant};
 
-#[cfg(windows)]
-use winreg::RegKey;
-#[cfg(windows)]
-use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
-
 use crate::AppState;
 
 /// StateFlags indicating a game is updating/downloading
@@ -186,8 +181,8 @@ impl SteamSensor {
     fn discover_library_folders(&mut self) {
         self.library_folders.clear();
 
-        // Get Steam install path from registry
-        let steam_path = match self.get_steam_path() {
+        // Get Steam install path from shared discovery
+        let steam_path = match crate::steam::find_steam_path() {
             Some(p) => p,
             None => {
                 debug!("Steam installation not found");
@@ -208,68 +203,6 @@ impl SteamSensor {
         {
             self.parse_library_folders_vdf(&content);
         }
-    }
-
-    #[cfg(windows)]
-    fn get_steam_path(&self) -> Option<PathBuf> {
-        // Try HKCU first (current user), then HKLM (all users)
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        if let Ok(steam_key) = hkcu.open_subkey("Software\\Valve\\Steam") {
-            if let Ok(path) = steam_key.get_value::<String, _>("SteamPath") {
-                let p = PathBuf::from(path);
-                if p.exists() {
-                    return Some(p);
-                }
-            }
-        }
-
-        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-        if let Ok(steam_key) = hklm.open_subkey("SOFTWARE\\Valve\\Steam") {
-            if let Ok(path) = steam_key.get_value::<String, _>("InstallPath") {
-                let p = PathBuf::from(path);
-                if p.exists() {
-                    return Some(p);
-                }
-            }
-        }
-
-        // Try common paths as fallback
-        let common_paths = [
-            "C:\\Program Files (x86)\\Steam",
-            "C:\\Program Files\\Steam",
-            "D:\\Steam",
-            "D:\\SteamLibrary",
-        ];
-        for path in common_paths {
-            let p = PathBuf::from(path);
-            if p.exists() {
-                return Some(p);
-            }
-        }
-
-        None
-    }
-
-    #[cfg(unix)]
-    fn get_steam_path(&self) -> Option<PathBuf> {
-        // Check STEAM_DIR env var first (custom installs)
-        if let Ok(dir) = std::env::var("STEAM_DIR") {
-            let p = PathBuf::from(dir);
-            if p.join("steamapps").is_dir() {
-                return Some(p);
-            }
-        }
-
-        let home = PathBuf::from(std::env::var("HOME").ok()?);
-        let candidates = [
-            home.join(".steam/steam"),
-            home.join(".local/share/Steam"),
-            home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
-            home.join("snap/steam/common/.local/share/Steam"),
-        ];
-        candidates
-            .into_iter()
-            .find(|p| p.join("steamapps").is_dir())
     }
 
     fn parse_library_folders_vdf(&mut self, content: &str) {
@@ -355,7 +288,10 @@ impl SteamSensor {
             (updating, acf_cache)
         })
         .await
-        .unwrap_or_default();
+        .unwrap_or_else(|e| {
+            warn!("Steam full scan task panicked: {e}");
+            Default::default()
+        });
 
         self.acf_cache = returned_cache;
 
@@ -399,7 +335,10 @@ impl SteamSensor {
             result
         })
         .await
-        .unwrap_or_default();
+        .unwrap_or_else(|e| {
+            warn!("Steam targeted scan task panicked: {e}");
+            HashMap::default()
+        });
 
         let changed = still_updating.len() != self.updating_games.len();
         self.updating_games = still_updating;

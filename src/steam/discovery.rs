@@ -19,6 +19,11 @@ use super::vdf;
 const CACHE_MAGIC: u32 = 0x50435354; // "PCST"
 const CACHE_VERSION: u32 = 1;
 
+/// Safety limits for cache deserialization to prevent memory exhaustion
+/// from malformed or tampered cache files.
+const MAX_CACHED_GAMES: u32 = 100_000;
+const MAX_STRING_LEN: u32 = 65_536;
+
 /// Discovered game info
 #[derive(Debug, Clone)]
 pub struct SteamGame {
@@ -510,7 +515,12 @@ impl SteamGameDiscovery {
 
         // Read game count
         reader.read_exact(&mut buf).ok()?;
-        let game_count = u32::from_le_bytes(buf) as usize;
+        let game_count = u32::from_le_bytes(buf);
+        if game_count > MAX_CACHED_GAMES {
+            warn!("Cache game count too large ({game_count}), ignoring cache");
+            return None;
+        }
+        let game_count = game_count as usize;
 
         // Read games
         let mut games = HashMap::with_capacity(game_count);
@@ -541,22 +551,31 @@ impl SteamGameDiscovery {
 
         // name (length-prefixed)
         reader.read_exact(&mut buf4).ok()?;
-        let len = u32::from_le_bytes(buf4) as usize;
-        let mut name_buf = vec![0u8; len];
+        let len = u32::from_le_bytes(buf4);
+        if len > MAX_STRING_LEN {
+            return None;
+        }
+        let mut name_buf = vec![0u8; len as usize];
         reader.read_exact(&mut name_buf).ok()?;
         let name = String::from_utf8(name_buf).ok()?;
 
         // executable (length-prefixed)
         reader.read_exact(&mut buf4).ok()?;
-        let len = u32::from_le_bytes(buf4) as usize;
-        let mut exe_buf = vec![0u8; len];
+        let len = u32::from_le_bytes(buf4);
+        if len > MAX_STRING_LEN {
+            return None;
+        }
+        let mut exe_buf = vec![0u8; len as usize];
         reader.read_exact(&mut exe_buf).ok()?;
         let executable = String::from_utf8(exe_buf).ok()?;
 
         // install_path (length-prefixed)
         reader.read_exact(&mut buf4).ok()?;
-        let len = u32::from_le_bytes(buf4) as usize;
-        let mut path_buf = vec![0u8; len];
+        let len = u32::from_le_bytes(buf4);
+        if len > MAX_STRING_LEN {
+            return None;
+        }
+        let mut path_buf = vec![0u8; len as usize];
         reader.read_exact(&mut path_buf).ok()?;
         let install_path = PathBuf::from(String::from_utf8(path_buf).ok()?);
 
@@ -643,57 +662,9 @@ impl SteamGameDiscovery {
     // Steam path discovery
     // =========================================================================
 
-    /// Find Steam installation path
-    #[cfg(windows)]
+    /// Find Steam installation path (delegates to shared implementation)
     fn find_steam_path() -> Option<PathBuf> {
-        use winreg::RegKey;
-        use winreg::enums::HKEY_LOCAL_MACHINE;
-
-        // Try registry first (most reliable)
-        if let Ok(hklm) =
-            RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey("SOFTWARE\\WOW6432Node\\Valve\\Steam")
-        {
-            if let Ok(path) = hklm.get_value::<String, _>("InstallPath") {
-                return Some(PathBuf::from(path));
-            }
-        }
-
-        // Fallback to common paths
-        let common_paths = [
-            "C:\\Program Files (x86)\\Steam",
-            "C:\\Program Files\\Steam",
-            "D:\\Steam",
-            "D:\\SteamLibrary",
-        ];
-
-        for path in common_paths {
-            let p = PathBuf::from(path);
-            if p.join("steam.exe").exists() {
-                return Some(p);
-            }
-        }
-
-        None
-    }
-
-    #[cfg(unix)]
-    fn find_steam_path() -> Option<PathBuf> {
-        let home = std::env::var("HOME").ok()?;
-
-        let paths = [
-            format!("{}/.steam/steam", home),
-            format!("{}/.local/share/Steam", home),
-            format!("{}/.steam/debian-installation", home),
-        ];
-
-        for path in paths {
-            let p = PathBuf::from(&path);
-            if p.join("steamapps").exists() {
-                return Some(p);
-            }
-        }
-
-        None
+        super::find_steam_path()
     }
 
     /// Get library info from libraryfolders.vdf (paths + app_ids)
