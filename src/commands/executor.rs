@@ -4,7 +4,7 @@ use log::{debug, error, info, warn};
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::sync::Arc;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, broadcast};
 
 use super::custom::execute_custom_command;
 use super::launcher::expand_launcher_shortcut;
@@ -14,6 +14,11 @@ use crate::mqtt::CommandReceiver;
 use crate::notification;
 use crate::power::wake_display;
 use crate::steam::SteamGameDiscovery;
+
+/// Maximum time to wait for Steam to appear in the process list (seconds)
+const STEAM_WAIT_TIMEOUT_SECS: u64 = 20;
+/// Grace period after Steam process is detected before launching the game (seconds)
+const STEAM_INIT_DELAY_SECS: u64 = 5;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const MAX_CONCURRENT_COMMANDS: usize = 5;
@@ -247,6 +252,13 @@ impl CommandExecutor {
             }
         };
 
+        // For steam: launch commands, wait for Steam to be running before executing.
+        // When the PC was just booted via WoL, Steam may not have started yet and
+        // the steam:// protocol URL would be silently dropped.
+        if payload.starts_with("steam:") {
+            wait_for_steam(state).await;
+        }
+
         // Expand environment variables
         let cmd_str = expand_env_vars(&cmd_str);
 
@@ -301,6 +313,101 @@ impl CommandExecutor {
         });
 
         Ok(())
+    }
+}
+
+/// Wait for Steam to appear in the process list using event-driven notifications.
+///
+/// Subscribes to WMI process change events from the ProcessWatcher and checks
+/// for `steam.exe` after each change. If Steam is already running, returns
+/// immediately. After detecting Steam, waits a short grace period for Steam
+/// to finish initializing (loading libraries, registering protocol handlers).
+///
+/// If Steam doesn't appear within the timeout, logs a warning and returns
+/// so the launch command still executes (the protocol handler may start Steam).
+async fn wait_for_steam(state: &Arc<AppState>) {
+    // Check if Steam is already running
+    {
+        let proc_state = state.process_watcher.state();
+        let guard = proc_state.read().await;
+        if guard
+            .names()
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case("steam.exe"))
+        {
+            debug!("Steam already running");
+            return;
+        }
+    }
+
+    info!("Steam not running, waiting for it to start...");
+    let mut change_rx = state.process_watcher.subscribe();
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(STEAM_WAIT_TIMEOUT_SECS);
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            warn!(
+                "Steam not detected after {}s, proceeding with launch anyway",
+                STEAM_WAIT_TIMEOUT_SECS
+            );
+            return;
+        }
+
+        // Wait for a process change event or timeout
+        match tokio::time::timeout(remaining, change_rx.recv()).await {
+            Ok(Ok(_)) => {
+                // Process list changed -- check for Steam
+                let proc_state = state.process_watcher.state();
+                let guard = proc_state.read().await;
+                if guard
+                    .names()
+                    .iter()
+                    .any(|n| n.eq_ignore_ascii_case("steam.exe"))
+                {
+                    drop(guard);
+                    info!(
+                        "Steam detected, waiting {}s for initialization...",
+                        STEAM_INIT_DELAY_SECS
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(STEAM_INIT_DELAY_SECS)).await;
+                    return;
+                }
+            }
+            Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
+                debug!(
+                    "Process change notifications lagged by {}, checking state",
+                    n
+                );
+                let proc_state = state.process_watcher.state();
+                let guard = proc_state.read().await;
+                if guard
+                    .names()
+                    .iter()
+                    .any(|n| n.eq_ignore_ascii_case("steam.exe"))
+                {
+                    drop(guard);
+                    info!(
+                        "Steam detected (after lag), waiting {}s for initialization...",
+                        STEAM_INIT_DELAY_SECS
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(STEAM_INIT_DELAY_SECS)).await;
+                    return;
+                }
+            }
+            Ok(Err(broadcast::error::RecvError::Closed)) => {
+                warn!("Process watcher channel closed, proceeding with launch");
+                return;
+            }
+            Err(_) => {
+                warn!(
+                    "Steam not detected after {}s, proceeding with launch anyway",
+                    STEAM_WAIT_TIMEOUT_SECS
+                );
+                return;
+            }
+        }
     }
 }
 
