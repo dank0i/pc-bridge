@@ -90,8 +90,8 @@ fn get_gpu_usage() -> String {
         let state = unsafe {
             let mut query: isize = 0;
             let status = PdhOpenQueryW(None, 0, &mut query);
-            if status.0 != 0 {
-                warn!("PdhOpenQueryW failed: 0x{:08x}", status.0);
+            if status != 0 {
+                warn!("PdhOpenQueryW failed: 0x{:08x}", status);
                 return Mutex::new(None);
             }
 
@@ -99,8 +99,8 @@ fn get_gpu_usage() -> String {
                 windows::core::w!("\\GPU Engine(*engtype_3D)\\Utilization Percentage");
             let mut counter: isize = 0;
             let status = PdhAddEnglishCounterW(query, counter_path, 0, &mut counter);
-            if status.0 != 0 {
-                warn!("PdhAddEnglishCounterW failed: 0x{:08x}", status.0);
+            if status != 0 {
+                warn!("PdhAddEnglishCounterW failed: 0x{:08x}", status);
                 let _ = PdhCloseQuery(query);
                 return Mutex::new(None);
             }
@@ -130,14 +130,14 @@ fn get_gpu_usage() -> String {
         }
 
         let status = PdhCollectQueryData(pdh.query);
-        if status.0 != 0 {
+        if status != 0 {
             return "0.0".to_string();
         }
 
         let mut value = PDH_FMT_COUNTERVALUE::default();
         let status = PdhGetFormattedCounterValue(pdh.counter, PDH_FMT_DOUBLE, None, &mut value);
 
-        if status.0 == 0 && value.CStatus == PDH_CSTATUS_VALID_DATA.0 as u32 {
+        if status == 0 && value.CStatus == PDH_CSTATUS_VALID_DATA {
             format!("{:.1}", value.Anonymous.doubleValue.clamp(0.0, 100.0))
         } else {
             "0.0".to_string()
