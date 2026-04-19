@@ -1091,6 +1091,68 @@ mod tests {
         }
     }
 
+    // ===== New field defaults =====
+
+    #[test]
+    fn test_update_channel_default() {
+        assert_eq!(default_update_channel(), "stable");
+    }
+
+    #[test]
+    fn test_minimal_config_new_fields() {
+        let config = minimal_config();
+        assert_eq!(config.update_channel, "stable");
+        assert!(config.disk_sensor_paths.is_empty());
+        assert!(!config.features.gpu_sensor);
+        assert!(!config.features.network_sensor);
+        assert!(!config.features.disk_sensor);
+        assert!(!config.features.uptime_sensor);
+    }
+
+    #[test]
+    fn test_feature_config_new_sensors_default_off() {
+        let features = FeatureConfig::default();
+        assert!(!features.gpu_sensor);
+        assert!(!features.network_sensor);
+        assert!(!features.disk_sensor);
+        assert!(!features.uptime_sensor);
+    }
+
+    #[test]
+    fn test_config_deserialize_new_fields() {
+        let json = r#"{
+            "device_name": "test-pc",
+            "mqtt": { "broker": "tcp://localhost:1883", "user": "", "pass": "" },
+            "update_channel": "beta",
+            "disk_sensor_paths": ["C:\\", "/home"],
+            "features": {
+                "gpu_sensor": true,
+                "network_sensor": true,
+                "disk_sensor": true,
+                "uptime_sensor": true
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.update_channel, "beta");
+        assert_eq!(config.disk_sensor_paths, vec!["C:\\", "/home"]);
+        assert!(config.features.gpu_sensor);
+        assert!(config.features.network_sensor);
+        assert!(config.features.disk_sensor);
+        assert!(config.features.uptime_sensor);
+    }
+
+    #[test]
+    fn test_config_deserialize_missing_new_fields_uses_defaults() {
+        let json = r#"{
+            "device_name": "test-pc",
+            "mqtt": { "broker": "tcp://localhost:1883", "user": "", "pass": "" }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.update_channel, "stable");
+        assert!(config.disk_sensor_paths.is_empty());
+        assert!(!config.features.gpu_sensor);
+    }
+
     // ===== GameConfig tests =====
 
     #[test]

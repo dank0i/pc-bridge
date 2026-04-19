@@ -94,6 +94,22 @@ struct DiskInfo {
     used_percent: f64,
 }
 
+impl DiskInfo {
+    /// Compute `DiskInfo` from total and free byte counts.
+    /// Returns `None` if `total` is zero.
+    fn from_bytes(total: u64, free: u64) -> Option<Self> {
+        if total == 0 {
+            return None;
+        }
+        let used = total - free;
+        Some(Self {
+            total_bytes: total,
+            free_bytes: free,
+            used_percent: (used as f64 / total as f64) * 100.0,
+        })
+    }
+}
+
 #[cfg(windows)]
 fn get_disk_usage(path: &str) -> Option<DiskInfo> {
     use std::os::windows::ffi::OsStrExt;
@@ -116,13 +132,8 @@ fn get_disk_usage(path: &str) -> Option<DiskInfo> {
             Some(&mut total_free),
         );
 
-        if ok.is_ok() && total > 0 {
-            let used = total - total_free;
-            Some(DiskInfo {
-                total_bytes: total,
-                free_bytes: total_free,
-                used_percent: (used as f64 / total as f64) * 100.0,
-            })
+        if ok.is_ok() {
+            DiskInfo::from_bytes(total, total_free)
         } else {
             None
         }
@@ -145,15 +156,67 @@ fn get_disk_usage(path: &str) -> Option<DiskInfo> {
         let total = stat.f_blocks as u64 * block_size;
         let free = stat.f_bfree as u64 * block_size;
 
-        if total == 0 {
-            return None;
-        }
+        DiskInfo::from_bytes(total, free)
+    }
+}
 
-        let used = total - free;
-        Some(DiskInfo {
-            total_bytes: total,
-            free_bytes: free,
-            used_percent: (used as f64 / total as f64) * 100.0,
-        })
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_disk_info_from_bytes_typical() {
+        // 1 TB total, 500 GB free → 50% used
+        let total = 1_000_000_000_000;
+        let free = 500_000_000_000;
+        let info = DiskInfo::from_bytes(total, free).unwrap();
+        assert_eq!(info.total_bytes, total);
+        assert_eq!(info.free_bytes, free);
+        assert!((info.used_percent - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_disk_info_from_bytes_full() {
+        let info = DiskInfo::from_bytes(100, 0).unwrap();
+        assert!((info.used_percent - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_disk_info_from_bytes_empty() {
+        let info = DiskInfo::from_bytes(100, 100).unwrap();
+        assert!((info.used_percent - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_disk_info_from_bytes_zero_total() {
+        assert!(DiskInfo::from_bytes(0, 0).is_none());
+    }
+
+    #[test]
+    fn test_disk_info_from_bytes_real_world() {
+        // 512 GB SSD, 123 GB free → ~76% used
+        let total: u64 = 512 * 1_073_741_824;
+        let free: u64 = 123 * 1_073_741_824;
+        let info = DiskInfo::from_bytes(total, free).unwrap();
+        let expected = ((total - free) as f64 / total as f64) * 100.0;
+        assert!((info.used_percent - expected).abs() < 0.01);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_get_disk_usage_root() {
+        // /tmp should always exist on unix
+        let info = get_disk_usage("/tmp");
+        assert!(info.is_some(), "/tmp should be accessible");
+        let info = info.unwrap();
+        assert!(info.total_bytes > 0);
+        assert!(info.used_percent >= 0.0 && info.used_percent <= 100.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_get_disk_usage_nonexistent() {
+        let info = get_disk_usage("/nonexistent_path_that_should_never_exist");
+        assert!(info.is_none());
     }
 }

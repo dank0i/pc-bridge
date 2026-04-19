@@ -470,4 +470,20 @@ mod tests {
         // [2,7] vs [2,7,0] — equal prefix but shorter, so not newer
         assert!(!is_newer_version("2.7", "2.7.0"));
     }
+
+    // ===== Update channel logic =====
+
+    #[test]
+    fn test_current_version_not_empty() {
+        assert!(!CURRENT_VERSION.is_empty());
+    }
+
+    #[test]
+    fn test_current_version_is_valid_semver() {
+        let parts: Vec<&str> = CURRENT_VERSION.split('.').collect();
+        assert!(parts.len() >= 3, "Version must be x.y.z format");
+        for part in &parts {
+            assert!(part.parse::<u64>().is_ok(), "Non-numeric segment: {part}");
+        }
+    }
 }

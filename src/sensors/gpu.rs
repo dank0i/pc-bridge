@@ -149,9 +149,9 @@ fn get_gpu_usage() -> String {
 fn get_gpu_usage() -> String {
     // Try AMD first: /sys/class/drm/card0/device/gpu_busy_percent
     if let Ok(val) = std::fs::read_to_string("/sys/class/drm/card0/device/gpu_busy_percent")
-        && let Ok(pct) = val.trim().parse::<f64>()
+        && let Some(result) = parse_gpu_sysfs(&val)
     {
-        return format!("{pct:.1}");
+        return result;
     }
 
     // Try NVIDIA via nvidia-smi
@@ -162,12 +162,78 @@ fn get_gpu_usage() -> String {
         ])
         .output()
         && output.status.success()
-        && let Ok(pct) = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse::<f64>()
     {
-        return format!("{pct:.1}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(result) = parse_nvidia_smi_output(&stdout) {
+            return result;
+        }
     }
 
     "0.0".to_string()
+}
+
+/// Parse the AMD sysfs `gpu_busy_percent` file content.
+#[cfg(unix)]
+fn parse_gpu_sysfs(content: &str) -> Option<String> {
+    let pct = content.trim().parse::<f64>().ok()?;
+    Some(format!("{pct:.1}"))
+}
+
+/// Parse `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits` output.
+#[cfg(unix)]
+fn parse_nvidia_smi_output(output: &str) -> Option<String> {
+    let pct = output.trim().parse::<f64>().ok()?;
+    Some(format!("{pct:.1}"))
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn test_parse_gpu_sysfs_integer() {
+        assert_eq!(parse_gpu_sysfs("42\n"), Some("42.0".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_parse_gpu_sysfs_zero() {
+        assert_eq!(parse_gpu_sysfs("0\n"), Some("0.0".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_parse_gpu_sysfs_hundred() {
+        assert_eq!(parse_gpu_sysfs("100"), Some("100.0".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_parse_gpu_sysfs_garbage() {
+        assert_eq!(parse_gpu_sysfs("N/A\n"), None);
+        assert_eq!(parse_gpu_sysfs(""), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_parse_nvidia_smi_typical() {
+        assert_eq!(parse_nvidia_smi_output("73\n"), Some("73.0".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_parse_nvidia_smi_with_spaces() {
+        assert_eq!(
+            parse_nvidia_smi_output("  55  \n"),
+            Some("55.0".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_parse_nvidia_smi_empty() {
+        assert_eq!(parse_nvidia_smi_output(""), None);
+    }
 }

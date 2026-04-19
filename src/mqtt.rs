@@ -1230,6 +1230,11 @@ mod tests {
             "sleep_state",
             "battery_level",
             "battery_charging",
+            "gpu_usage",
+            "network_throughput",
+            "disk_usage",
+            "system_uptime",
+            "bridge_info",
         ];
         for name in expected {
             assert!(
