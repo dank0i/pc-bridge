@@ -1,6 +1,6 @@
 [package]
 name = "pc-bridge"
-version = "4.0.3"
+version = "4.1.0"
 edition = "2024"
 authors = ["dank0i"]
 description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
@@ -52,6 +52,10 @@ rpassword = "7"
 # TLS for sync MQTT sleep publish (already in dep tree via rumqttc/ureq — zero binary cost)
 native-tls = "0.2"
 
+# libc for statvfs (disk sensor on Unix)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 
 
 # Windows registry
@@ -75,6 +79,7 @@ windows = { version = "0.58", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Shutdown",
     "Win32_System_Com",
+    "Win32_System_Performance",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Accessibility",
@@ -84,6 +89,8 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_NetworkManagement_IpHelper",
     # Audio (Core Audio API)
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",

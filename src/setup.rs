@@ -393,6 +393,10 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
             audio_control: config.audio_control,
             steam_updates: config.steam_updates,
             discord: config.discord,
+            gpu_sensor: false,
+            network_sensor: false,
+            disk_sensor: false,
+            uptime_sensor: false,
         },
         games: HashMap::new(),
         custom_sensors_enabled: false,
@@ -406,6 +410,8 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
         },
         custom_sensors: Vec::new(),
         custom_commands: Vec::new(),
+        update_channel: crate::config::default_update_channel(),
+        disk_sensor_paths: Vec::new(),
     };
 
     full_config.save().map_err(std::io::Error::other)?;

@@ -64,6 +64,11 @@ impl CachedTopics {
             "sleep_state",
             "battery_level",
             "battery_charging",
+            "gpu_usage",
+            "network_throughput",
+            "disk_usage",
+            "system_uptime",
+            "bridge_info",
         ];
 
         for name in sensors {
@@ -205,6 +210,32 @@ impl MqttClient {
         let button_prefix = format!("{}/button/{}/", DISCOVERY_PREFIX, &device_name);
         let notify_topic_match = format!("pc-bridge/notifications/{}", &device_name);
 
+        // Pre-compute birth message for ConnAck (Feature H)
+        let birth_topic = format!(
+            "{}/sensor/{}/bridge_info/state",
+            DISCOVERY_PREFIX, &device_name
+        );
+        let birth_payload = serde_json::json!({
+            "version": VERSION,
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "features": {
+                "game_detection": config.features.game_detection,
+                "idle_tracking": config.features.idle_tracking,
+                "power_events": config.features.power_events,
+                "notifications": config.features.notifications,
+                "system_sensors": config.features.system_sensors,
+                "audio_control": config.features.audio_control,
+                "steam_updates": config.features.steam_updates,
+                "discord": config.features.discord,
+                "gpu_sensor": config.features.gpu_sensor,
+                "network_sensor": config.features.network_sensor,
+                "disk_sensor": config.features.disk_sensor,
+                "uptime_sensor": config.features.uptime_sensor,
+            }
+        })
+        .to_string();
+
         // Spawn event loop handler
         tokio::spawn(async move {
             let mut backoff_secs: u64 = 1;
@@ -257,6 +288,16 @@ impl MqttClient {
                                 QoS::AtLeastOnce,
                                 true,
                                 "online",
+                            )
+                            .await;
+
+                        // Publish birth message with version/features/OS info
+                        let _ = client_for_eventloop
+                            .publish(
+                                &birth_topic,
+                                QoS::AtLeastOnce,
+                                true,
+                                birth_payload.as_bytes(),
                             )
                             .await;
 
@@ -528,6 +569,69 @@ impl MqttClient {
                 .publish(&topic, QoS::AtLeastOnce, true, json)
                 .await;
         }
+
+        // GPU sensor
+        if config.features.gpu_sensor {
+            self.register_sensor(
+                device,
+                "gpu_usage",
+                "GPU Usage",
+                "mdi:expansion-card",
+                None,
+                Some("%"),
+            )
+            .await;
+        }
+
+        // Network throughput sensor
+        if config.features.network_sensor {
+            self.register_sensor_with_attributes(
+                device,
+                "network_throughput",
+                "Network Throughput",
+                "mdi:network",
+                None,
+                None,
+            )
+            .await;
+        }
+
+        // Disk usage sensor
+        if config.features.disk_sensor {
+            self.register_sensor_with_attributes(
+                device,
+                "disk_usage",
+                "Disk Usage",
+                "mdi:harddisk",
+                None,
+                Some("%"),
+            )
+            .await;
+        }
+
+        // System uptime sensor
+        if config.features.uptime_sensor {
+            self.register_sensor(
+                device,
+                "system_uptime",
+                "System Uptime",
+                "mdi:clock-check",
+                Some("duration"),
+                Some("s"),
+            )
+            .await;
+        }
+
+        // Birth info sensor (always registered — used by Feature H birth message)
+        self.register_sensor(
+            device,
+            "bridge_info",
+            "Bridge Info",
+            "mdi:information-outline",
+            None,
+            None,
+        )
+        .await;
 
         // Command buttons - gated by their respective features
         // Game launch button + Steam refresh
@@ -1053,6 +1157,8 @@ mod tests {
             discord_keybind: None,
             custom_sensors: Vec::new(),
             custom_commands: Vec::new(),
+            update_channel: crate::config::default_update_channel(),
+            disk_sensor_paths: Vec::new(),
         }
     }
 
@@ -1595,6 +1701,10 @@ mod tests {
             audio_control: true,
             steam_updates: true,
             discord: true,
+            gpu_sensor: true,
+            network_sensor: true,
+            disk_sensor: true,
+            uptime_sensor: true,
         };
         let config = test_config("test-pc", features);
         let topics = MqttClient::build_subscribe_topics("test-pc", &config);
@@ -2273,6 +2383,8 @@ mod tests {
                 discord_keybind: None,
                 custom_sensors: Vec::new(),
                 custom_commands: Vec::new(),
+                update_channel: crate::config::default_update_channel(),
+                disk_sensor_paths: Vec::new(),
             }
         }
 
@@ -2286,6 +2398,10 @@ mod tests {
                 audio_control: true,
                 steam_updates: true,
                 discord: true,
+                gpu_sensor: true,
+                network_sensor: true,
+                disk_sensor: true,
+                uptime_sensor: true,
             }
         }
 

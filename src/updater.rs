@@ -22,6 +22,9 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 #[derive(serde::Deserialize)]
 struct GitHubRelease {
     tag_name: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    prerelease: bool,
     assets: Vec<GitHubAsset>,
 }
 
@@ -77,9 +80,17 @@ pub fn cleanup_old_files() {
     }
 }
 
-/// Check for updates and download if available
-pub async fn check_for_updates() {
-    match fetch_latest_release().await {
+/// Check for updates and download if available.
+/// `update_channel`: "stable" (default), "beta", or "disabled".
+pub async fn check_for_updates(update_channel: String) {
+    if update_channel == "disabled" {
+        info!("Update checking disabled by config");
+        return;
+    }
+
+    let use_beta = update_channel == "beta";
+
+    match fetch_latest_release(use_beta).await {
         Ok(release) => {
             let remote_version = release.tag_name.trim_start_matches('v');
 
@@ -131,11 +142,19 @@ pub async fn check_for_updates() {
     }
 }
 
-async fn fetch_latest_release() -> anyhow::Result<GitHubRelease> {
-    let url = format!(
-        "https://api.github.com/repos/{}/{}/releases/latest",
-        GITHUB_OWNER, GITHUB_REPO
-    );
+async fn fetch_latest_release(include_prerelease: bool) -> anyhow::Result<GitHubRelease> {
+    let url = if include_prerelease {
+        // Fetch all releases and pick the first (newest) one
+        format!(
+            "https://api.github.com/repos/{}/{}/releases?per_page=1",
+            GITHUB_OWNER, GITHUB_REPO
+        )
+    } else {
+        format!(
+            "https://api.github.com/repos/{}/{}/releases/latest",
+            GITHUB_OWNER, GITHUB_REPO
+        )
+    };
 
     let response = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
         let body = http_agent()
@@ -148,8 +167,16 @@ async fn fetch_latest_release() -> anyhow::Result<GitHubRelease> {
     })
     .await??;
 
-    let release: GitHubRelease = serde_json::from_str(&response)?;
-    Ok(release)
+    if include_prerelease {
+        let releases: Vec<GitHubRelease> = serde_json::from_str(&response)?;
+        releases
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No releases found"))
+    } else {
+        let release: GitHubRelease = serde_json::from_str(&response)?;
+        Ok(release)
+    }
 }
 
 async fn download_update(
@@ -238,10 +265,13 @@ fn verify_sha256(file_path: &Path, checksum_url: &str) -> anyhow::Result<()> {
 }
 
 fn is_newer_version(remote: &str, current: &str) -> bool {
+    // Stop at the first non-numeric segment so pre-release suffixes like
+    // "beta", "rc1", etc. are excluded rather than silently dropped.
+    // e.g. "4.0.3-beta.1" → [4,0,3] (stops at "beta"), NOT [4,0,3,1].
     let parse = |v: &str| -> Vec<u32> {
         v.trim_start_matches('v')
             .split(['.', '-'])
-            .filter_map(|s| s.parse().ok())
+            .map_while(|s| s.parse().ok())
             .collect()
     };
 
@@ -410,6 +440,23 @@ mod tests {
     fn test_is_newer_version_with_prerelease() {
         // "2.8.0-1" splits into [2,8,0,1] which is > [2,7,0]
         assert!(is_newer_version("2.8.0-1", "2.7.0"));
+    }
+
+    #[test]
+    fn test_is_newer_version_prerelease_same_base_not_newer() {
+        // Pre-release of the same base version must NOT trigger an update.
+        // "4.0.3-beta" → [4,0,3] (stops at "beta"), equal to [4,0,3].
+        assert!(!is_newer_version("4.0.3-beta", "4.0.3"));
+        // "4.0.3-beta.1" → [4,0,3] (stops at "beta"), NOT [4,0,3,1].
+        assert!(!is_newer_version("4.0.3-beta.1", "4.0.3"));
+        assert!(!is_newer_version("4.0.3-rc1", "4.0.3"));
+    }
+
+    #[test]
+    fn test_is_newer_version_prerelease_higher_base() {
+        // Pre-release of a HIGHER base version is still newer.
+        assert!(is_newer_version("4.1.0-beta", "4.0.3"));
+        assert!(is_newer_version("5.0.0-alpha", "4.0.3"));
     }
 
     #[test]

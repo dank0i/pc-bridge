@@ -131,7 +131,7 @@ impl SystemSensor {
                     self.publish_cpu_mem(&mut prev_cpu, &mut prev_vals).await;
 
                     // Bridge health diagnostics (~every 60s)
-                    if last_health_publish.elapsed() >= Duration::from_secs(60) {
+                    if last_health_publish.elapsed() >= Duration::from_mins(1) {
                         last_health_publish = tokio::time::Instant::now();
                         self.publish_health(&mut prev_vals).await;
                     }

@@ -156,7 +156,7 @@ impl ProcessWatcher {
         // WMI fires events for ALL processes. The WMI thread uses blocking_send(),
         // so a full channel stalls it rather than dropping events. WMI's WITHIN 1
         // batching means events arrive in ~1s bursts — 64 slots is ample.
-        let (event_tx, event_rx) = mpsc::channel::<ProcessEvent>(16);
+        let (event_tx, event_rx) = mpsc::channel::<ProcessEvent>(64);
 
         // Try WMI events first, fall back to polling
         tokio::spawn(async move {
@@ -356,7 +356,7 @@ impl ProcessWatcher {
                             // WMI event channel closed — thread died due to error.
                             // Attempt to restart the WMI thread before falling back.
                             warn!("WMI event stream lost, attempting restart...");
-                            let (new_tx, new_rx) = mpsc::channel::<ProcessEvent>(16);
+                            let (new_tx, new_rx) = mpsc::channel::<ProcessEvent>(64);
                             match Self::setup_wmi_events(new_tx).await {
                                 Ok(()) => {
                                     info!("WMI event thread restarted successfully");

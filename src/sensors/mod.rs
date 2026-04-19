@@ -1,7 +1,11 @@
 //! Sensor modules for game detection, idle tracking, and system monitoring
 
 mod custom;
+mod disk;
+mod gpu;
+mod network;
 mod system;
+mod uptime;
 
 #[cfg(windows)]
 mod games;
@@ -17,7 +21,11 @@ mod games_linux;
 mod idle_linux;
 
 pub use custom::CustomSensorManager;
+pub use disk::DiskSensor;
+pub use gpu::GpuSensor;
+pub use network::NetworkSensor;
 pub use system::SystemSensor;
+pub use uptime::UptimeSensor;
 
 #[cfg(windows)]
 pub use games::GameSensor;

@@ -26,15 +26,22 @@ PC Bridge runs on your PC and connects to Home Assistant over MQTT. It exposes y
 | Feature | Description |
 |---------|-------------|
 | **Game Detection** | Monitors running processes and reports current game |
+| **Game Catalog** | Exposes all configured games as a sensor for dynamic dashboards |
 | **Idle Tracking** | Reports last user input time |
 | **Power Events** | Detects sleep/wake/display state instantly via OS events |
 | **System Sensors** | CPU, memory, battery, active window (native APIs) |
+| **GPU Sensor** | GPU utilization percentage (PDH on Windows, sysfs/nvidia-smi on Linux) |
+| **Network Sensor** | Network throughput (bytes/sec per direction) |
+| **Disk Sensor** | Disk usage for configured paths |
+| **Uptime Sensor** | System uptime in seconds |
 | **Audio Control** | Volume, mute, media keys via Home Assistant |
 | **Discord** | Join/leave voice channel commands |
 | **Display Wake** | Wakes display after WoL, dismisses screensaver |
 | **Remote Commands** | Lock, hibernate, restart, shutdown, sleep, screensaver |
 | **Notifications** | Native Windows toast notifications from Home Assistant |
 | **Steam Updates** | Detect when Steam games are updating |
+| **Auto-Update** | Checks for new versions with stable/beta/disabled channels |
+| **Bridge Info** | Publishes version, OS, arch, and enabled features on connect |
 | **Hot-Reload** | Updates game mappings without restart |
 | **First-Run Wizard** | Interactive setup for MQTT and feature selection |
 
@@ -120,7 +127,13 @@ Edit `userConfig.json` next to the executable:
     "audio_control": true,
     "steam_updates": false,
     "discord": false,
+    "gpu_sensor": false,
+    "network_sensor": false,
+    "disk_sensor": false,
+    "uptime_sensor": false
   },
+  "update_channel": "stable",
+  "disk_sensor_paths": ["C:\\"],
   "intervals": {
     "game_sensor": 5,
     "last_active": 10
@@ -153,6 +166,17 @@ All features are opt-in via the `features` object (except `power_events` which d
 | `audio_control` | `false` | Volume, mute, media key commands |
 | `steam_updates` | `false` | Detect when Steam games are updating |
 | `discord` | `false` | Discord voice channel join/leave buttons |
+| `gpu_sensor` | `false` | GPU utilization percentage |
+| `network_sensor` | `false` | Network throughput (rx/tx bytes/sec) |
+| `disk_sensor` | `false` | Disk usage for configured `disk_sensor_paths` |
+| `uptime_sensor` | `false` | System uptime in seconds |
+
+### Other Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `update_channel` | `"stable"` | Update channel: `"stable"`, `"beta"`, or `"disabled"` |
+| `disk_sensor_paths` | `[]` | Paths to check for disk usage (e.g. `["C:\\", "D:\\"]` or `["/", "/home"]`) |
 
 > **Note:** Missing fields are automatically added with their defaults when upgrading.
 
@@ -506,6 +530,11 @@ PC Bridge auto-discovers via MQTT. After connecting, you'll get:
 - `sensor.<device>_game_catalog` - Number of exposed games, with full game list as attributes (retained)
 - `sensor.<device>_steam_updating` - "on"/"off" with game list — instant via filesystem watcher
 - `sensor.<device>_volume_level` - System volume percentage
+- `sensor.<device>_gpu_usage` - GPU utilization percentage (polled)
+- `sensor.<device>_network_throughput` - Network throughput with rx/tx attributes (polled)
+- `sensor.<device>_disk_usage` - Highest disk usage % with per-path attributes (polled)
+- `sensor.<device>_system_uptime` - System uptime in seconds (polled 60s)
+- `sensor.<device>_bridge_info` - Agent version, OS, arch, enabled features (on connect)
 - `sensor.<device>_<custom>` - Any custom sensors you define
 
 **Buttons:**
@@ -556,6 +585,8 @@ sudo pacman -S xdotool xprintidle xdg-utils libxdo gtk3 libappindicator-gtk3
 | `xprintidle` | Idle time tracking (X11) |
 | `xdg-utils` | Screensaver activation |
 | `pactl` | Audio control (usually pre-installed with PulseAudio/PipeWire) |
+| `dbus-monitor` | Display on/off detection (usually pre-installed with D-Bus) |
+| `gdbus` | Sleep/wake detection (usually pre-installed with GLib) |
 
 ---
 

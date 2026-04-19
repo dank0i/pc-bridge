@@ -123,7 +123,7 @@ impl SteamSensor {
                     } else {
                         self.do_targeted_scan().await;
 
-                        if self.last_full_scan.elapsed() > Duration::from_secs(300) {
+                        if self.last_full_scan.elapsed() > Duration::from_mins(5) {
                             self.do_full_scan().await;
                             self.last_full_scan = Instant::now();
                         }

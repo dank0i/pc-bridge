@@ -11,6 +11,7 @@ use crate::AppState;
 use crate::audio::{self, MediaKey};
 use crate::mqtt::CommandReceiver;
 use crate::notification;
+use crate::power::sync_mqtt::{SyncMqttConfig, parse_broker_url, sync_mqtt_publish_sleep};
 use crate::power::wake_display;
 use crate::steam::SteamGameDiscovery;
 
@@ -20,11 +21,9 @@ const MAX_CONCURRENT_COMMANDS: usize = 5;
 fn get_predefined_command(name: &str) -> Option<&'static str> {
     match name {
         "Screensaver" => Some("xdg-screensaver activate"),
-        "Wake" => None, // Handled natively
+        "Wake" | "Sleep" | "Hibernate" => None, // Handled natively
         "Shutdown" => Some("systemctl poweroff"),
-        "Sleep" => Some("systemctl suspend"),
         "Lock" => Some("loginctl lock-session"),
-        "Hibernate" => Some("systemctl hibernate"),
         "Restart" => Some("systemctl reboot"),
         _ => None,
     }
@@ -106,6 +105,42 @@ impl CommandExecutor {
             }
             "Wake" => {
                 wake_display();
+                return Ok(());
+            }
+            "Sleep" | "Hibernate" => {
+                // Pre-publish sleep state via sync TCP before the NIC goes down,
+                // matching the Windows behavior in power/events.rs.
+                let cfg = {
+                    let config = state.config.read().await;
+                    let (host, port, use_tls) = parse_broker_url(&config.mqtt.broker);
+                    SyncMqttConfig {
+                        host,
+                        port,
+                        use_tls,
+                        user: config.mqtt.user.clone(),
+                        pass: config.mqtt.pass.clone(),
+                        client_id: format!("{}-sleep", config.client_id()),
+                        sleep_topic: format!(
+                            "homeassistant/sensor/{}/sleep_state/state",
+                            config.device_name
+                        ),
+                    }
+                };
+                match sync_mqtt_publish_sleep(&cfg) {
+                    Ok(()) => info!("Sleep state pre-published via sync TCP"),
+                    Err(e) => warn!("Sync MQTT sleep pre-publish failed: {}", e),
+                }
+                // Also publish via async client as fallback
+                state
+                    .mqtt
+                    .publish_sensor_retained("sleep_state", "sleeping")
+                    .await;
+                let cmd = if name == "Sleep" {
+                    "systemctl suspend"
+                } else {
+                    "systemctl hibernate"
+                };
+                let _ = Command::new("bash").args(["-c", cmd]).spawn();
                 return Ok(());
             }
             "notification" => {
@@ -217,7 +252,7 @@ impl CommandExecutor {
         // Wait with timeout in background
         tokio::spawn(async move {
             match tokio::time::timeout(
-                std::time::Duration::from_secs(300),
+                std::time::Duration::from_mins(5),
                 tokio::task::spawn_blocking(move || child.wait()),
             )
             .await

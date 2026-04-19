@@ -43,6 +43,15 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discord_keybind: Option<String>,
 
+    /// Update channel: "stable" (default), "beta", or "disabled"
+    #[serde(default = "default_update_channel")]
+    pub update_channel: String,
+
+    /// Paths to check for disk usage (e.g. `C:\`, `D:\` or `/`, `/home`).
+    /// If empty, disk sensor reports nothing even when enabled.
+    #[serde(default)]
+    pub disk_sensor_paths: Vec<String>,
+
     #[serde(default)]
     pub custom_sensors: Vec<CustomSensor>,
     #[serde(default)]
@@ -51,6 +60,10 @@ pub struct Config {
 
 fn default_true() -> bool {
     true
+}
+
+pub fn default_update_channel() -> String {
+    "stable".to_string()
 }
 
 /// Game configuration - supports both simple string and object with app_id
@@ -195,6 +208,14 @@ pub struct FeatureConfig {
     pub steam_updates: bool,
     #[serde(default)]
     pub discord: bool,
+    #[serde(default)]
+    pub gpu_sensor: bool,
+    #[serde(default)]
+    pub network_sensor: bool,
+    #[serde(default)]
+    pub disk_sensor: bool,
+    #[serde(default)]
+    pub uptime_sensor: bool,
 }
 
 impl Default for FeatureConfig {
@@ -208,6 +229,10 @@ impl Default for FeatureConfig {
             audio_control: false,
             steam_updates: false,
             discord: false,
+            gpu_sensor: false,
+            network_sensor: false,
+            disk_sensor: false,
+            uptime_sensor: false,
         }
     }
 }
@@ -918,7 +943,7 @@ pub async fn watch_config(state: Arc<AppState>) {
     loop {
         let debounce_sleep = match debounce_deadline {
             Some(d) => tokio::time::sleep_until(d),
-            None => tokio::time::sleep(std::time::Duration::from_secs(86400)),
+            None => tokio::time::sleep(std::time::Duration::from_hours(24)),
         };
         tokio::pin!(debounce_sleep);
 
@@ -1061,6 +1086,8 @@ mod tests {
             discord_keybind: None,
             custom_sensors: vec![],
             custom_commands: vec![],
+            update_channel: default_update_channel(),
+            disk_sensor_paths: Vec::new(),
         }
     }
 

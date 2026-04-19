@@ -144,8 +144,22 @@ impl GameSensor {
             .mqtt
             .publish_sensor_retained("runninggames", game_ids)
             .await;
+
+        // Build structured game list for attributes (Feature D)
+        let games_array: Vec<serde_json::Value> = if game_ids == "none" {
+            Vec::new()
+        } else {
+            game_ids
+                .split(',')
+                .zip(display_names.split(", "))
+                .map(|(id, name)| serde_json::json!({ "id": id, "name": name }))
+                .collect()
+        };
+
         let attrs = serde_json::json!({
-            "display_name": display_names
+            "display_name": display_names,
+            "games": games_array,
+            "count": games_array.len(),
         });
         self.state
             .mqtt

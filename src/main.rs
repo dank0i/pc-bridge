@@ -160,9 +160,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Check for updates (non-blocking, continues after check)
-    tokio::spawn(updater::check_for_updates());
-
     // Load configuration (prompt interactively if credential can't be decrypted)
     let config = match Config::load() {
         Ok(c) => c,
@@ -175,6 +172,9 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => return Err(e),
     };
     info!("Loaded config for device: {}", config.device_name);
+
+    // Check for updates (non-blocking, continues after check)
+    tokio::spawn(updater::check_for_updates(config.update_channel.clone()));
 
     // Log enabled features
     log_enabled_features(&config);
@@ -254,6 +254,34 @@ async fn main() -> anyhow::Result<()> {
         let sensor = SteamSensor::new(Arc::clone(&state));
         handles.push(tokio::spawn(sensor.run()));
         info!("  Steam update detection enabled (filesystem watcher)");
+    }
+
+    if config.features.gpu_sensor {
+        use crate::sensors::GpuSensor;
+        let sensor = GpuSensor::new(Arc::clone(&state));
+        handles.push(tokio::spawn(sensor.run()));
+        info!("  GPU sensor enabled");
+    }
+
+    if config.features.network_sensor {
+        use crate::sensors::NetworkSensor;
+        let sensor = NetworkSensor::new(Arc::clone(&state));
+        handles.push(tokio::spawn(sensor.run()));
+        info!("  Network throughput sensor enabled");
+    }
+
+    if config.features.disk_sensor {
+        use crate::sensors::DiskSensor;
+        let sensor = DiskSensor::new(Arc::clone(&state));
+        handles.push(tokio::spawn(sensor.run()));
+        info!("  Disk usage sensor enabled");
+    }
+
+    if config.features.uptime_sensor {
+        use crate::sensors::UptimeSensor;
+        let sensor = UptimeSensor::new(Arc::clone(&state));
+        handles.push(tokio::spawn(sensor.run()));
+        info!("  System uptime sensor enabled");
     }
 
     // Custom sensors (if enabled and defined)
@@ -367,6 +395,10 @@ fn log_enabled_features(config: &Config) {
         f.audio_control,
         f.steam_updates,
         f.discord,
+        f.gpu_sensor,
+        f.network_sensor,
+        f.disk_sensor,
+        f.uptime_sensor,
         config.custom_sensors_enabled,
         config.custom_commands_enabled,
     ]
@@ -607,5 +639,5 @@ fn kill_existing_instances() {
         }
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(1000));
+    std::thread::sleep(std::time::Duration::from_secs(1));
 }
