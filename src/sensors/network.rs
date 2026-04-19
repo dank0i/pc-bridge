@@ -82,6 +82,7 @@ impl NetworkSensor {
 /// Returns (total_rx_bytes, total_tx_bytes) across all interfaces
 #[cfg(windows)]
 fn get_network_totals() -> (u64, u64) {
+    use windows::Win32::Foundation::WIN32_ERROR;
     use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2};
 
     // IF_TYPE_SOFTWARE_LOOPBACK = 24
@@ -89,7 +90,7 @@ fn get_network_totals() -> (u64, u64) {
 
     unsafe {
         let mut table = std::ptr::null_mut();
-        if GetIfTable2(&mut table) != 0 || table.is_null() {
+        if GetIfTable2(&mut table) != WIN32_ERROR(0) || table.is_null() {
             return (0, 0);
         }
 
