@@ -280,28 +280,15 @@ impl MqttClient {
                         }
                     }
                     Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                        info!("MQTT connected - publishing availability and resubscribing");
-                        // Republish availability on every connect/reconnect
-                        let _ = client_for_eventloop
-                            .publish(
-                                &availability_topic_for_eventloop,
-                                QoS::AtLeastOnce,
-                                true,
-                                "online",
-                            )
-                            .await;
+                        info!("MQTT connected - resubscribing then announcing online");
 
-                        // Publish birth message with version/features/OS info
-                        let _ = client_for_eventloop
-                            .publish(
-                                &birth_topic,
-                                QoS::AtLeastOnce,
-                                true,
-                                birth_payload.as_bytes(),
-                            )
-                            .await;
-
-                        // Re-subscribe to all command topics
+                        // Subscribe BEFORE publishing "online". HA listens on the
+                        // availability topic and may fire commands the moment we
+                        // appear available; if our SUBSCRIBE for those command
+                        // topics hasn't been processed yet, the broker has no
+                        // active subscriber and silently drops the message.
+                        // Packets travel in TCP order, so the broker processes
+                        // these subscribes before the availability publish below.
                         for topic in &subscribe_topics {
                             if let Err(e) = client_for_eventloop
                                 .subscribe(topic, QoS::AtLeastOnce)
@@ -311,6 +298,25 @@ impl MqttClient {
                             }
                         }
                         info!("Resubscribed to {} command topics", subscribe_topics.len());
+
+                        let _ = client_for_eventloop
+                            .publish(
+                                &availability_topic_for_eventloop,
+                                QoS::AtLeastOnce,
+                                true,
+                                "online",
+                            )
+                            .await;
+
+                        // Birth message with version/features/OS info
+                        let _ = client_for_eventloop
+                            .publish(
+                                &birth_topic,
+                                QoS::AtLeastOnce,
+                                true,
+                                birth_payload.as_bytes(),
+                            )
+                            .await;
 
                         // Notify sensors to republish their retained state
                         let _ = reconnect_tx_for_eventloop.send(());
