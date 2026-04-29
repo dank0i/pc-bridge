@@ -1,12 +1,14 @@
 //! Launcher shortcuts - expand short commands to full PowerShell commands
 //!
 //! Supported formats:
-//! - steam:APPID     → launches Steam game by App ID
-//! - epic:GAME       → launches Epic game by name  
-//! - exe:PATH        → launches executable
-//! - lnk:PATH        → launches shortcut
-//! - url:URL         → opens a protocol URL (discord://, https://, etc.)
-//! - close:NAME      → gracefully closes process
+//! - steam:APPID    → launches Steam game by App ID
+//! - update:APPID   → triggers Steam to validate/update an installed game
+//!   (alias: validate:APPID; both map to steam://validate/APPID)
+//! - epic:GAME      → launches Epic game by name
+//! - exe:PATH       → launches executable
+//! - lnk:PATH       → launches shortcut
+//! - url:URL        → opens a protocol URL (discord://, https://, etc.)
+//! - close:NAME     → gracefully closes process
 
 use log::{info, warn};
 
@@ -29,6 +31,19 @@ pub fn expand_launcher_shortcut(cmd: &str) -> Option<String> {
             }
             info!("Launching Steam game: App ID {}", arg);
             Some(format!(r#"Start-Process "steam://rungameid/{}""#, arg))
+        }
+
+        // `update:` and `validate:` both trigger Steam's file-integrity check,
+        // which downloads any pending update without launching the game. Useful
+        // for "pull updates from the couch" flows where you don't want the game
+        // to start playing once Steam finishes.
+        "update" | "validate" => {
+            if !is_numeric(arg) {
+                warn!("Invalid Steam App ID (must be numeric): {}", arg);
+                return None;
+            }
+            info!("Validating/updating Steam game: App ID {}", arg);
+            Some(format!(r#"Start-Process "steam://validate/{}""#, arg))
         }
 
         "epic" => {
@@ -169,6 +184,34 @@ mod tests {
             Some(r#"Start-Process "steam://rungameid/1234""#.to_string())
         );
         assert_eq!(expand_launcher_shortcut("steam:abc"), None);
+    }
+
+    #[test]
+    fn test_update_shortcut() {
+        assert_eq!(
+            expand_launcher_shortcut("update:730"),
+            Some(r#"Start-Process "steam://validate/730""#.to_string())
+        );
+    }
+
+    #[test]
+    fn test_validate_shortcut_alias() {
+        assert_eq!(
+            expand_launcher_shortcut("validate:730"),
+            Some(r#"Start-Process "steam://validate/730""#.to_string())
+        );
+    }
+
+    #[test]
+    fn test_update_shortcut_rejects_non_numeric() {
+        assert_eq!(expand_launcher_shortcut("update:abc"), None);
+        assert_eq!(expand_launcher_shortcut("validate:abc"), None);
+    }
+
+    #[test]
+    fn test_update_shortcut_rejects_empty() {
+        assert_eq!(expand_launcher_shortcut("update:"), None);
+        assert_eq!(expand_launcher_shortcut("validate:"), None);
     }
 
     #[test]

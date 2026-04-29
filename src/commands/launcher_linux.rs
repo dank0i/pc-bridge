@@ -1,11 +1,13 @@
 //! Launcher shortcuts for Linux - expand short commands to shell commands
 //!
 //! Supported formats:
-//! - steam:APPID     - launches Steam game by App ID via xdg-open
-//! - epic:GAME       - launches Epic game by name (Heroic launcher)
-//! - exe:PATH        - launches executable directly
-//! - url:URL         - opens a protocol URL via xdg-open
-//! - close:NAME      - gracefully closes process via SIGTERM
+//! - steam:APPID    - launches Steam game by App ID via xdg-open
+//! - update:APPID   - triggers Steam to validate/update an installed game
+//!   (alias: validate:APPID; both map to steam://validate/APPID)
+//! - epic:GAME      - launches Epic game by name (Heroic launcher)
+//! - exe:PATH       - launches executable directly
+//! - url:URL        - opens a protocol URL via xdg-open
+//! - close:NAME     - gracefully closes process via SIGTERM
 
 use log::{info, warn};
 
@@ -28,6 +30,17 @@ pub fn expand_launcher_shortcut(cmd: &str) -> Option<String> {
             }
             info!("Launching Steam game: App ID {}", arg);
             Some(format!("xdg-open 'steam://rungameid/{}'", arg))
+        }
+
+        // `update:` and `validate:` both trigger Steam's file-integrity check,
+        // which downloads any pending update without launching the game.
+        "update" | "validate" => {
+            if !is_numeric(arg) {
+                warn!("Invalid Steam App ID (must be numeric): {}", arg);
+                return None;
+            }
+            info!("Validating/updating Steam game: App ID {}", arg);
+            Some(format!("xdg-open 'steam://validate/{}'", arg))
         }
 
         "epic" => {

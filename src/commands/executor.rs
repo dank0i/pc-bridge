@@ -252,10 +252,13 @@ impl CommandExecutor {
             }
         };
 
-        // For steam: launch commands, wait for Steam to be running before executing.
+        // For steam:// protocol commands, wait for Steam to be running before executing.
         // When the PC was just booted via WoL, Steam may not have started yet and
         // the steam:// protocol URL would be silently dropped.
-        if payload.starts_with("steam:") {
+        if payload.starts_with("steam:")
+            || payload.starts_with("update:")
+            || payload.starts_with("validate:")
+        {
             wait_for_steam(state).await;
         }
 
@@ -894,6 +897,24 @@ mod tests {
         assert!(
             matches!(result, ShellResolution::LauncherShortcut(ref cmd) if cmd.contains("steam://rungameid/730")),
             "steam: shortcut must work with allow_raw_commands=false: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_update_shortcut_allowed_when_raw_disabled() {
+        let result = resolve_shell_command("Launch", "update:730", false);
+        assert!(
+            matches!(result, ShellResolution::LauncherShortcut(ref cmd) if cmd.contains("steam://validate/730")),
+            "update: shortcut must work with allow_raw_commands=false: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_validate_shortcut_allowed_when_raw_disabled() {
+        let result = resolve_shell_command("Launch", "validate:730", false);
+        assert!(
+            matches!(result, ShellResolution::LauncherShortcut(ref cmd) if cmd.contains("steam://validate/730")),
+            "validate: shortcut must work with allow_raw_commands=false: {result:?}"
         );
     }
 

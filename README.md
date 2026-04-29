@@ -454,6 +454,7 @@ The `Launch` button accepts special payloads:
 | Payload | Description |
 |---------|-------------|
 | `steam:1234` | Launch Steam game by App ID |
+| `update:1234` | Validate/update an installed Steam game without launching it (alias: `validate:1234`; both map to `steam://validate/<id>`) |
 | `epic:GameName` | Launch Epic game |
 | `exe:C:\path\to.exe` | Run executable directly |
 | `lnk:C:\path\to.lnk` | Run shortcut file |
