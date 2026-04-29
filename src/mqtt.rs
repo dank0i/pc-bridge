@@ -210,12 +210,21 @@ impl MqttClient {
         let button_prefix = format!("{}/button/{}/", DISCOVERY_PREFIX, &device_name);
         let notify_topic_match = format!("pc-bridge/notifications/{}", &device_name);
 
-        // Pre-compute birth message for ConnAck (Feature H)
+        // Pre-compute birth message for ConnAck (Feature H).
+        //
+        // State carries just the version string (HA caps sensor state at 255
+        // chars; the full JSON blob exceeds that and the entity falls back to
+        // unknown). Everything else goes to the attributes topic.
         let birth_topic = format!(
             "{}/sensor/{}/bridge_info/state",
             DISCOVERY_PREFIX, &device_name
         );
-        let birth_payload = serde_json::json!({
+        let birth_attrs_topic = format!(
+            "{}/sensor/{}/bridge_info/attributes",
+            DISCOVERY_PREFIX, &device_name
+        );
+        let birth_payload = VERSION.to_string();
+        let birth_attrs_payload = serde_json::json!({
             "version": VERSION,
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
@@ -308,13 +317,23 @@ impl MqttClient {
                             )
                             .await;
 
-                        // Birth message with version/features/OS info
+                        // Birth message with version/features/OS info — state
+                        // carries only the version (255-char cap) and the rest
+                        // goes to attributes.
                         let _ = client_for_eventloop
                             .publish(
                                 &birth_topic,
                                 QoS::AtLeastOnce,
                                 true,
                                 birth_payload.as_bytes(),
+                            )
+                            .await;
+                        let _ = client_for_eventloop
+                            .publish(
+                                &birth_attrs_topic,
+                                QoS::AtLeastOnce,
+                                true,
+                                birth_attrs_payload.as_bytes(),
                             )
                             .await;
 
@@ -628,8 +647,10 @@ impl MqttClient {
             .await;
         }
 
-        // Birth info sensor (always registered — used by Feature H birth message)
-        self.register_sensor(
+        // Birth info sensor (always registered — used by Feature H birth message).
+        // Uses register_sensor_with_attributes so the JSON details (os/arch/features)
+        // are published to the attributes topic; state stays under HA's 255-char cap.
+        self.register_sensor_with_attributes(
             device,
             "bridge_info",
             "Bridge Info",
