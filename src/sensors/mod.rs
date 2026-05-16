@@ -7,6 +7,8 @@ mod network;
 mod system;
 mod uptime;
 
+pub mod hwinfo;
+
 #[cfg(windows)]
 mod games;
 #[cfg(windows)]

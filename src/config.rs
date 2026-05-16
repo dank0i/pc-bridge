@@ -216,6 +216,8 @@ pub struct FeatureConfig {
     pub disk_sensor: bool,
     #[serde(default)]
     pub uptime_sensor: bool,
+    #[serde(default)]
+    pub hwinfo_sensor: bool,
 }
 
 impl Default for FeatureConfig {
@@ -233,6 +235,7 @@ impl Default for FeatureConfig {
             network_sensor: false,
             disk_sensor: false,
             uptime_sensor: false,
+            hwinfo_sensor: false,
         }
     }
 }
@@ -1107,6 +1110,7 @@ mod tests {
         assert!(!config.features.network_sensor);
         assert!(!config.features.disk_sensor);
         assert!(!config.features.uptime_sensor);
+        assert!(!config.features.hwinfo_sensor);
     }
 
     #[test]
@@ -1116,6 +1120,7 @@ mod tests {
         assert!(!features.network_sensor);
         assert!(!features.disk_sensor);
         assert!(!features.uptime_sensor);
+        assert!(!features.hwinfo_sensor);
     }
 
     #[test]

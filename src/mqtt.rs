@@ -69,6 +69,7 @@ impl CachedTopics {
             "disk_usage",
             "system_uptime",
             "bridge_info",
+            "hwinfo_diagnostic",
         ];
 
         for name in sensors {
@@ -115,6 +116,14 @@ struct HADiscoveryPayload {
     command_topic: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     availability_topic: Option<String>,
+    /// Multi-source availability list (used instead of `availability_topic`
+    /// when a sensor depends on more than one online signal — e.g. pc-bridge
+    /// LWT AND HWiNFO running).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    availability: Option<Vec<AvailabilityEntry>>,
+    /// "all" (default in HA) or "any"; only meaningful with `availability`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    availability_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     json_attributes_topic: Option<String>,
     /// Fix #5: Use Arc to avoid cloning device info for each button/sensor
@@ -125,6 +134,12 @@ struct HADiscoveryPayload {
     device_class: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     unit_of_measurement: Option<String>,
+}
+
+/// One entry in HA's multi-source `availability` list.
+#[derive(Serialize)]
+struct AvailabilityEntry {
+    topic: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -241,6 +256,7 @@ impl MqttClient {
                 "network_sensor": config.features.network_sensor,
                 "disk_sensor": config.features.disk_sensor,
                 "uptime_sensor": config.features.uptime_sensor,
+                "hwinfo_sensor": config.features.hwinfo_sensor,
             }
         })
         .to_string();
@@ -483,6 +499,8 @@ impl MqttClient {
                 state_topic: Some(self.sensor_topic("sleep_state")),
                 command_topic: None,
                 availability_topic: None,
+                availability: None,
+                availability_mode: None,
                 device: Arc::clone(device),
                 icon: Some("mdi:power-sleep".to_string()),
                 device_class: None,
@@ -575,6 +593,8 @@ impl MqttClient {
                 state_topic: Some(self.sensor_topic("steam_updating")),
                 command_topic: None,
                 availability_topic: None,
+                availability: None,
+                availability_mode: None,
                 json_attributes_topic: Some(self.sensor_attributes_topic("steam_updating")),
                 device: Arc::clone(device),
                 icon: Some("mdi:steam".to_string()),
@@ -643,6 +663,221 @@ impl MqttClient {
                 "mdi:clock-check",
                 Some("duration"),
                 Some("s"),
+            )
+            .await;
+        }
+
+        // HWiNFO sensors are Windows-only — the producer task is
+        // `#[cfg(windows)]` and shared-memory is a Win32-only API. We also
+        // gate discovery here so a stray `hwinfo_sensor: true` on Linux/macOS
+        // doesn't pollute HA with 15 perma-unavailable entities via retained
+        // discovery messages.
+        #[cfg(windows)]
+        if config.features.hwinfo_sensor {
+            // Temperatures
+            self.register_hwinfo_sensor(
+                device,
+                "cpu_package_temp",
+                "CPU Package Temperature",
+                "mdi:thermometer",
+                Some("temperature"),
+                Some("°C"),
+            )
+            .await;
+            self.register_hwinfo_sensor(
+                device,
+                "gpu_temp",
+                "GPU Temperature",
+                "mdi:thermometer",
+                Some("temperature"),
+                Some("°C"),
+            )
+            .await;
+            self.register_hwinfo_sensor(
+                device,
+                "gpu_hotspot_temp",
+                "GPU Hot Spot Temperature",
+                "mdi:thermometer-alert",
+                Some("temperature"),
+                Some("°C"),
+            )
+            .await;
+            self.register_hwinfo_sensor(
+                device,
+                "gpu_memory_temp",
+                "GPU Memory Temperature",
+                "mdi:thermometer-lines",
+                Some("temperature"),
+                Some("°C"),
+            )
+            .await;
+
+            // Power
+            self.register_hwinfo_sensor(
+                device,
+                "cpu_package_power",
+                "CPU Package Power",
+                "mdi:flash",
+                Some("power"),
+                Some("W"),
+            )
+            .await;
+            self.register_hwinfo_sensor(
+                device,
+                "cpu_soc_power",
+                "CPU SoC Power",
+                "mdi:flash-outline",
+                Some("power"),
+                Some("W"),
+            )
+            .await;
+            self.register_hwinfo_sensor(
+                device,
+                "gpu_power",
+                "GPU Power",
+                "mdi:flash",
+                Some("power"),
+                Some("W"),
+            )
+            .await;
+
+            // Clocks
+            self.register_hwinfo_sensor(
+                device,
+                "cpu_effective_clock",
+                "CPU Effective Clock",
+                "mdi:speedometer",
+                Some("frequency"),
+                Some("MHz"),
+            )
+            .await;
+            self.register_hwinfo_sensor(
+                device,
+                "gpu_core_clock",
+                "GPU Core Clock",
+                "mdi:speedometer",
+                Some("frequency"),
+                Some("MHz"),
+            )
+            .await;
+            self.register_hwinfo_sensor(
+                device,
+                "gpu_memory_clock",
+                "GPU Memory Clock",
+                "mdi:speedometer-medium",
+                Some("frequency"),
+                Some("MHz"),
+            )
+            .await;
+
+            // Utilization
+            self.register_hwinfo_sensor(
+                device,
+                "cpu_total_usage",
+                "CPU Total Usage",
+                "mdi:cpu-64-bit",
+                None,
+                Some("%"),
+            )
+            .await;
+            self.register_hwinfo_sensor(
+                device,
+                "gpu_core_load",
+                "GPU Core Load",
+                "mdi:expansion-card",
+                None,
+                Some("%"),
+            )
+            .await;
+            self.register_hwinfo_sensor(
+                device,
+                "gpu_vram_usage_pct",
+                "GPU VRAM Usage",
+                "mdi:memory",
+                None,
+                Some("%"),
+            )
+            .await;
+
+            // Fan + framerate
+            self.register_hwinfo_sensor(
+                device,
+                "gpu_fan_rpm",
+                "GPU Fan",
+                "mdi:fan",
+                None,
+                Some("RPM"),
+            )
+            .await;
+            self.register_hwinfo_sensor(
+                device,
+                "framerate",
+                "Framerate",
+                "mdi:speedometer",
+                None,
+                Some("fps"),
+            )
+            .await;
+
+            // Motherboard SuperIO sensors: 4 fan headers + VRM temperature.
+            self.register_hwinfo_sensor(
+                device,
+                "case_fan_cpu",
+                "CPU Fan",
+                "mdi:fan",
+                None,
+                Some("RPM"),
+            )
+            .await;
+            self.register_hwinfo_sensor(
+                device,
+                "case_fan_cpu_opt",
+                "CPU OPT Fan",
+                "mdi:fan",
+                None,
+                Some("RPM"),
+            )
+            .await;
+            self.register_hwinfo_sensor(
+                device,
+                "case_fan_system_1",
+                "System Fan 1",
+                "mdi:fan",
+                None,
+                Some("RPM"),
+            )
+            .await;
+            self.register_hwinfo_sensor(
+                device,
+                "case_fan_system_2",
+                "System Fan 2",
+                "mdi:fan",
+                None,
+                Some("RPM"),
+            )
+            .await;
+            self.register_hwinfo_sensor(
+                device,
+                "vrm_temp",
+                "VRM Temperature",
+                "mdi:thermometer",
+                Some("temperature"),
+                Some("°C"),
+            )
+            .await;
+
+            // Diagnostic sensor: short summary state ("ok: 13/15 matched") +
+            // rich JSON attributes (sensors_count, sample names, matched
+            // keys, view_size_bytes, etc.) for remote troubleshooting when
+            // HWiNFO is exposing the section but pc-bridge isn't matching
+            // anything useful.
+            self.register_hwinfo_sensor(
+                device,
+                "hwinfo_diagnostic",
+                "HWiNFO Diagnostic",
+                "mdi:bug-outline",
+                None,
+                None,
             )
             .await;
         }
@@ -755,6 +990,8 @@ impl MqttClient {
             state_topic: None,
             command_topic: Some(self.command_topic(name)),
             availability_topic: Some(self.availability_topic()),
+            availability: None,
+            availability_mode: None,
             device: Arc::clone(device),
             icon: Some(icon.to_string()),
             device_class: None,
@@ -790,6 +1027,64 @@ impl MqttClient {
             .await;
     }
 
+    /// Helper to register an HWiNFO-backed sensor.
+    ///
+    /// HWiNFO sensors use the multi-source `availability` list so HA marks
+    /// them unavailable when EITHER pc-bridge OR HWiNFO is down. The single
+    /// `availability_topic` field is left empty (HA picks one or the other).
+    /// `json_attributes_topic` is always set — every HWiNFO sensor publishes
+    /// min/max/avg/unit attributes alongside its state.
+    ///
+    /// Gated to `#[cfg(windows)]` because the HWiNFO producer task is
+    /// Windows-only, and the sole caller is the Windows-gated discovery block.
+    #[cfg(windows)]
+    async fn register_hwinfo_sensor(
+        &self,
+        device: &Arc<HADevice>,
+        name: &str,
+        display_name: &str,
+        icon: &str,
+        device_class: Option<&str>,
+        unit: Option<&str>,
+    ) {
+        let availability_entries = vec![
+            AvailabilityEntry {
+                topic: self.availability_topic(),
+            },
+            AvailabilityEntry {
+                topic: self.hwinfo_availability_topic(),
+            },
+        ];
+
+        let payload = HADiscoveryPayload {
+            name: display_name.to_string(),
+            unique_id: format!("{}_{}", self.device_id, name),
+            state_topic: Some(self.sensor_topic(name)),
+            command_topic: None,
+            availability_topic: None,
+            availability: Some(availability_entries),
+            availability_mode: Some("all".to_string()),
+            json_attributes_topic: Some(self.sensor_attributes_topic(name)),
+            device: Arc::clone(device),
+            icon: Some(icon.to_string()),
+            device_class: device_class.map(|s| s.to_string()),
+            unit_of_measurement: unit.map(|s| s.to_string()),
+        };
+
+        let topic = format!(
+            "{}/sensor/{}/{}/config",
+            DISCOVERY_PREFIX, self.device_name, name
+        );
+        let Ok(json) = serde_json::to_string(&payload) else {
+            error!("Failed to serialize HWiNFO HA discovery payload");
+            return;
+        };
+        let _ = self
+            .client
+            .publish(&topic, QoS::AtLeastOnce, true, json)
+            .await;
+    }
+
     /// Internal helper to register a sensor
     #[allow(clippy::too_many_arguments)]
     async fn register_sensor_internal(
@@ -808,6 +1103,8 @@ impl MqttClient {
             state_topic: Some(self.sensor_topic(name)),
             command_topic: None,
             availability_topic: Some(self.availability_topic()),
+            availability: None,
+            availability_mode: None,
             json_attributes_topic: if with_attributes {
                 Some(self.sensor_attributes_topic(name))
             } else {
@@ -883,6 +1180,8 @@ impl MqttClient {
                 state_topic: Some(self.sensor_topic(&topic_name)),
                 command_topic: None,
                 availability_topic: Some(self.availability_topic()),
+                availability: None,
+                availability_mode: None,
                 device: Arc::clone(&self.device),
                 icon: Some(icon),
                 device_class: None,
@@ -929,6 +1228,8 @@ impl MqttClient {
                 state_topic: None,
                 command_topic: Some(self.command_topic(&cmd.name)),
                 availability_topic: Some(self.availability_topic()),
+                availability: None,
+                availability_mode: None,
                 device: Arc::clone(&self.device),
                 icon: Some(icon),
                 device_class: None,
@@ -1076,6 +1377,17 @@ impl MqttClient {
             .await;
     }
 
+    /// Publish HWiNFO availability status (retained). Sensors registered with
+    /// `register_hwinfo_sensor` track this in addition to the main LWT.
+    pub async fn publish_hwinfo_availability(&self, online: bool) {
+        let topic = self.hwinfo_availability_topic();
+        let payload: &[u8] = if online { b"online" } else { b"offline" };
+        let _ = self
+            .client
+            .publish(topic, QoS::AtLeastOnce, true, payload)
+            .await;
+    }
+
     /// Publish sensor attributes as JSON
     pub async fn publish_sensor_attributes(&self, name: &str, attributes: &serde_json::Value) {
         let topic = self.sensor_attributes_topic(name);
@@ -1097,6 +1409,16 @@ impl MqttClient {
 
     fn availability_topic_static(device_name: &str) -> String {
         format!("{}/sensor/{}/availability", DISCOVERY_PREFIX, device_name)
+    }
+
+    /// Topic published by the HWiNFO sensor task to indicate whether HWiNFO is
+    /// currently running. Used by the multi-source `availability` list on each
+    /// HWiNFO-backed sensor.
+    pub fn hwinfo_availability_topic(&self) -> String {
+        format!(
+            "{}/sensor/{}/hwinfo_availability",
+            DISCOVERY_PREFIX, self.device_name
+        )
     }
 
     fn sensor_topic(&self, name: &str) -> String {
@@ -1262,6 +1584,7 @@ mod tests {
             "disk_usage",
             "system_uptime",
             "bridge_info",
+            "hwinfo_diagnostic",
         ];
         for name in expected {
             assert!(
@@ -1303,6 +1626,8 @@ mod tests {
             state_topic: Some(mqtt.sensor_topic("cpu_usage")),
             command_topic: None,
             availability_topic: Some(mqtt.availability_topic()),
+            availability: None,
+            availability_mode: None,
             json_attributes_topic: None,
             device: Arc::clone(&mqtt.device),
             icon: Some("mdi:cpu-64-bit".to_string()),
@@ -1339,6 +1664,8 @@ mod tests {
             state_topic: None,
             command_topic: Some(mqtt.command_topic("Sleep")),
             availability_topic: Some(mqtt.availability_topic()),
+            availability: None,
+            availability_mode: None,
             json_attributes_topic: None,
             device: Arc::clone(&mqtt.device),
             icon: Some("mdi:power-sleep".to_string()),
@@ -1376,6 +1703,8 @@ mod tests {
             state_topic: Some(mqtt.sensor_topic("runninggames")),
             command_topic: None,
             availability_topic: Some(mqtt.availability_topic()),
+            availability: None,
+            availability_mode: None,
             json_attributes_topic: Some(mqtt.sensor_attributes_topic("runninggames")),
             device: Arc::clone(&mqtt.device),
             icon: Some("mdi:gamepad-variant".to_string()),
@@ -1404,6 +1733,8 @@ mod tests {
             state_topic: Some(mqtt.sensor_topic("test")),
             command_topic: None,
             availability_topic: Some(mqtt.availability_topic()),
+            availability: None,
+            availability_mode: None,
             json_attributes_topic: None,
             device: Arc::clone(&mqtt.device),
             icon: None,
@@ -1434,6 +1765,8 @@ mod tests {
             state_topic: Some(mqtt.sensor_topic("sleep_state")),
             command_topic: None,
             availability_topic: None,
+            availability: None,
+            availability_mode: None,
             json_attributes_topic: None,
             device: Arc::clone(&mqtt.device),
             icon: Some("mdi:power-sleep".to_string()),
@@ -1462,6 +1795,8 @@ mod tests {
             state_topic: None,
             command_topic: None,
             availability_topic: None,
+            availability: None,
+            availability_mode: None,
             json_attributes_topic: None,
             device: Arc::new(HADevice {
                 identifiers: vec!["test".to_string()],
@@ -1498,6 +1833,8 @@ mod tests {
             state_topic: Some(mqtt.sensor_topic("lastactive")),
             command_topic: None,
             availability_topic: Some(mqtt.availability_topic()),
+            availability: None,
+            availability_mode: None,
             json_attributes_topic: None,
             device: Arc::clone(&mqtt.device),
             icon: Some("mdi:clock-outline".to_string()),
@@ -1534,6 +1871,8 @@ mod tests {
             state_topic: Some(mqtt.sensor_topic(&topic_name)),
             command_topic: None,
             availability_topic: Some(mqtt.availability_topic()),
+            availability: None,
+            availability_mode: None,
             device: Arc::clone(&mqtt.device),
             icon: sensor.icon.clone(),
             device_class: None,
@@ -1573,6 +1912,8 @@ mod tests {
             state_topic: None,
             command_topic: Some(mqtt.command_topic(&cmd.name)),
             availability_topic: Some(mqtt.availability_topic()),
+            availability: None,
+            availability_mode: None,
             device: Arc::clone(&mqtt.device),
             icon: cmd.icon.clone(),
             device_class: None,
@@ -1737,6 +2078,7 @@ mod tests {
             network_sensor: true,
             disk_sensor: true,
             uptime_sensor: true,
+            hwinfo_sensor: true,
         };
         let config = test_config("test-pc", features);
         let topics = MqttClient::build_subscribe_topics("test-pc", &config);
@@ -1787,6 +2129,8 @@ mod tests {
             state_topic: Some(mqtt.sensor_topic("battery_level")),
             command_topic: None,
             availability_topic: Some(mqtt.availability_topic()),
+            availability: None,
+            availability_mode: None,
             json_attributes_topic: None,
             device: Arc::clone(&mqtt.device),
             icon: Some("mdi:battery".to_string()),
@@ -2434,6 +2778,7 @@ mod tests {
                 network_sensor: true,
                 disk_sensor: true,
                 uptime_sensor: true,
+                hwinfo_sensor: true,
             }
         }
 

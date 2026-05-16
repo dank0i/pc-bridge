@@ -397,6 +397,7 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
             network_sensor: false,
             disk_sensor: false,
             uptime_sensor: false,
+            hwinfo_sensor: false,
         },
         games: HashMap::new(),
         custom_sensors_enabled: false,

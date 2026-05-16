@@ -13,6 +13,7 @@ mod audio;
 mod commands;
 mod config;
 mod credential;
+mod hwinfo;
 mod mqtt;
 mod notification;
 mod power;
@@ -263,6 +264,14 @@ async fn main() -> anyhow::Result<()> {
         info!("  GPU sensor enabled");
     }
 
+    #[cfg(windows)]
+    if config.features.hwinfo_sensor {
+        use crate::sensors::hwinfo::HwInfoSensor;
+        let sensor = HwInfoSensor::new(Arc::clone(&state));
+        handles.push(tokio::spawn(sensor.run()));
+        info!("  HWiNFO sensor enabled (Global\\HWiNFO_SENS_SM2 lazy poll @ 500ms)");
+    }
+
     if config.features.network_sensor {
         use crate::sensors::NetworkSensor;
         let sensor = NetworkSensor::new(Arc::clone(&state));
@@ -315,6 +324,17 @@ async fn main() -> anyhow::Result<()> {
 
     // Publish initial availability
     state.mqtt.publish_availability(true).await;
+
+    // HWiNFO sensors use a multi-source availability list — pre-seed the
+    // HWiNFO availability topic to "offline" so HA marks the entities
+    // unavailable until the sensor task detects HWiNFO is running. Gated
+    // to Windows because the producer task is Windows-only; we don't want
+    // a stray flag on Linux/macOS publishing a retained topic HA would
+    // then carry around forever.
+    #[cfg(windows)]
+    if config.features.hwinfo_sensor {
+        state.mqtt.publish_hwinfo_availability(false).await;
+    }
 
     // Only publish sleep_state if power_events enabled
     if config.features.power_events {
@@ -399,6 +419,7 @@ fn log_enabled_features(config: &Config) {
         f.network_sensor,
         f.disk_sensor,
         f.uptime_sensor,
+        f.hwinfo_sensor,
         config.custom_sensors_enabled,
         config.custom_commands_enabled,
     ]
