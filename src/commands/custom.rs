@@ -115,11 +115,21 @@ async fn execute_executable(cmd: &CustomCommand) -> anyhow::Result<()> {
 
     tokio::task::spawn_blocking(move || {
         if admin {
-            // Run elevated via Start-Process -Verb RunAs
-            let args_str = args.join(" ");
+            // Run elevated via Start-Process -Verb RunAs.  Both `path` and
+            // each arg go inside single-quoted PowerShell strings, so any
+            // literal `'` in them would break out; double them per
+            // PowerShell quoting rules to escape (same trick as
+            // execute_shell).  Config is trusted, but the escape costs
+            // nothing and removes a config-author footgun.
+            let escaped_path = path.replace('\'', "''");
+            let args_str = args
+                .iter()
+                .map(|a| a.replace('\'', "''"))
+                .collect::<Vec<_>>()
+                .join(" ");
             let ps_cmd = format!(
                 "Start-Process '{}' -Verb RunAs -ArgumentList '{}'",
-                path, args_str
+                escaped_path, args_str
             );
 
             Command::new("powershell")
