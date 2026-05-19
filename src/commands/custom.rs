@@ -228,9 +228,7 @@ async fn execute_shell(cmd: &CustomCommand) -> anyhow::Result<()> {
     tokio::task::spawn_blocking(move || {
         // .status() waits and reaps; see execute_executable for details.
         if admin {
-            Command::new("sudo")
-                .args(["sh", "-c", &command])
-                .status()?;
+            Command::new("sudo").args(["sh", "-c", &command]).status()?;
         } else {
             Command::new("sh").args(["-c", &command]).status()?;
         }
