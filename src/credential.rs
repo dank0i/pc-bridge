@@ -153,9 +153,14 @@ fn dpapi_encrypt(plaintext: &str) -> Result<String, DecryptError> {
     };
 
     let data_bytes = plaintext.as_bytes();
+    // SAFETY (cast_mut): CryptProtectData's pbData is typed *mut u8 in the
+    // Win32 ABI but the function does NOT mutate the input buffer - it
+    // reads cbData bytes for encryption.  Casting our &[u8] through *const
+    // → *mut is required by the FFI signature only.  data_bytes outlives
+    // the call (it borrows from `plaintext`, which lives for the function).
     let mut input_blob = CRYPT_INTEGER_BLOB {
         cbData: data_bytes.len() as u32,
-        pbData: data_bytes.as_ptr() as *mut u8,
+        pbData: data_bytes.as_ptr().cast_mut(),
     };
     let mut output_blob = CRYPT_INTEGER_BLOB {
         cbData: 0,
@@ -208,9 +213,11 @@ fn dpapi_decrypt(encoded: &str) -> Result<String, DecryptError> {
         message: format!("Invalid base64 in DPAPI credential: {e}"),
     })?;
 
+    // SAFETY (cast_mut): Same FFI ABI quirk as encrypt - CryptUnprotectData
+    // does not mutate input, the *mut is only required by the signature.
     let mut input_blob = CRYPT_INTEGER_BLOB {
         cbData: encrypted.len() as u32,
-        pbData: encrypted.as_ptr() as *mut u8,
+        pbData: encrypted.as_ptr().cast_mut(),
     };
     let mut output_blob = CRYPT_INTEGER_BLOB {
         cbData: 0,
