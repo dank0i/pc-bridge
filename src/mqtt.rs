@@ -1398,10 +1398,16 @@ impl MqttClient {
     /// Publish availability status
     pub async fn publish_availability(&self, online: bool) {
         let topic = self.availability_topic();
-        let payload: &[u8] = if online { b"online" } else { b"offline" };
+        // Zero-copy static payloads - Bytes::from_static avoids the &[u8] → Vec<u8>
+        // copy that `publish` would do.
+        let payload = if online {
+            bytes::Bytes::from_static(b"online")
+        } else {
+            bytes::Bytes::from_static(b"offline")
+        };
         let _ = self
             .client
-            .publish(topic, QoS::AtLeastOnce, true, payload)
+            .publish_bytes(topic, QoS::AtLeastOnce, true, payload)
             .await;
     }
 
@@ -1409,10 +1415,14 @@ impl MqttClient {
     /// `register_hwinfo_sensor` track this in addition to the main LWT.
     pub async fn publish_hwinfo_availability(&self, online: bool) {
         let topic = self.hwinfo_availability_topic();
-        let payload: &[u8] = if online { b"online" } else { b"offline" };
+        let payload = if online {
+            bytes::Bytes::from_static(b"online")
+        } else {
+            bytes::Bytes::from_static(b"offline")
+        };
         let _ = self
             .client
-            .publish(topic, QoS::AtLeastOnce, true, payload)
+            .publish_bytes(topic, QoS::AtLeastOnce, true, payload)
             .await;
     }
 

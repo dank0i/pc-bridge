@@ -52,6 +52,9 @@ rpassword = "7"
 # TLS for sync MQTT sleep publish (already in dep tree via rumqttc/ureq - zero binary cost)
 native-tls = "0.2"
 
+# Zero-copy byte buffers for MQTT publish payloads (already in tree via rumqttc)
+bytes = "1"
+
 # libc for statvfs (disk sensor on Unix)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
