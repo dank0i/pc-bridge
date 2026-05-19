@@ -72,12 +72,19 @@ impl SystemSensor {
         // Channel for receiving events from background threads
         let (event_tx, mut event_rx) = mpsc::channel::<SystemEvent>(8);
 
+        // Collect shutdown-waiter task handles so we can await them at the
+        // shutdown break - otherwise they'd be orphaned by tokio runtime
+        // tear-down before they get a chance to PostMessage the OS thread.
+        let mut shutdown_waiters: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
         // Start event-driven active window monitor
         #[cfg(windows)]
         {
             let tx = event_tx.clone();
             let shutdown = self.state.shutdown_tx.subscribe();
-            start_window_focus_monitor(tx, shutdown);
+            if let Some(h) = start_window_focus_monitor(tx, shutdown) {
+                shutdown_waiters.push(h);
+            }
         }
 
         // Start event-driven battery monitor
@@ -85,21 +92,28 @@ impl SystemSensor {
         {
             let tx = event_tx.clone();
             let shutdown = self.state.shutdown_tx.subscribe();
-            start_battery_monitor(tx, shutdown);
+            if let Some(h) = start_battery_monitor(tx, shutdown) {
+                shutdown_waiters.push(h);
+            }
         }
 
-        // Linux: poll-based event monitors via background tasks
+        // Linux: poll-based event monitors via background threads (no async
+        // waiters; they observe shutdown via try_recv inside the OS thread).
         #[cfg(unix)]
         {
             let tx = event_tx.clone();
             let shutdown = self.state.shutdown_tx.subscribe();
-            start_window_focus_monitor_linux(tx, shutdown);
+            if let Some(h) = start_window_focus_monitor_linux(tx, shutdown) {
+                shutdown_waiters.push(h);
+            }
         }
         #[cfg(unix)]
         {
             let tx = event_tx.clone();
             let shutdown = self.state.shutdown_tx.subscribe();
-            start_battery_monitor_linux(tx, shutdown);
+            if let Some(h) = start_battery_monitor_linux(tx, shutdown) {
+                shutdown_waiters.push(h);
+            }
         }
 
         // Suppress unused warning when neither platform uses event_tx further
@@ -118,6 +132,19 @@ impl SystemSensor {
                 biased;
                 _ = shutdown_rx.recv() => {
                     debug!("System sensor shutting down");
+                    // Wait for the child waiter tasks to deliver their WM_USER
+                    // messages so the OS message-pump threads exit cleanly
+                    // before the tokio runtime tears us down.  Bounded to 2s
+                    // total so we never block the global 5s shutdown timeout.
+                    let pending = std::mem::take(&mut shutdown_waiters);
+                    if !pending.is_empty() {
+                        let _ = tokio::time::timeout(Duration::from_secs(2), async move {
+                            for handle in pending {
+                                let _ = handle.await;
+                            }
+                        })
+                        .await;
+                    }
                     break;
                 }
                 // Hot-reload: pick up new interval from config changes
@@ -262,7 +289,7 @@ impl SystemSensor {
 fn start_window_focus_monitor(
     event_tx: mpsc::Sender<SystemEvent>,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
-) {
+) -> Option<tokio::task::JoinHandle<()>> {
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows::Win32::UI::Accessibility::SetWinEventHook;
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -385,12 +412,15 @@ fn start_window_focus_monitor(
         Ok(_) => {}
         Err(e) => {
             error!("Failed to spawn window focus thread: {}", e);
-            return;
+            return None;
         }
     }
 
-    // Spawn task to post WM_QUIT on shutdown
-    tokio::spawn(async move {
+    // Tracked shutdown waiter: posts WM_USER to unblock the GetMessageW
+    // loop in the background thread above.  Returned to the caller so it
+    // can await us at clean shutdown - otherwise the orphan task may be
+    // dropped mid-flight, leaving the OS thread stuck until process exit.
+    Some(tokio::spawn(async move {
         let hwnd_val = hwnd_rx.await.unwrap_or(0);
         if hwnd_val != 0 {
             let _ = shutdown_rx.recv().await;
@@ -399,7 +429,7 @@ fn start_window_focus_monitor(
                 let _ = PostMessageW(hwnd, WM_USER, WPARAM(0), LPARAM(0));
             }
         }
-    });
+    }))
 }
 
 // ============================================================================
@@ -410,7 +440,7 @@ fn start_window_focus_monitor(
 fn start_battery_monitor(
     event_tx: mpsc::Sender<SystemEvent>,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
-) {
+) -> Option<tokio::task::JoinHandle<()>> {
     use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::Power::RegisterPowerSettingNotification;
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -558,12 +588,12 @@ fn start_battery_monitor(
         Ok(_) => {}
         Err(e) => {
             error!("Failed to spawn battery monitor thread: {}", e);
-            return;
+            return None;
         }
     }
 
-    // Spawn task to post WM_USER on shutdown
-    tokio::spawn(async move {
+    // Tracked shutdown waiter - see note on start_window_focus_monitor.
+    Some(tokio::spawn(async move {
         let hwnd_val = hwnd_rx.await.unwrap_or(0);
         if hwnd_val != 0 {
             let _ = shutdown_rx.recv().await;
@@ -572,7 +602,7 @@ fn start_battery_monitor(
                 let _ = PostMessageW(hwnd, WM_USER, WPARAM(0), LPARAM(0));
             }
         }
-    });
+    }))
 }
 
 // ============================================================================
@@ -859,7 +889,7 @@ fn get_active_window_title_blocking() -> String {
 fn start_window_focus_monitor_linux(
     event_tx: mpsc::Sender<SystemEvent>,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
-) {
+) -> Option<tokio::task::JoinHandle<()>> {
     use std::io::BufRead;
 
     std::thread::Builder::new()
@@ -909,6 +939,9 @@ fn start_window_focus_monitor_linux(
             }
         })
         .ok();
+    // Linux variants use polling against shutdown_rx.try_recv() inside the OS
+    // thread, so there's no separate async shutdown waiter to track.
+    None
 }
 
 /// Monitor battery changes on Linux by polling /sys/class/power_supply.
@@ -919,7 +952,7 @@ fn start_window_focus_monitor_linux(
 fn start_battery_monitor_linux(
     event_tx: mpsc::Sender<SystemEvent>,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
-) {
+) -> Option<tokio::task::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("battery-linux".into())
         .spawn(move || {
@@ -941,6 +974,8 @@ fn start_battery_monitor_linux(
             }
         })
         .ok();
+    // Polling-based; no async waiter to track.
+    None
 }
 
 // ============================================================================
