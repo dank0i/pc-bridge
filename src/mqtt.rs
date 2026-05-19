@@ -345,37 +345,50 @@ impl MqttClient {
                         }
                         info!("Resubscribed to {} command topics", subscribe_topics.len());
 
-                        let _ = client_for_eventloop
-                            .publish(
+                        if let Err(e) = client_for_eventloop
+                            .publish_bytes(
                                 &availability_topic_for_eventloop,
                                 QoS::AtLeastOnce,
                                 true,
-                                "online",
+                                bytes::Bytes::from_static(b"online"),
                             )
-                            .await;
+                            .await
+                        {
+                            warn!("Failed to publish online availability after ConnAck: {:?}", e);
+                        }
 
                         // Birth message with version/features/OS info - state
                         // carries only the version (255-char cap) and the rest
                         // goes to attributes.
-                        let _ = client_for_eventloop
+                        if let Err(e) = client_for_eventloop
                             .publish(
                                 &birth_topic,
                                 QoS::AtLeastOnce,
                                 true,
                                 birth_payload.as_bytes(),
                             )
-                            .await;
-                        let _ = client_for_eventloop
+                            .await
+                        {
+                            warn!("Failed to publish bridge_info birth message: {:?}", e);
+                        }
+                        if let Err(e) = client_for_eventloop
                             .publish(
                                 &birth_attrs_topic,
                                 QoS::AtLeastOnce,
                                 true,
                                 birth_attrs_payload.as_bytes(),
                             )
-                            .await;
+                            .await
+                        {
+                            warn!("Failed to publish bridge_info birth attributes: {:?}", e);
+                        }
 
-                        // Notify sensors to republish their retained state
-                        let _ = reconnect_tx_for_eventloop.send(());
+                        // Notify sensors to republish their retained state.
+                        // No active subscribers means we lagged or sensors aren't
+                        // yet wired in - log so we don't lose visibility.
+                        if let Err(e) = reconnect_tx_for_eventloop.send(()) {
+                            debug!("No reconnect subscribers yet ({}); first connect is fine, later is suspicious", e);
+                        }
 
                         // Reset backoff on successful connection
                         backoff_secs = 1;
@@ -1379,25 +1392,18 @@ impl MqttClient {
 
     /// Publish a sensor value (non-retained)
     pub async fn publish_sensor(&self, name: &str, value: &str) {
-        let topic = self.sensor_topic(name);
-        let _ = self
-            .client
-            .publish(topic, QoS::AtLeastOnce, false, value)
+        self.publish_inner(self.sensor_topic(name), false, value.to_owned())
             .await;
     }
 
     /// Publish a sensor value (retained)
     pub async fn publish_sensor_retained(&self, name: &str, value: &str) {
-        let topic = self.sensor_topic(name);
-        let _ = self
-            .client
-            .publish(topic, QoS::AtLeastOnce, true, value)
+        self.publish_inner(self.sensor_topic(name), true, value.to_owned())
             .await;
     }
 
     /// Publish availability status
     pub async fn publish_availability(&self, online: bool) {
-        let topic = self.availability_topic();
         // Zero-copy static payloads - Bytes::from_static avoids the &[u8] → Vec<u8>
         // copy that `publish` would do.
         let payload = if online {
@@ -1405,38 +1411,52 @@ impl MqttClient {
         } else {
             bytes::Bytes::from_static(b"offline")
         };
-        let _ = self
-            .client
-            .publish_bytes(topic, QoS::AtLeastOnce, true, payload)
+        self.publish_bytes_inner(self.availability_topic(), true, payload)
             .await;
     }
 
     /// Publish HWiNFO availability status (retained). Sensors registered with
     /// `register_hwinfo_sensor` track this in addition to the main LWT.
     pub async fn publish_hwinfo_availability(&self, online: bool) {
-        let topic = self.hwinfo_availability_topic();
         let payload = if online {
             bytes::Bytes::from_static(b"online")
         } else {
             bytes::Bytes::from_static(b"offline")
         };
-        let _ = self
-            .client
-            .publish_bytes(topic, QoS::AtLeastOnce, true, payload)
+        self.publish_bytes_inner(self.hwinfo_availability_topic(), true, payload)
             .await;
     }
 
     /// Publish sensor attributes as JSON
     pub async fn publish_sensor_attributes(&self, name: &str, attributes: &serde_json::Value) {
         let topic = self.sensor_attributes_topic(name);
-        let payload = match serde_json::to_vec(attributes) {
-            Ok(v) => v,
-            Err(_) => return,
+        let Ok(payload) = serde_json::to_vec(attributes) else {
+            return;
         };
-        let _ = self
+        self.publish_inner(topic, true, payload).await;
+    }
+
+    /// Internal publish helper. Logs failures instead of silently dropping them
+    /// - broker disconnects in the middle of a publish should be visible.
+    async fn publish_inner(&self, topic: String, retained: bool, payload: impl Into<Vec<u8>>) {
+        if let Err(e) = self
             .client
-            .publish(topic, QoS::AtLeastOnce, true, payload)
-            .await;
+            .publish(&topic, QoS::AtLeastOnce, retained, payload)
+            .await
+        {
+            warn!("MQTT publish failed for {}: {:?}", topic, e);
+        }
+    }
+
+    /// Zero-copy variant for static byte payloads (LWT, fixed enums).
+    async fn publish_bytes_inner(&self, topic: String, retained: bool, payload: bytes::Bytes) {
+        if let Err(e) = self
+            .client
+            .publish_bytes(&topic, QoS::AtLeastOnce, retained, payload)
+            .await
+        {
+            warn!("MQTT publish_bytes failed for {}: {:?}", topic, e);
+        }
     }
 
     // Topic helpers - Use cached topics for frequently-used sensors
