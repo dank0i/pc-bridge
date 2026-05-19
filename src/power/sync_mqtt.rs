@@ -26,6 +26,12 @@ pub struct SyncMqttConfig {
 }
 
 /// Parse a broker URL like "tcp://host:port" into (host, port, use_tls).
+///
+/// Schemes recognised: `tcp://`, `ssl://`, `ws://`, `wss://`.  Missing scheme
+/// defaults to non-TLS.  Missing port defaults to 1883 (non-TLS) / 8883 (TLS).
+///
+/// Handles IPv6 bracketed addresses (`[::1]:1883`).  Without the brackets
+/// the host:port split-on-`:` would misparse a bare IPv6 address.
 pub fn parse_broker_url(url: &str) -> (String, u16, bool) {
     let (without_scheme, use_tls) = if let Some(rest) = url.strip_prefix("ssl://") {
         (rest, true)
@@ -39,9 +45,24 @@ pub fn parse_broker_url(url: &str) -> (String, u16, bool) {
         (url, false)
     };
 
+    let default_port = if use_tls { 8883 } else { 1883 };
+
+    // IPv6 bracketed address - `[host]:port` or just `[host]`.
+    if let Some(after_open) = without_scheme.strip_prefix('[')
+        && let Some(close) = after_open.find(']')
+    {
+        let host = after_open[..close].to_string();
+        let rest = &after_open[close + 1..];
+        let port = rest
+            .strip_prefix(':')
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(default_port);
+        return (host, port, use_tls);
+    }
+
+    // Plain host[:port]
     let parts: Vec<&str> = without_scheme.split(':').collect();
     let host = parts.first().unwrap_or(&"localhost").to_string();
-    let default_port = if use_tls { 8883 } else { 1883 };
     let port = parts
         .get(1)
         .and_then(|p| p.parse().ok())
@@ -322,6 +343,22 @@ mod tests {
             parse_broker_url("wss://broker:9002"),
             ("broker".into(), 9002, true)
         );
+    }
+
+    #[test]
+    fn test_parse_broker_url_ipv6_bracketed() {
+        assert_eq!(
+            parse_broker_url("tcp://[::1]:1883"),
+            ("::1".into(), 1883, false)
+        );
+        assert_eq!(
+            parse_broker_url("ssl://[fe80::1]:8883"),
+            ("fe80::1".into(), 8883, true)
+        );
+        // No scheme + no port
+        assert_eq!(parse_broker_url("[::1]"), ("::1".into(), 1883, false));
+        // Bracketed + TLS scheme + missing port → TLS default
+        assert_eq!(parse_broker_url("ssl://[::1]"), ("::1".into(), 8883, true));
     }
 
     #[test]
