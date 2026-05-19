@@ -269,7 +269,10 @@ mod tests {
     fn test_exe_rejects_redirection_metacharacters() {
         // Pre-fix regression: these passed is_safe_path and produced shell
         // commands that redirected, expanded, or substituted on bash -c.
-        assert_eq!(expand_launcher_shortcut("exe:/bin/echo hi > /tmp/owned"), None);
+        assert_eq!(
+            expand_launcher_shortcut("exe:/bin/echo hi > /tmp/owned"),
+            None
+        );
         assert_eq!(expand_launcher_shortcut("exe:/bin/cat < /etc/passwd"), None);
         assert_eq!(expand_launcher_shortcut("exe:/bin/sh -c (true)"), None);
         assert_eq!(expand_launcher_shortcut("exe:/bin/echo {a,b}"), None);
