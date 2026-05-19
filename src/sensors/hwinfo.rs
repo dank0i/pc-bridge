@@ -452,7 +452,7 @@ mod win {
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Instant;
-    use tokio::time::{Duration, interval};
+    use tokio::time::{Duration, MissedTickBehavior, interval};
 
     const HEARTBEAT_SECS: u64 = 30;
     /// Diagnostic publish interval. We rebuild the payload on every snapshot
@@ -476,6 +476,7 @@ mod win {
             drop(config);
 
             let mut tick = interval(Duration::from_millis(500));
+            tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
             let mut shutdown_rx = self.state.shutdown_tx.subscribe();
             let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
 

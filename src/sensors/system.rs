@@ -9,7 +9,7 @@ use log::error;
 use log::{debug, info};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::time::{Duration, interval};
+use tokio::time::{Duration, MissedTickBehavior, interval};
 
 use crate::AppState;
 
@@ -60,6 +60,8 @@ impl SystemSensor {
         drop(config);
 
         let mut tick = interval(Duration::from_secs(interval_secs));
+
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
         let mut config_rx = self.state.config_generation.subscribe();
 
@@ -124,6 +126,7 @@ impl SystemSensor {
                     let new_interval = config.intervals.system_sensors.max(1);
                     drop(config);
                     tick = interval(Duration::from_secs(new_interval));
+                    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
                     debug!("System sensor: interval updated to {}s", new_interval);
                 }
                 _ = tick.tick() => {

@@ -6,7 +6,7 @@
 
 use log::{debug, info};
 use std::sync::Arc;
-use tokio::time::{Duration, interval};
+use tokio::time::{Duration, MissedTickBehavior, interval};
 
 use crate::AppState;
 
@@ -36,6 +36,7 @@ impl DiskSensor {
         // Use a longer interval for disk (changes slowly)
         let poll_secs = (interval_secs * 6).max(60);
         let mut tick = interval(Duration::from_secs(poll_secs));
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
         let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
         let mut prev_state = String::new();
