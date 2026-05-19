@@ -33,7 +33,7 @@ anyhow = "1"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 
 # File watching for config hot-reload
-notify = "6"
+notify = "7"
 
 # Logging
 log = "0.4"
