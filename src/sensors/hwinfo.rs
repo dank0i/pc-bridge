@@ -483,6 +483,13 @@ mod win {
             let mut client: Option<HwInfoClient> = None;
             let mut last_poll_time: Option<i64> = None;
             let mut last_published: HashMap<&'static str, (f64, Instant)> = HashMap::new();
+            // Last (min, max, avg, unit) actually published for each sensor.
+            // The state value changes every threshold-crossing, but attributes
+            // (especially min/max/avg) are slow-moving - skip the attribute
+            // publish when they're unchanged.  String unit comparison is cheap;
+            // unit changes are essentially never in steady-state.
+            let mut last_published_attrs: HashMap<&'static str, (f64, f64, f64, String)> =
+                HashMap::new();
 
             // Diagnostic state. We capture the latest snapshot outcome on
             // every tick that actually parsed something (or hit an error /
@@ -515,6 +522,7 @@ mod win {
                         // Force republish on reconnect: clear thresholds and
                         // re-publish availability so HA can pick it up.
                         last_published.clear();
+                        last_published_attrs.clear();
                         last_poll_time = None;
                         last_diagnostic_at = None;
                         let online = client.is_some();
@@ -609,7 +617,12 @@ mod win {
                                         ) {
                                             continue;
                                         }
-                                        self.publish_one(rule.key, reading).await;
+                                        self.publish_one(
+                                            rule.key,
+                                            reading,
+                                            &mut last_published_attrs,
+                                        )
+                                        .await;
                                         last_published.insert(rule.key, (reading.value, now));
                                     }
 
@@ -701,10 +714,27 @@ mod win {
             }
         }
 
-        async fn publish_one(&self, key: &'static str, reading: &Reading) {
+        async fn publish_one(
+            &self,
+            key: &'static str,
+            reading: &Reading,
+            last_attrs: &mut HashMap<&'static str, (f64, f64, f64, String)>,
+        ) {
             let decimals = decimals_for(key);
             let value_str = format!("{:.*}", decimals, reading.value);
             self.state.mqtt.publish_sensor(key, &value_str).await;
+
+            // Skip the attribute publish when min/max/avg/unit haven't moved.
+            // f64 exact comparison is fine here: HWiNFO returns the same
+            // bit-pattern when the underlying value didn't change.
+            if let Some((min, max, avg, unit)) = last_attrs.get(key)
+                && *min == reading.min
+                && *max == reading.max
+                && *avg == reading.avg
+                && unit == &reading.unit
+            {
+                return;
+            }
 
             let attributes = serde_json::json!({
                 "min": reading.min,
@@ -716,6 +746,10 @@ mod win {
                 .mqtt
                 .publish_sensor_attributes(key, &attributes)
                 .await;
+            last_attrs.insert(
+                key,
+                (reading.min, reading.max, reading.avg, reading.unit.clone()),
+            );
         }
     }
 }
