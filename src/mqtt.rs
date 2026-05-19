@@ -134,6 +134,27 @@ struct HADiscoveryPayload {
     device_class: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     unit_of_measurement: Option<String>,
+    /// Tells HA's recorder to populate long-term Statistics tables
+    /// (kept forever as 5min/hour/day mean/min/max). Auto-derived from
+    /// device_class + unit_of_measurement at registration time - see
+    /// `derive_state_class`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state_class: Option<String>,
+}
+
+/// Pick the right HA `state_class` for a numeric sensor so it ends up in the
+/// long-term Statistics tables. `None` means "not a measurement" - string
+/// enums, timestamps, and buttons skip this.
+fn derive_state_class(device_class: Option<&str>, unit: Option<&str>) -> Option<String> {
+    // Timestamps and string-enum sensors don't aggregate as means/min/max.
+    if matches!(device_class, Some("timestamp" | "enum")) {
+        return None;
+    }
+    // Heuristic: anything with a unit is a numeric measurement.
+    if unit.is_some() {
+        return Some("measurement".to_string());
+    }
+    None
 }
 
 /// One entry in HA's multi-source `availability` list.
@@ -505,6 +526,7 @@ impl MqttClient {
                 icon: Some("mdi:power-sleep".to_string()),
                 device_class: None,
                 unit_of_measurement: None,
+                state_class: None,
                 json_attributes_topic: None,
             };
             let topic = format!(
@@ -600,6 +622,7 @@ impl MqttClient {
                 icon: Some("mdi:steam".to_string()),
                 device_class: None,
                 unit_of_measurement: None,
+                state_class: None,
             };
             let topic = format!(
                 "{}/sensor/{}/steam_updating/config",
@@ -996,6 +1019,7 @@ impl MqttClient {
             icon: Some(icon.to_string()),
             device_class: None,
             unit_of_measurement: None,
+            state_class: None,
             json_attributes_topic: None,
         };
 
@@ -1069,6 +1093,7 @@ impl MqttClient {
             icon: Some(icon.to_string()),
             device_class: device_class.map(|s| s.to_string()),
             unit_of_measurement: unit.map(|s| s.to_string()),
+            state_class: derive_state_class(device_class, unit),
         };
 
         let topic = format!(
@@ -1114,6 +1139,7 @@ impl MqttClient {
             icon: Some(icon.to_string()),
             device_class: device_class.map(|s| s.to_string()),
             unit_of_measurement: unit.map(|s| s.to_string()),
+            state_class: derive_state_class(device_class, unit),
         };
 
         let topic = format!(
@@ -1186,6 +1212,7 @@ impl MqttClient {
                 icon: Some(icon),
                 device_class: None,
                 unit_of_measurement: sensor.unit.clone(),
+                state_class: derive_state_class(None, sensor.unit.as_deref()),
                 json_attributes_topic: None,
             };
 
@@ -1234,6 +1261,7 @@ impl MqttClient {
                 icon: Some(icon),
                 device_class: None,
                 unit_of_measurement: None,
+                state_class: None,
                 json_attributes_topic: None,
             };
 
@@ -1633,6 +1661,7 @@ mod tests {
             icon: Some("mdi:cpu-64-bit".to_string()),
             device_class: None,
             unit_of_measurement: Some("%".to_string()),
+            state_class: None,
         };
 
         let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
@@ -1671,6 +1700,7 @@ mod tests {
             icon: Some("mdi:power-sleep".to_string()),
             device_class: None,
             unit_of_measurement: None,
+            state_class: None,
         };
 
         let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
@@ -1710,6 +1740,7 @@ mod tests {
             icon: Some("mdi:gamepad-variant".to_string()),
             device_class: None,
             unit_of_measurement: None,
+            state_class: None,
         };
 
         let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
@@ -1740,6 +1771,7 @@ mod tests {
             icon: None,
             device_class: None,
             unit_of_measurement: None,
+            state_class: None,
         };
 
         let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
@@ -1772,6 +1804,7 @@ mod tests {
             icon: Some("mdi:power-sleep".to_string()),
             device_class: None,
             unit_of_measurement: None,
+            state_class: None,
         };
 
         let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
@@ -1808,6 +1841,7 @@ mod tests {
             icon: None,
             device_class: None,
             unit_of_measurement: None,
+            state_class: None,
         };
 
         let json_str = serde_json::to_string(&payload).unwrap();
@@ -1840,6 +1874,7 @@ mod tests {
             icon: Some("mdi:clock-outline".to_string()),
             device_class: Some("timestamp".to_string()),
             unit_of_measurement: None,
+            state_class: None,
         };
 
         let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
@@ -1877,6 +1912,7 @@ mod tests {
             icon: sensor.icon.clone(),
             device_class: None,
             unit_of_measurement: sensor.unit.clone(),
+            state_class: derive_state_class(None, sensor.unit.as_deref()),
             json_attributes_topic: None,
         };
 
@@ -1918,6 +1954,7 @@ mod tests {
             icon: cmd.icon.clone(),
             device_class: None,
             unit_of_measurement: None,
+            state_class: None,
             json_attributes_topic: None,
         };
 
@@ -2136,6 +2173,7 @@ mod tests {
             icon: Some("mdi:battery".to_string()),
             device_class: Some("battery".to_string()),
             unit_of_measurement: Some("%".to_string()),
+            state_class: None,
         };
 
         // Serialize → parse back → verify it's a valid JSON object
@@ -3150,5 +3188,80 @@ mod tests {
             let payload = String::from_utf8_lossy(&availability.unwrap().1).to_string();
             assert_eq!(payload, "online");
         }
+    }
+
+    // ===== derive_state_class =====
+
+    #[test]
+    fn test_derive_state_class_numeric_sensors_get_measurement() {
+        assert_eq!(
+            derive_state_class(None, Some("%")),
+            Some("measurement".to_string()),
+        );
+        assert_eq!(
+            derive_state_class(Some("power"), Some("W")),
+            Some("measurement".to_string()),
+        );
+        assert_eq!(
+            derive_state_class(Some("temperature"), Some("°C")),
+            Some("measurement".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_derive_state_class_string_sensors_skip() {
+        // Sleep state / display state / running games - no unit, no state_class
+        assert_eq!(derive_state_class(None, None), None);
+    }
+
+    #[test]
+    fn test_derive_state_class_timestamps_skip() {
+        // lastactive uses device_class=timestamp; the value isn't a measurement
+        assert_eq!(derive_state_class(Some("timestamp"), None), None);
+    }
+
+    #[test]
+    fn test_state_class_serialized_in_payload() {
+        let mqtt = test_client("dank0i-pc");
+        let payload = HADiscoveryPayload {
+            name: "GPU Power".to_string(),
+            unique_id: format!("{}_gpu_power", mqtt.device_id),
+            state_topic: Some(mqtt.sensor_topic("gpu_power")),
+            command_topic: None,
+            availability_topic: Some(mqtt.availability_topic()),
+            availability: None,
+            availability_mode: None,
+            json_attributes_topic: None,
+            device: Arc::clone(&mqtt.device),
+            icon: Some("mdi:flash".to_string()),
+            device_class: Some("power".to_string()),
+            unit_of_measurement: Some("W".to_string()),
+            state_class: Some("measurement".to_string()),
+        };
+        let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["state_class"], "measurement");
+    }
+
+    #[test]
+    fn test_state_class_omitted_when_none() {
+        let mqtt = test_client("dank0i-pc");
+        let payload = HADiscoveryPayload {
+            name: "Sleep State".to_string(),
+            unique_id: format!("{}_sleep_state", mqtt.device_id),
+            state_topic: Some(mqtt.sensor_topic("sleep_state")),
+            command_topic: None,
+            availability_topic: None,
+            availability: None,
+            availability_mode: None,
+            json_attributes_topic: None,
+            device: Arc::clone(&mqtt.device),
+            icon: Some("mdi:power-sleep".to_string()),
+            device_class: None,
+            unit_of_measurement: None,
+            state_class: None,
+        };
+        let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
+        // String enum sensors should NOT have state_class serialized
+        assert!(json.get("state_class").is_none());
     }
 }
