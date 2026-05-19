@@ -1625,4 +1625,51 @@ mod tests {
             CommandAction::NoOp("blocked")
         );
     }
+
+    // ===================================================================
+    // parse_vk_code tests - keybind virtual-key mapping
+    // ===================================================================
+
+    #[test]
+    fn test_parse_vk_code_function_keys() {
+        assert_eq!(parse_vk_code("f1"), Some(0x70));
+        assert_eq!(parse_vk_code("f12"), Some(0x7B));
+    }
+
+    #[test]
+    fn test_parse_vk_code_aliases() {
+        assert_eq!(parse_vk_code("escape"), Some(0x1B));
+        assert_eq!(parse_vk_code("esc"), Some(0x1B));
+        assert_eq!(parse_vk_code("enter"), Some(0x0D));
+        assert_eq!(parse_vk_code("return"), Some(0x0D));
+        assert_eq!(parse_vk_code("delete"), Some(0x2E));
+        assert_eq!(parse_vk_code("del"), Some(0x2E));
+        assert_eq!(parse_vk_code("pageup"), Some(0x21));
+        assert_eq!(parse_vk_code("pgup"), Some(0x21));
+    }
+
+    #[test]
+    fn test_parse_vk_code_arrows() {
+        assert_eq!(parse_vk_code("up"), Some(0x26));
+        assert_eq!(parse_vk_code("down"), Some(0x28));
+        assert_eq!(parse_vk_code("left"), Some(0x25));
+        assert_eq!(parse_vk_code("right"), Some(0x27));
+    }
+
+    #[test]
+    fn test_parse_vk_code_single_letter_uppercases() {
+        // VK_A = 0x41, VK_Z = 0x5A
+        assert_eq!(parse_vk_code("a"), Some(0x41));
+        assert_eq!(parse_vk_code("z"), Some(0x5A));
+        // Already-uppercase input shouldn't be re-uppercased
+        assert_eq!(parse_vk_code("A"), Some(0x41));
+    }
+
+    #[test]
+    fn test_parse_vk_code_unknown_returns_none() {
+        assert_eq!(parse_vk_code(""), None);
+        assert_eq!(parse_vk_code("not-a-key"), None);
+        assert_eq!(parse_vk_code("ctrl"), None); // modifier, not handled here
+        assert_eq!(parse_vk_code("1"), None); // digit not mapped
+    }
 }

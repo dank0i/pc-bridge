@@ -942,3 +942,87 @@ fn start_battery_monitor_linux(
         })
         .ok();
 }
+
+// ============================================================================
+// Tests for pure helpers - system-call paths are platform-gated and not unit
+// tested here; the parsers and formatters below are platform-agnostic.
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_title_short_returns_unchanged() {
+        let s = "Window Title".to_string();
+        assert_eq!(truncate_title(s.clone()), s);
+    }
+
+    #[test]
+    fn test_truncate_title_at_boundary_unchanged() {
+        let s = "x".repeat(256);
+        assert_eq!(truncate_title(s.clone()), s);
+    }
+
+    #[test]
+    fn test_truncate_title_too_long_appends_ellipsis() {
+        let s = "x".repeat(300);
+        let out = truncate_title(s);
+        assert!(out.ends_with('\u{2026}'));
+        // Truncates at byte 253 and appends \u{2026} (3 bytes UTF-8) = 256
+        assert_eq!(out.len(), 256);
+    }
+
+    #[test]
+    fn test_truncate_title_preserves_utf8_boundary() {
+        // Construct a string where byte 253 would split a multi-byte char.
+        // Prefix of 252 ASCII bytes + 4-byte UTF-8 emoji (16 bytes worth).
+        let mut s = "a".repeat(252);
+        s.push('🦀'); // 4-byte UTF-8
+        s.push_str(&"b".repeat(50));
+        assert!(s.len() > 256);
+        let out = truncate_title(s);
+        // Output must still be valid UTF-8 (no panic during slicing).
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+        assert!(out.ends_with('\u{2026}'));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_parse_meminfo_value_kb_unit() {
+        // /proc/meminfo lines look like: "MemTotal:       16384100 kB"
+        assert_eq!(parse_meminfo_value("MemTotal:       16384100 kB"), 16384100);
+        assert_eq!(parse_meminfo_value("MemAvailable:    8192000 kB"), 8192000);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_parse_meminfo_value_malformed_returns_zero() {
+        assert_eq!(parse_meminfo_value(""), 0);
+        assert_eq!(parse_meminfo_value("MemTotal:"), 0);
+        assert_eq!(parse_meminfo_value("not-a-meminfo-line"), 0);
+        assert_eq!(parse_meminfo_value("MemTotal: not-a-number kB"), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_filetime_to_u64_combines_high_and_low() {
+        use windows::Win32::Foundation::FILETIME;
+        let ft = FILETIME {
+            dwLowDateTime: 0x12345678,
+            dwHighDateTime: 0xAABBCCDD,
+        };
+        assert_eq!(filetime_to_u64(ft), 0xAABBCCDD_12345678);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_filetime_to_u64_zero() {
+        use windows::Win32::Foundation::FILETIME;
+        let ft = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        assert_eq!(filetime_to_u64(ft), 0);
+    }
+}
