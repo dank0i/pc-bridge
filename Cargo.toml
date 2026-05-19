@@ -60,7 +60,7 @@ libc = "0.2"
 
 # Windows registry
 [target.'cfg(windows)'.dependencies.winreg]
-version = "0.55"
+version = "0.56"
 
 # WMI for event-driven process monitoring
 [target.'cfg(windows)'.dependencies.wmi]
@@ -101,14 +101,11 @@ windows = { version = "0.58", features = [
     "UI_Notifications",
 ] }
 windows-core = "0.58"
-windows-service = "0.7"
 base64 = "0.22"
 
 [dev-dependencies]
 # Testing utilities
 tempfile = "3"
-tokio-test = "0.4"
-pretty_assertions = "1"
 # Integration tests need TCP for in-process MQTT broker
 tokio = { version = "1", features = ["net", "io-util"] }
 
