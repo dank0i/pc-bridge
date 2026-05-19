@@ -66,10 +66,20 @@ libc = "0.2"
 version = "0.56"
 
 # WMI for event-driven process monitoring
+# NOTE: pinned at 0.14 until windows 0.62 bump is done together - wmi 0.18
+# requires WMIConnection::new() with zero args and removes COMLibrary, which
+# means coordinated API changes across process_watcher.rs.
 [target.'cfg(windows)'.dependencies.wmi]
 version = "0.14"
 
 # Windows-specific dependencies
+# NOTE: bump to 0.62 deferred - needs Windows-host runtime testing.  Surface
+# breakage spans audio.rs (IMMDevice::Activate signature), credential.rs
+# (LocalFree HLOCAL change), power/{display,events}.rs (PostMessageW now
+# Option<HWND>), sensors/gpu.rs (PDH_HQUERY newtype across all PDH calls),
+# plus the #[implement] macro moving to windows-implement.  Compiles via
+# cross-compile is not enough - COM event delivery, PDH counter validity,
+# and WMI event subscriptions all need real Windows verification.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "implement",
