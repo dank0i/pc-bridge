@@ -533,10 +533,7 @@ impl MqttClient {
                 state_class: None,
                 json_attributes_topic: None,
             };
-            let topic = format!(
-                "{}/sensor/{}/sleep_state/config",
-                DISCOVERY_PREFIX, self.device_name
-            );
+            let topic = self.config_topic("sensor", "sleep_state");
             let Ok(json) = serde_json::to_string(&payload) else {
                 error!("Failed to serialize HA discovery payload");
                 return;
@@ -628,10 +625,7 @@ impl MqttClient {
                 unit_of_measurement: None,
                 state_class: None,
             };
-            let topic = format!(
-                "{}/sensor/{}/steam_updating/config",
-                DISCOVERY_PREFIX, self.device_name
-            );
+            let topic = self.config_topic("sensor", "steam_updating");
             let Ok(json) = serde_json::to_string(&payload) else {
                 error!("Failed to serialize HA discovery payload");
                 return;
@@ -1027,10 +1021,7 @@ impl MqttClient {
             json_attributes_topic: None,
         };
 
-        let topic = format!(
-            "{}/button/{}/{}/config",
-            DISCOVERY_PREFIX, self.device_name, name
-        );
+        let topic = self.config_topic("button", name);
         let Ok(json) = serde_json::to_string(&payload) else {
             error!("Failed to serialize HA discovery payload");
             return;
@@ -1100,10 +1091,7 @@ impl MqttClient {
             state_class: derive_state_class(device_class, unit),
         };
 
-        let topic = format!(
-            "{}/sensor/{}/{}/config",
-            DISCOVERY_PREFIX, self.device_name, name
-        );
+        let topic = self.config_topic("sensor", name);
         let Ok(json) = serde_json::to_string(&payload) else {
             error!("Failed to serialize HWiNFO HA discovery payload");
             return;
@@ -1146,10 +1134,7 @@ impl MqttClient {
             state_class: derive_state_class(device_class, unit),
         };
 
-        let topic = format!(
-            "{}/sensor/{}/{}/config",
-            DISCOVERY_PREFIX, self.device_name, name
-        );
+        let topic = self.config_topic("sensor", name);
         let Ok(json) = serde_json::to_string(&payload) else {
             error!("Failed to serialize HA discovery payload");
             return;
@@ -1181,6 +1166,8 @@ impl MqttClient {
             "qos": 1
         });
 
+        // notify uses 3-segment device-level config topic, not the 4-segment
+        // per-entity shape - single notify service per device.
         let topic = format!("{}/notify/{}/config", DISCOVERY_PREFIX, self.device_name);
         let Ok(json) = serde_json::to_string(&payload) else {
             error!("Failed to serialize HA discovery payload");
@@ -1220,10 +1207,7 @@ impl MqttClient {
                 json_attributes_topic: None,
             };
 
-            let topic = format!(
-                "{}/sensor/{}/{}/config",
-                DISCOVERY_PREFIX, self.device_name, topic_name
-            );
+            let topic = self.config_topic("sensor", &topic_name);
             let Ok(json) = serde_json::to_string(&payload) else {
                 error!("Failed to serialize HA discovery payload");
                 return;
@@ -1269,10 +1253,7 @@ impl MqttClient {
                 json_attributes_topic: None,
             };
 
-            let topic = format!(
-                "{}/button/{}/{}/config",
-                DISCOVERY_PREFIX, self.device_name, cmd.name
-            );
+            let topic = self.config_topic("button", &cmd.name);
             let Ok(json) = serde_json::to_string(&payload) else {
                 error!("Failed to serialize HA discovery payload");
                 return;
@@ -1496,6 +1477,17 @@ impl MqttClient {
         format!(
             "{}/button/{}/{}/action",
             DISCOVERY_PREFIX, self.device_name, name
+        )
+    }
+
+    /// Discovery config topic.  Used at registration time for every entity.
+    ///
+    /// `component` is the HA MQTT discovery component (`sensor`, `button`,
+    /// `notify`, etc.).  `name` is the entity's discovery name.
+    fn config_topic(&self, component: &str, name: &str) -> String {
+        format!(
+            "{}/{}/{}/{}/config",
+            DISCOVERY_PREFIX, component, self.device_name, name
         )
     }
 }
