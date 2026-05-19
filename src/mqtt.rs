@@ -142,6 +142,25 @@ struct HADiscoveryPayload {
     state_class: Option<String>,
 }
 
+/// Match an inbound MQTT topic against the cached button and notify prefixes
+/// and return the command name (or "notification") if it routes.  Single
+/// source of truth shared by the event loop and unit tests.
+fn parse_incoming_topic<'a>(
+    topic: &'a str,
+    button_prefix: &str,
+    notify_topic: &str,
+) -> Option<&'a str> {
+    if let Some(rest) = topic.strip_prefix(button_prefix)
+        && let Some(cmd) = rest.strip_suffix("/action")
+    {
+        return Some(cmd);
+    }
+    if topic == notify_topic {
+        return Some("notification");
+    }
+    None
+}
+
 /// Pick the right HA `state_class` for a numeric sensor so it ends up in the
 /// long-term Statistics tables. `None` means "not a measurement" - string
 /// enums, timestamps, and buttons skip this.
@@ -301,15 +320,14 @@ impl MqttClient {
                             String::from_utf8_lossy(&publish.payload)
                         );
 
-                        // Extract command name using references (no topic clone)
-                        let cmd_name =
-                            if let Some(rest) = publish.topic.strip_prefix(&button_prefix) {
-                                rest.strip_suffix("/action").map(|s| s.to_string())
-                            } else if publish.topic == notify_topic_match {
-                                Some("notification".to_string())
-                            } else {
-                                None
-                            };
+                        // Extract command name using the shared parser so a
+                        // change here can't drift from the test-only path.
+                        let cmd_name = parse_incoming_topic(
+                            &publish.topic,
+                            &button_prefix,
+                            &notify_topic_match,
+                        )
+                        .map(str::to_owned);
 
                         if let Some(cmd_name) = cmd_name {
                             // Zero-copy when payload is valid UTF-8 (common case)
@@ -441,22 +459,14 @@ impl MqttClient {
         Ok(crate::power::sync_mqtt::parse_broker_url(url))
     }
 
+    /// Test-only thin shim that builds the prefixes the event-loop already
+    /// caches, then calls `parse_incoming_topic`.  Keeps tests honest: a
+    /// production-routing regression now fails the unit test too.
     #[cfg(test)]
     fn extract_command_name(topic: &str, device_name: &str) -> Option<String> {
-        // Topic format: homeassistant/button/{device_name}/{command}/action
-        let prefix = format!("{}/button/{}/", DISCOVERY_PREFIX, device_name);
-        if topic.starts_with(&prefix) && topic.ends_with("/action") {
-            let rest = topic.strip_prefix(&prefix)?.strip_suffix("/action")?;
-            return Some(rest.to_string());
-        }
-
-        // Check notification topic: pc-bridge/notifications/{device_name}
-        let notify_prefix = format!("pc-bridge/notifications/{}", device_name);
-        if topic == notify_prefix {
-            return Some("notification".to_string());
-        }
-
-        None
+        let button_prefix = format!("{}/button/{}/", DISCOVERY_PREFIX, device_name);
+        let notify_topic = format!("pc-bridge/notifications/{}", device_name);
+        parse_incoming_topic(topic, &button_prefix, &notify_topic).map(|s| s.to_string())
     }
 
     async fn register_discovery(&self, config: &Config) {
