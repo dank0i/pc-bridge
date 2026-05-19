@@ -435,29 +435,10 @@ impl MqttClient {
         Ok((mqtt, cmd_rx))
     }
 
+    /// Forwards to the canonical implementation in `power::sync_mqtt` so the
+    /// async client and the sync sleep publisher can't drift out of sync.
     fn parse_broker_url(url: &str) -> anyhow::Result<(String, u16, bool)> {
-        // Determine if TLS is requested from the scheme
-        let (without_scheme, use_tls) = if let Some(rest) = url.strip_prefix("ssl://") {
-            (rest, true)
-        } else if let Some(rest) = url.strip_prefix("wss://") {
-            (rest, true)
-        } else if let Some(rest) = url.strip_prefix("tcp://") {
-            (rest, false)
-        } else if let Some(rest) = url.strip_prefix("ws://") {
-            (rest, false)
-        } else {
-            (url, false)
-        };
-
-        let parts: Vec<&str> = without_scheme.split(':').collect();
-        let host = parts.first().unwrap_or(&"localhost").to_string();
-        let default_port = if use_tls { 8883 } else { 1883 };
-        let port = parts
-            .get(1)
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(default_port);
-
-        Ok((host, port, use_tls))
+        Ok(crate::power::sync_mqtt::parse_broker_url(url))
     }
 
     #[cfg(test)]
