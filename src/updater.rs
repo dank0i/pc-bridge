@@ -473,10 +473,10 @@ mod tests {
 
     // ===== Update channel logic =====
 
-    #[test]
-    fn test_current_version_not_empty() {
-        assert!(!CURRENT_VERSION.is_empty());
-    }
+    // (test_current_version_not_empty removed - env!("CARGO_PKG_VERSION") is
+    // a non-empty const, so the assertion was a tautology that clippy
+    // correctly flagged. The semver shape test below already covers what
+    // matters.)
 
     #[test]
     fn test_current_version_is_valid_semver() {

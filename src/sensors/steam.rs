@@ -630,7 +630,7 @@ mod tests {
     #[test]
     fn test_steam_updating_state_string_when_updating() {
         // When updating_games is non-empty, the state string is "on"
-        let games = vec![make_game(STATE_UPDATE_RUNNING)];
+        let games = [make_game(STATE_UPDATE_RUNNING)];
         let is_updating = !games.is_empty();
         let state_str = if is_updating { "on" } else { "off" };
         assert_eq!(state_str, "on");
@@ -648,7 +648,7 @@ mod tests {
     #[test]
     fn test_steam_updating_attributes_json_with_games() {
         // Exact JSON published to homeassistant/sensor/{device}/steam_updating/attributes
-        let games = vec![
+        let games = [
             GameUpdateState {
                 app_id: "730".to_string(),
                 name: "Counter-Strike 2".to_string(),
