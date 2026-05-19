@@ -1,0 +1,12 @@
+# Clippy configuration for pc-bridge
+# Lint levels are configured in Cargo.toml [lints] section
+# This file is for clippy-specific thresholds
+
+# Function complexity threshold (default: 25)
+cognitive-complexity-threshold = 30
+
+# Struct fields threshold for "too many arguments" lint
+too-many-arguments-threshold = 8
+
+# Allow these crates to have multiple versions (handled by cargo-deny)
+allowed-duplicate-crates = ["syn", "windows-sys"]

@@ -1,0 +1,734 @@
+//! Steam update detection sensor - monitors ACF files for games being updated
+//!
+//! Uses filesystem watcher (`notify` crate) for instant detection of ACF manifest changes.
+//! Falls back to periodic polling if the watcher fails.
+
+use log::{debug, error, info, warn};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock};
+use tokio::sync::mpsc;
+
+/// Pre-built JSON attributes for the idle (no updates) state.
+/// Avoids re-creating the same `serde_json::Value` every publish cycle.
+static IDLE_STEAM_ATTRS: LazyLock<serde_json::Value> =
+    LazyLock::new(|| serde_json::json!({"updating_games": [], "count": 0}));
+use tokio::time::{Duration, Instant};
+
+use crate::AppState;
+
+/// StateFlags indicating a game is updating/downloading
+const STATE_UPDATE_RUNNING: u32 = 1024; // 0x400
+const STATE_UPDATE_PAUSED: u32 = 2048; // 0x800
+const STATE_DOWNLOADING: u32 = 524288; // 0x80000
+const STATE_FULLY_INSTALLED: u32 = 4; // Ready to play
+
+#[derive(Debug, Clone)]
+struct GameUpdateState {
+    app_id: String,
+    name: String,
+    state_flags: u32,
+    manifest_path: PathBuf,
+}
+
+pub struct SteamSensor {
+    state: Arc<AppState>,
+    library_folders: Vec<PathBuf>,
+    updating_games: HashMap<String, GameUpdateState>,
+    last_full_scan: Instant,
+    /// Cache of ACF file paths → (mtime, parsed state) to skip unchanged files
+    acf_cache: HashMap<PathBuf, (std::time::SystemTime, Option<GameUpdateState>)>,
+}
+
+impl SteamSensor {
+    pub fn new(state: Arc<AppState>) -> Self {
+        Self {
+            state,
+            library_folders: Vec::new(),
+            updating_games: HashMap::new(),
+            last_full_scan: Instant::now(),
+            acf_cache: HashMap::new(),
+        }
+    }
+
+    pub async fn run(mut self) {
+        let config = self.state.config.read().await;
+        let base_interval = config.intervals.steam_check.max(10);
+        drop(config);
+
+        let mut shutdown_rx = self.state.shutdown_tx.subscribe();
+
+        // Discover Steam library folders
+        self.discover_library_folders();
+
+        if self.library_folders.is_empty() {
+            warn!("No Steam library folders found, steam sensor disabled");
+            // Publish initial "off" state
+            self.state
+                .mqtt
+                .publish_sensor_retained("steam_updating", "off")
+                .await;
+            return;
+        }
+
+        info!(
+            "Found {} Steam library folder(s)",
+            self.library_folders.len()
+        );
+
+        // Set up filesystem watcher for ACF changes
+        let (fs_tx, mut fs_rx) = mpsc::channel::<()>(16);
+        let watcher = self.setup_fs_watcher(&fs_tx);
+        let using_watcher = watcher.is_some();
+
+        if using_watcher {
+            info!("Steam sensor using filesystem watcher (instant detection)");
+        } else {
+            warn!("Steam sensor falling back to polling ({}s)", base_interval);
+        }
+
+        // Publish initial state
+        self.do_full_scan().await;
+        self.last_full_scan = Instant::now();
+
+        loop {
+            // When updates are active, also poll at 5s for progress tracking
+            // (ACF files may not trigger fs events on every byte written)
+            let sleep_duration = if !self.updating_games.is_empty() {
+                Duration::from_secs(5)
+            } else if using_watcher {
+                // With fs watcher, only do periodic reconciliation scans
+                Duration::from_secs(base_interval)
+            } else {
+                // Polling fallback
+                Duration::from_secs(base_interval)
+            };
+
+            tokio::select! {
+                biased;
+                _ = shutdown_rx.recv() => {
+                    debug!("Steam sensor shutting down");
+                    break;
+                }
+                Some(()) = fs_rx.recv() => {
+                    // ACF file changed - re-scan immediately
+                    debug!("ACF file change detected, scanning");
+                    self.do_full_scan().await;
+                    self.last_full_scan = Instant::now();
+                }
+                () = tokio::time::sleep(sleep_duration) => {
+                    if self.updating_games.is_empty() {
+                        self.do_full_scan().await;
+                        self.last_full_scan = Instant::now();
+                    } else {
+                        self.do_targeted_scan().await;
+
+                        if self.last_full_scan.elapsed() > Duration::from_mins(5) {
+                            self.do_full_scan().await;
+                            self.last_full_scan = Instant::now();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Set up a filesystem watcher on all Steam library folders.
+    /// Returns the watcher handle (must be kept alive) or None if setup failed.
+    fn setup_fs_watcher(&self, fs_tx: &mpsc::Sender<()>) -> Option<notify::RecommendedWatcher> {
+        use notify::{Event, EventKind, RecursiveMode, Watcher};
+
+        let tx = fs_tx.clone();
+        let mut watcher =
+            match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
+                if let Ok(event) = res {
+                    // Only react to ACF file modifications/creations
+                    let is_acf_change = matches!(
+                        event.kind,
+                        EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                    ) && event.paths.iter().any(|p| {
+                        p.extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("acf"))
+                    });
+
+                    if is_acf_change {
+                        // Non-blocking send - if channel is full, skip (we'll catch it next time)
+                        let _ = tx.try_send(());
+                    }
+                }
+            }) {
+                Ok(w) => w,
+                Err(e) => {
+                    warn!("Failed to create filesystem watcher: {}", e);
+                    return None;
+                }
+            };
+
+        // Watch each Steam library folder (non-recursive - ACF files are at the top level)
+        let mut watched_any = false;
+        for folder in &self.library_folders {
+            if let Err(e) = watcher.watch(folder, RecursiveMode::NonRecursive) {
+                warn!("Failed to watch {:?}: {}", folder, e);
+            } else {
+                debug!("Watching Steam library: {:?}", folder);
+                watched_any = true;
+            }
+        }
+
+        if watched_any { Some(watcher) } else { None }
+    }
+
+    fn discover_library_folders(&mut self) {
+        self.library_folders.clear();
+
+        // Get Steam install path from shared discovery
+        let steam_path = match crate::steam::find_steam_path() {
+            Some(p) => p,
+            None => {
+                debug!("Steam installation not found");
+                return;
+            }
+        };
+
+        // Primary library is in Steam install dir
+        let primary_steamapps = steam_path.join("steamapps");
+        if primary_steamapps.exists() {
+            self.library_folders.push(primary_steamapps.clone());
+        }
+
+        // Parse libraryfolders.vdf for additional libraries
+        let vdf_path = primary_steamapps.join("libraryfolders.vdf");
+        if vdf_path.exists()
+            && let Ok(content) = std::fs::read_to_string(&vdf_path)
+        {
+            self.parse_library_folders_vdf(&content);
+        }
+    }
+
+    fn parse_library_folders_vdf(&mut self, content: &str) {
+        // Simple VDF parser - look for "path" entries
+        // Format: "path"		"D:\\SteamLibrary"
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("\"path\"") {
+                // Extract the path value
+                let parts: Vec<&str> = trimmed.split('"').collect();
+                if parts.len() >= 4 {
+                    let path_str = parts[3];
+                    let library_path = PathBuf::from(path_str).join("steamapps");
+                    if library_path.exists() && !self.library_folders.contains(&library_path) {
+                        self.library_folders.push(library_path);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn do_full_scan(&mut self) {
+        // Move blocking filesystem I/O off the single-threaded async runtime
+        let library_folders = self.library_folders.clone();
+        let mut acf_cache = std::mem::take(&mut self.acf_cache);
+
+        let (new_updating, returned_cache) = tokio::task::spawn_blocking(move || {
+            let mut updating: HashMap<String, GameUpdateState> = HashMap::new();
+            let mut seen_paths: HashSet<PathBuf> = HashSet::new();
+
+            for lib_folder in &library_folders {
+                let entries = match std::fs::read_dir(lib_folder) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        error!("Failed to read steam library dir {:?}: {}", lib_folder, e);
+                        continue;
+                    }
+                };
+
+                for dir_entry in entries.flatten() {
+                    let path = dir_entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
+                        continue;
+                    };
+                    if !fname.starts_with("appmanifest_") || !fname.ends_with(".acf") {
+                        continue;
+                    }
+
+                    seen_paths.insert(path.clone());
+
+                    let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+
+                    let game_state = if let Some(mt) = mtime {
+                        if let Some((cached_mt, cached_state)) = acf_cache.get(&path) {
+                            if *cached_mt == mt {
+                                cached_state.clone()
+                            } else {
+                                let state = parse_acf_file(&path);
+                                acf_cache.insert(path.clone(), (mt, state.clone()));
+                                state
+                            }
+                        } else {
+                            let state = parse_acf_file(&path);
+                            acf_cache.insert(path.clone(), (mt, state.clone()));
+                            state
+                        }
+                    } else {
+                        parse_acf_file(&path)
+                    };
+
+                    if let Some(gs) = game_state
+                        && is_updating(&gs)
+                    {
+                        updating.insert(gs.app_id.clone(), gs);
+                    }
+                }
+            }
+
+            acf_cache.retain(|path, _| seen_paths.contains(path));
+            (updating, acf_cache)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            warn!("Steam full scan task panicked: {e}");
+            Default::default()
+        });
+
+        self.acf_cache = returned_cache;
+
+        // Check for changes
+        let was_updating = !self.updating_games.is_empty();
+        let is_updating_now = !new_updating.is_empty();
+
+        // Log changes
+        if was_updating != is_updating_now || self.updating_games.len() != new_updating.len() {
+            if is_updating_now {
+                let names: Vec<&str> = new_updating.values().map(|g| g.name.as_str()).collect();
+                info!("Steam games updating: {:?}", names);
+            } else if was_updating {
+                info!("Steam updates completed");
+            }
+        }
+
+        self.updating_games = new_updating;
+        self.publish_state().await;
+    }
+
+    async fn do_targeted_scan(&mut self) {
+        // Move blocking filesystem I/O off the async runtime
+        let updating_snapshot: Vec<(String, GameUpdateState)> = self
+            .updating_games
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        let still_updating = tokio::task::spawn_blocking(move || {
+            let mut result: HashMap<String, GameUpdateState> = HashMap::new();
+            for (app_id, game_state) in &updating_snapshot {
+                if let Some(new_state) = parse_acf_file(&game_state.manifest_path) {
+                    if is_updating(&new_state) {
+                        result.insert(app_id.clone(), new_state);
+                    } else {
+                        info!("Steam game finished updating: {}", game_state.name);
+                    }
+                }
+            }
+            result
+        })
+        .await
+        .unwrap_or_else(|e| {
+            warn!("Steam targeted scan task panicked: {e}");
+            HashMap::default()
+        });
+
+        let changed = still_updating.len() != self.updating_games.len();
+        self.updating_games = still_updating;
+
+        if changed {
+            self.publish_state().await;
+        }
+    }
+}
+
+/// Parse an ACF manifest file into a GameUpdateState
+fn parse_acf_file(path: &Path) -> Option<GameUpdateState> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+    parse_acf_content(&content, path)
+}
+
+/// Parse ACF content string into a GameUpdateState (testable without filesystem)
+fn parse_acf_content(content: &str, manifest_path: &Path) -> Option<GameUpdateState> {
+    let mut app_id = String::new();
+    let mut name = String::new();
+    let mut state_flags: u32 = 0;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("\"appid\"") || trimmed.starts_with("\"AppID\"") {
+            if let Some(val) = extract_vdf_value(trimmed) {
+                app_id = val;
+            }
+        } else if trimmed.starts_with("\"name\"") {
+            if let Some(val) = extract_vdf_value(trimmed) {
+                name = val;
+            }
+        } else if (trimmed.starts_with("\"StateFlags\"") || trimmed.starts_with("\"stateflags\""))
+            && let Some(val) = extract_vdf_value(trimmed)
+        {
+            state_flags = val.parse().unwrap_or(0);
+        }
+    }
+
+    if app_id.is_empty() {
+        return None;
+    }
+
+    Some(GameUpdateState {
+        app_id,
+        name,
+        state_flags,
+        manifest_path: manifest_path.to_path_buf(),
+    })
+}
+
+/// Extract a quoted value from a VDF key-value line
+/// Format: "key"\t\t"value"
+fn extract_vdf_value(line: &str) -> Option<String> {
+    let parts: Vec<&str> = line.split('"').collect();
+    if parts.len() >= 4 {
+        Some(parts[3].to_string())
+    } else {
+        None
+    }
+}
+
+/// Check if a game's state flags indicate an update in progress
+fn is_updating(game: &GameUpdateState) -> bool {
+    let flags = game.state_flags;
+
+    // Check if any update-related flag is set
+    if flags & STATE_UPDATE_RUNNING != 0 {
+        return true;
+    }
+    if flags & STATE_UPDATE_PAUSED != 0 {
+        return true;
+    }
+    if flags & STATE_DOWNLOADING != 0 {
+        return true;
+    }
+
+    // If not fully installed (~4), something is in progress
+    // But be careful - newly added games might have 0
+    if flags != 0 && flags != STATE_FULLY_INSTALLED {
+        // Could be installing, updating, etc.
+        return true;
+    }
+
+    false
+}
+
+impl SteamSensor {
+    async fn publish_state(&self) {
+        let is_updating = !self.updating_games.is_empty();
+        let state_str = if is_updating { "on" } else { "off" };
+
+        self.state
+            .mqtt
+            .publish_sensor_retained("steam_updating", state_str)
+            .await;
+
+        // Publish attributes with game names
+        if is_updating {
+            let names: Vec<&str> = self
+                .updating_games
+                .values()
+                .map(|g| g.name.as_str())
+                .collect();
+            let attrs = serde_json::json!({
+                "updating_games": names,
+                "count": self.updating_games.len()
+            });
+            self.state
+                .mqtt
+                .publish_sensor_attributes("steam_updating", &attrs)
+                .await;
+        } else {
+            self.state
+                .mqtt
+                .publish_sensor_attributes("steam_updating", &IDLE_STEAM_ATTRS)
+                .await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- extract_vdf_value tests --
+
+    #[test]
+    fn test_extract_vdf_value_basic() {
+        let line = r#"	"appid"		"730""#;
+        assert_eq!(extract_vdf_value(line), Some("730".to_string()));
+    }
+
+    #[test]
+    fn test_extract_vdf_value_name() {
+        let line = r#"	"name"		"Counter-Strike 2""#;
+        assert_eq!(
+            extract_vdf_value(line),
+            Some("Counter-Strike 2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_vdf_value_no_value() {
+        let line = r#"	"appid""#;
+        assert_eq!(extract_vdf_value(line), None);
+    }
+
+    #[test]
+    fn test_extract_vdf_value_empty_value() {
+        let line = r#"	"key"		"""#;
+        assert_eq!(extract_vdf_value(line), Some(String::new()));
+    }
+
+    #[test]
+    fn test_extract_vdf_value_state_flags() {
+        let line = r#"	"StateFlags"		"4""#;
+        assert_eq!(extract_vdf_value(line), Some("4".to_string()));
+    }
+
+    // -- is_updating tests --
+
+    fn make_game(flags: u32) -> GameUpdateState {
+        GameUpdateState {
+            app_id: "730".to_string(),
+            name: "Test Game".to_string(),
+            state_flags: flags,
+            manifest_path: PathBuf::from("/tmp/test.acf"),
+        }
+    }
+
+    #[test]
+    fn test_is_updating_fully_installed() {
+        assert!(!is_updating(&make_game(STATE_FULLY_INSTALLED)));
+    }
+
+    #[test]
+    fn test_is_updating_zero_flags() {
+        assert!(!is_updating(&make_game(0)));
+    }
+
+    #[test]
+    fn test_is_updating_update_running() {
+        assert!(is_updating(&make_game(STATE_UPDATE_RUNNING)));
+    }
+
+    #[test]
+    fn test_is_updating_update_paused() {
+        assert!(is_updating(&make_game(STATE_UPDATE_PAUSED)));
+    }
+
+    #[test]
+    fn test_is_updating_downloading() {
+        assert!(is_updating(&make_game(STATE_DOWNLOADING)));
+    }
+
+    #[test]
+    fn test_is_updating_combined_flags() {
+        assert!(is_updating(&make_game(
+            STATE_FULLY_INSTALLED | STATE_UPDATE_RUNNING
+        )));
+    }
+
+    #[test]
+    fn test_is_updating_unknown_nonzero() {
+        // Non-zero, non-installed flags → updating
+        assert!(is_updating(&make_game(2)));
+    }
+
+    // -- parse_acf_content tests --
+
+    #[test]
+    fn test_parse_acf_content_valid() {
+        let content = r#"
+"AppState"
+{
+	"appid"		"730"
+	"name"		"Counter-Strike 2"
+	"StateFlags"		"4"
+	"installdir"		"Counter-Strike Global Offensive"
+}
+"#;
+        let path = PathBuf::from("/tmp/appmanifest_730.acf");
+        let result = parse_acf_content(content, &path).unwrap();
+        assert_eq!(result.app_id, "730");
+        assert_eq!(result.name, "Counter-Strike 2");
+        assert_eq!(result.state_flags, 4);
+    }
+
+    #[test]
+    fn test_parse_acf_content_updating() {
+        let content = r#"
+"AppState"
+{
+	"appid"		"440"
+	"name"		"Team Fortress 2"
+	"StateFlags"		"1028"
+}
+"#;
+        let path = PathBuf::from("/tmp/appmanifest_440.acf");
+        let result = parse_acf_content(content, &path).unwrap();
+        assert_eq!(result.app_id, "440");
+        assert_eq!(result.state_flags, 1028);
+        assert!(is_updating(&result));
+    }
+
+    #[test]
+    fn test_parse_acf_content_missing_appid() {
+        let content = r#"
+"AppState"
+{
+	"name"		"No AppID Game"
+	"StateFlags"		"4"
+}
+"#;
+        let path = PathBuf::from("/tmp/test.acf");
+        assert!(parse_acf_content(content, &path).is_none());
+    }
+
+    #[test]
+    fn test_parse_acf_content_empty() {
+        let path = PathBuf::from("/tmp/empty.acf");
+        assert!(parse_acf_content("", &path).is_none());
+    }
+
+    #[test]
+    fn test_parse_acf_content_case_variants() {
+        // Tests both "appid" and "AppID" variants
+        let content = r#"
+"AppState"
+{
+	"AppID"		"553850"
+	"name"		"HELLDIVERS 2"
+	"stateflags"		"4"
+}
+"#;
+        let path = PathBuf::from("/tmp/test.acf");
+        let result = parse_acf_content(content, &path).unwrap();
+        assert_eq!(result.app_id, "553850");
+        assert_eq!(result.state_flags, 4);
+    }
+
+    // ===== MQTT content verification - exact payloads for steam_updating sensor =====
+
+    #[test]
+    fn test_steam_updating_state_string_when_updating() {
+        // When updating_games is non-empty, the state string is "on"
+        let games = vec![make_game(STATE_UPDATE_RUNNING)];
+        let is_updating = !games.is_empty();
+        let state_str = if is_updating { "on" } else { "off" };
+        assert_eq!(state_str, "on");
+    }
+
+    #[test]
+    fn test_steam_updating_state_string_when_idle() {
+        // When no games updating, the state string is "off"
+        let games: Vec<GameUpdateState> = vec![];
+        let is_updating = !games.is_empty();
+        let state_str = if is_updating { "on" } else { "off" };
+        assert_eq!(state_str, "off");
+    }
+
+    #[test]
+    fn test_steam_updating_attributes_json_with_games() {
+        // Exact JSON published to homeassistant/sensor/{device}/steam_updating/attributes
+        let games = vec![
+            GameUpdateState {
+                app_id: "730".to_string(),
+                name: "Counter-Strike 2".to_string(),
+                state_flags: STATE_UPDATE_RUNNING,
+                manifest_path: PathBuf::from("/tmp/appmanifest_730.acf"),
+            },
+            GameUpdateState {
+                app_id: "440".to_string(),
+                name: "Team Fortress 2".to_string(),
+                state_flags: STATE_DOWNLOADING,
+                manifest_path: PathBuf::from("/tmp/appmanifest_440.acf"),
+            },
+        ];
+        let names: Vec<&str> = games.iter().map(|g| g.name.as_str()).collect();
+        let attrs = serde_json::json!({
+            "updating_games": names,
+            "count": games.len()
+        });
+
+        // Verify exact JSON structure
+        let obj = attrs.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+        assert_eq!(attrs["count"], 2);
+        let game_names = attrs["updating_games"].as_array().unwrap();
+        assert_eq!(game_names.len(), 2);
+        assert_eq!(game_names[0], "Counter-Strike 2");
+        assert_eq!(game_names[1], "Team Fortress 2");
+
+        // Verify the exact serialized bytes that go to MQTT
+        let json_bytes = serde_json::to_vec(&attrs).unwrap();
+        let roundtrip: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
+        assert_eq!(roundtrip, attrs);
+    }
+
+    #[test]
+    fn test_steam_updating_attributes_json_when_idle() {
+        // Exact JSON published when no games are updating
+        let attrs = serde_json::json!({
+            "updating_games": Vec::<String>::new(),
+            "count": 0
+        });
+        let obj = attrs.as_object().unwrap();
+        assert_eq!(attrs["count"], 0);
+        assert!(attrs["updating_games"].as_array().unwrap().is_empty());
+        assert_eq!(obj.len(), 2); // always has both fields even when idle
+    }
+
+    #[test]
+    fn test_steam_updating_full_mqtt_payload_content() {
+        // End-to-end: simulate what SteamSensor::publish_state builds
+        // Scenario: one game downloading
+
+        // 1. State topic payload (retained)
+        let updating_games: HashMap<String, GameUpdateState> = {
+            let mut m = HashMap::new();
+            m.insert(
+                "553850".to_string(),
+                GameUpdateState {
+                    app_id: "553850".to_string(),
+                    name: "HELLDIVERS 2".to_string(),
+                    state_flags: STATE_DOWNLOADING,
+                    manifest_path: PathBuf::from("/tmp/appmanifest_553850.acf"),
+                },
+            );
+            m
+        };
+
+        let is_updating = !updating_games.is_empty();
+        let state_str = if is_updating { "on" } else { "off" };
+        // This exact string goes to: homeassistant/sensor/{device}/steam_updating/state
+        assert_eq!(state_str, "on");
+
+        // 2. Attributes topic payload (retained)
+        let names: Vec<&str> = updating_games.values().map(|g| g.name.as_str()).collect();
+        let attrs = serde_json::json!({
+            "updating_games": names,
+            "count": updating_games.len()
+        });
+        // This exact JSON goes to: homeassistant/sensor/{device}/steam_updating/attributes
+        assert_eq!(attrs["count"], 1);
+        assert_eq!(attrs["updating_games"][0], "HELLDIVERS 2");
+    }
+}

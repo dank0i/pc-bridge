@@ -1,0 +1,175 @@
+[package]
+name = "pc-bridge"
+version = "2.0.0"
+edition = "2024"
+authors = ["dank0i"]
+description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
+repository = "https://github.com/dank0i/pc-bridge"
+license = "MIT"
+keywords = ["home-assistant", "mqtt", "gaming", "automation"]
+categories = ["development-tools", "network-programming"]
+
+[build-dependencies]
+winresource = "0.1"
+
+[features]
+default = []
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "signal"] }
+
+# MQTT (native TLS via OS certificate store - same backend as ureq, zero extra binary cost)
+rumqttc = { version = "0.25", default-features = false, features = ["use-native-tls"] }
+
+# Serialization
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+
+# Error handling
+anyhow = "1"
+
+# Date/time
+time = { version = "0.3", features = ["formatting", "parsing"] }
+
+# File watching for config hot-reload
+notify = "6"
+
+# Logging
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+
+# Native HTTP client (replaces curl subprocess for updates)
+# Uses OS TLS (Schannel on Windows, Security.framework on macOS) - zero binary cost
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
+
+# SHA-256 for update integrity verification
+sha2 = "0.10"
+
+# Password input masking (hides typed characters)
+rpassword = "7"
+
+# TLS for sync MQTT sleep publish (already in dep tree via rumqttc/ureq - zero binary cost)
+native-tls = "0.2"
+
+# libc for statvfs (disk sensor on Unix)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+
+
+# Windows registry
+[target.'cfg(windows)'.dependencies.winreg]
+version = "0.55"
+
+# WMI for event-driven process monitoring
+[target.'cfg(windows)'.dependencies.wmi]
+version = "0.14"
+
+# Windows-specific dependencies
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "implement",
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Power",
+    "Win32_System_Console",
+    "Win32_System_SystemInformation",
+    "Win32_System_Shutdown",
+    "Win32_System_Com",
+    "Win32_System_Performance",
+    "Win32_System_Memory",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_Controls",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    # Audio (Core Audio API)
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    # WinRT for toast notifications
+    "Data_Xml_Dom",
+    "UI_Notifications",
+] }
+windows-core = "0.58"
+windows-service = "0.7"
+base64 = "0.22"
+
+[dev-dependencies]
+# Testing utilities
+tempfile = "3"
+tokio-test = "0.4"
+pretty_assertions = "1"
+# Integration tests need TCP for in-process MQTT broker
+tokio = { version = "1", features = ["net", "io-util"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+
+# Lint configuration
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+# Enable lint groups (lower priority than individual lints)
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+# Allow noisy pedantic lints
+module_name_repetitions = "allow"
+too_many_lines = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+uninlined_format_args = "allow"
+redundant_closure_for_method_calls = "allow"
+map_unwrap_or = "allow"
+unreadable_literal = "allow"
+match_wildcard_for_single_variants = "allow"
+single_match_else = "allow"
+needless_pass_by_value = "allow"
+struct_excessive_bools = "allow"
+
+# Windows API requires these patterns
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+
+# Platform-specific code patterns
+unused_async = "allow"
+unnecessary_debug_formatting = "allow"
+unused_self = "allow"
+
+# Minor style preferences
+manual_string_new = "allow"
+case_sensitive_file_extension_comparisons = "allow"
+needless_raw_string_hashes = "allow"
+redundant_else = "allow"
+unnecessary_wraps = "allow"
+needless_continue = "allow"
+match_same_arms = "allow"
+manual_let_else = "allow"
+inefficient_to_string = "allow"
+
+# Handled by cargo-deny
+multiple_crate_versions = "allow"

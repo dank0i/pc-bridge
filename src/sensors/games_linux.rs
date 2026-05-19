@@ -1,0 +1,256 @@
+//! Game detection sensor for Linux - monitors running processes
+//!
+//! Detection priority:
+//! 1. Steam auto-discovery (if Steam installed) - uses process name → app_id lookup
+//! 2. Manual config `games` map (pattern → game_id)
+//!
+//! Also publishes a `game_catalog` sensor listing all exposed games from config.
+
+use log::{debug, error, info};
+use serde::Serialize;
+use std::collections::HashSet;
+use std::fs;
+use std::sync::Arc;
+use tokio::time::{Duration, interval};
+
+use crate::AppState;
+
+#[derive(Serialize)]
+struct CatalogEntry {
+    game_id: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    app_id: Option<u32>,
+    process_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    launch_command: Option<String>,
+}
+
+/// Cached lowered game patterns - rebuilt only when config changes via config_generation.
+struct CachedGamePatterns {
+    /// (lowered_pattern, game_id, display_name)
+    patterns: Vec<(String, String, String)>,
+}
+
+impl CachedGamePatterns {
+    fn build(games: &std::collections::HashMap<String, crate::config::GameConfig>) -> Self {
+        let patterns = games
+            .iter()
+            .map(|(pattern, gc)| {
+                (
+                    pattern.to_lowercase(),
+                    gc.game_id().to_string(),
+                    gc.display_name(),
+                )
+            })
+            .collect();
+        Self { patterns }
+    }
+}
+
+pub struct GameSensor {
+    state: Arc<AppState>,
+}
+
+impl GameSensor {
+    pub fn new(state: Arc<AppState>) -> Self {
+        Self { state }
+    }
+
+    pub async fn run(self) {
+        let config = self.state.config.read().await;
+        let interval_secs = config.intervals.game_sensor.max(1); // Prevent panic on 0
+        let games = config.games.clone();
+        let mut cached = CachedGamePatterns::build(&games);
+        drop(config);
+        self.publish_game_catalog(&games).await;
+
+        let mut tick = interval(Duration::from_secs(interval_secs));
+        let mut shutdown_rx = self.state.shutdown_tx.subscribe();
+        let mut config_rx = self.state.config_generation.subscribe();
+        let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
+
+        // Publish initial state
+        let (game_id, display_name) = self.detect_game(&cached).await;
+        self.publish_game(&game_id, &display_name).await;
+
+        // Track last published state to avoid duplicate MQTT messages
+        let mut last_game_id = game_id;
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown_rx.recv() => {
+                    debug!("Game sensor shutting down");
+                    break;
+                }
+                // Rebuild cached patterns when config changes
+                Ok(()) = config_rx.recv() => {
+                    let games = self.state.config.read().await.games.clone();
+                    cached = CachedGamePatterns::build(&games);
+                    self.publish_game_catalog(&games).await;
+                    debug!("Game sensor: rebuilt cached patterns");
+                    let (game_id, display_name) = self.detect_game(&cached).await;
+                    if game_id != last_game_id {
+                        self.publish_game(&game_id, &display_name).await;
+                        last_game_id = game_id;
+                    }
+                }
+                // MQTT reconnected - force republish retained state
+                Ok(()) = reconnect_rx.recv() => {
+                    info!("Game sensor: MQTT reconnected, republishing current state");
+                    let games = self.state.config.read().await.games.clone();
+                    self.publish_game_catalog(&games).await;
+                    let (game_id, display_name) = self.detect_game(&cached).await;
+                    self.publish_game(&game_id, &display_name).await;
+                    last_game_id = game_id;
+                }
+                _ = tick.tick() => {
+                    let (game_id, display_name) = self.detect_game(&cached).await;
+                    if game_id != last_game_id {
+                        self.publish_game(&game_id, &display_name).await;
+                        last_game_id = game_id;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn publish_game(&self, game_ids: &str, display_names: &str) {
+        self.state
+            .mqtt
+            .publish_sensor_retained("runninggames", game_ids)
+            .await;
+
+        // Build structured game list for attributes (Feature D)
+        let games_array: Vec<serde_json::Value> = if game_ids == "none" {
+            Vec::new()
+        } else {
+            game_ids
+                .split(',')
+                .zip(display_names.split(", "))
+                .map(|(id, name)| serde_json::json!({ "id": id, "name": name }))
+                .collect()
+        };
+
+        let attrs = serde_json::json!({
+            "display_name": display_names,
+            "games": games_array,
+            "count": games_array.len(),
+        });
+        self.state
+            .mqtt
+            .publish_sensor_attributes("runninggames", &attrs)
+            .await;
+    }
+
+    /// Publish the game catalog sensor - a retained list of all exposed games from config.
+    async fn publish_game_catalog(
+        &self,
+        games: &std::collections::HashMap<String, crate::config::GameConfig>,
+    ) {
+        let mut entries: Vec<CatalogEntry> = games
+            .iter()
+            .filter(|(_, gc)| gc.is_exposed())
+            .map(|(process_pattern, gc)| CatalogEntry {
+                game_id: gc.game_id().to_owned(),
+                name: gc.display_name(),
+                app_id: gc.app_id(),
+                process_name: process_pattern.clone(),
+                launch_command: gc.launch_command(),
+            })
+            .collect();
+
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let count = entries.len();
+        self.state
+            .mqtt
+            .publish_sensor_retained("game_catalog", &count.to_string())
+            .await;
+        let attrs = serde_json::json!({
+            "games": entries,
+            "count": count,
+        });
+        self.state
+            .mqtt
+            .publish_sensor_attributes("game_catalog", &attrs)
+            .await;
+        debug!("Published game catalog with {} exposed games", count);
+    }
+
+    async fn detect_game(&self, cached: &CachedGamePatterns) -> (String, String) {
+        // Enumerate processes via /proc
+        let processes = match self.get_process_names().await {
+            Ok(p) => p,
+            Err(e) => {
+                error!("Failed to enumerate processes: {}", e);
+                return ("none".to_string(), "None".to_string());
+            }
+        };
+
+        let mut found_games: Vec<(String, String)> = Vec::with_capacity(2);
+        let mut seen_ids: HashSet<&str> = HashSet::with_capacity(cached.patterns.len());
+
+        for proc_name in &processes {
+            for (pattern_lower, game_id, display_name) in &cached.patterns {
+                // Case-insensitive prefix match OR exact match (matches Windows behavior)
+                let matches = starts_with_ignore_ascii_case(proc_name, pattern_lower)
+                    || proc_name.eq_ignore_ascii_case(pattern_lower);
+                if matches && seen_ids.insert(game_id.as_str()) {
+                    found_games.push((game_id.clone(), display_name.clone()));
+                    break; // This process matched - no need to check remaining patterns
+                }
+            }
+        }
+
+        if found_games.is_empty() {
+            ("none".to_string(), "None".to_string())
+        } else {
+            let ids: Vec<&str> = found_games.iter().map(|(id, _)| id.as_str()).collect();
+            let names: Vec<&str> = found_games.iter().map(|(_, name)| name.as_str()).collect();
+            (ids.join(","), names.join(", "))
+        }
+    }
+
+    async fn get_process_names(&self) -> anyhow::Result<Vec<String>> {
+        // /proc enumeration is hundreds of blocking fs::read_to_string calls -
+        // run off the single-threaded runtime.
+        tokio::task::spawn_blocking(Self::get_process_names_blocking)
+            .await
+            .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {}", e))?
+    }
+
+    fn get_process_names_blocking() -> anyhow::Result<Vec<String>> {
+        let mut names = Vec::new();
+
+        // Read /proc to enumerate processes
+        for entry in fs::read_dir("/proc")? {
+            let entry = entry?;
+            let path = entry.path();
+
+            // Only process numeric directories (PIDs)
+            if let Some(name) = path.file_name()
+                && let Some(name_str) = name.to_str()
+                && name_str.chars().all(|c| c.is_ascii_digit())
+            {
+                // Read the process command line or comm
+                let comm_path = path.join("comm");
+                if let Ok(comm) = fs::read_to_string(&comm_path) {
+                    let comm = comm.trim().to_string();
+                    if !comm.is_empty() {
+                        names.push(comm);
+                    }
+                }
+            }
+        }
+
+        Ok(names)
+    }
+}
+
+/// Case-insensitive ASCII prefix check without allocation
+fn starts_with_ignore_ascii_case(haystack: &str, prefix: &str) -> bool {
+    haystack.len() >= prefix.len()
+        && haystack.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+}

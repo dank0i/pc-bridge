@@ -1,0 +1,1772 @@
+//! Configuration loading and hot-reload support
+
+use anyhow::{Context, Result, bail};
+use log::{error, info, warn};
+use notify::{Event, EventKind, RecursiveMode, Watcher};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::AppState;
+
+/// User configuration structure (matches userConfig.json)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    pub device_name: String,
+    pub mqtt: MqttConfig,
+    #[serde(default)]
+    pub intervals: IntervalConfig,
+    #[serde(default)]
+    pub features: FeatureConfig,
+    /// Games map: process_pattern → GameConfig
+    /// Can be simple string (game_id) or object with app_id
+    #[serde(default)]
+    pub games: HashMap<String, GameConfig>,
+
+    /// Allow custom sensor polling via PowerShell/WMI/registry
+    #[serde(default)]
+    pub custom_sensors_enabled: bool,
+    /// Allow custom command execution via MQTT
+    #[serde(default)]
+    pub custom_commands_enabled: bool,
+    /// Allow custom commands to run with elevated privileges
+    #[serde(default)]
+    pub custom_command_privileges_allowed: bool,
+    /// Allow raw MQTT payloads to be executed as shell commands
+    /// When false (default), only predefined and custom commands are allowed
+    #[serde(default)]
+    pub allow_raw_commands: bool,
+
+    /// Custom keybind for Discord "leave channel" (e.g. "ctrl+f6", "ctrl+shift+m").
+    /// When absent, defaults to ctrl+f6 (Discord's default disconnect keybind).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord_keybind: Option<String>,
+
+    /// Update channel: "stable" (default), "beta", or "disabled"
+    #[serde(default = "default_update_channel")]
+    pub update_channel: String,
+
+    /// Paths to check for disk usage (e.g. `C:\`, `D:\` or `/`, `/home`).
+    /// If empty, disk sensor reports nothing even when enabled.
+    #[serde(default)]
+    pub disk_sensor_paths: Vec<String>,
+
+    #[serde(default)]
+    pub custom_sensors: Vec<CustomSensor>,
+    #[serde(default)]
+    pub custom_commands: Vec<CustomCommand>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+pub fn default_update_channel() -> String {
+    "stable".to_string()
+}
+
+/// Game configuration - supports both simple string and object with app_id
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum GameConfig {
+    /// Simple: just the game ID string
+    Simple(String),
+    /// Full: game ID with optional Steam app_id
+    Full {
+        game_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        app_id: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// Non-Steam launch command (e.g. "lnk:C:\\Users\\...\\Fortnite.lnk").
+        /// For Steam games this is derived from app_id automatically.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        launch_command: Option<String>,
+        /// Whether this was auto-discovered from Steam
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        auto_discovered: bool,
+        /// Whether this game is exposed in the game_catalog sensor (default: true)
+        #[serde(default = "default_true")]
+        exposed: bool,
+    },
+}
+
+impl GameConfig {
+    /// Get the game_id regardless of variant
+    pub fn game_id(&self) -> &str {
+        match self {
+            GameConfig::Simple(id) => id,
+            GameConfig::Full { game_id, .. } => game_id,
+        }
+    }
+
+    /// Get display name (falls back to smart title-cased game_id if no name set)
+    pub fn display_name(&self) -> String {
+        match self {
+            GameConfig::Simple(id) => Self::smart_title(id),
+            GameConfig::Full { name, game_id, .. } => {
+                name.clone().unwrap_or_else(|| Self::smart_title(game_id))
+            }
+        }
+    }
+
+    /// Convert game_id to display name with smart casing
+    fn smart_title(game_id: &str) -> String {
+        game_id
+            .replace('_', " ")
+            .split_whitespace()
+            .map(|word| {
+                // Keep numbers as-is, capitalize first letter of words
+                if word.chars().next().map(|c| c.is_numeric()).unwrap_or(false) {
+                    word.to_string()
+                } else {
+                    let mut chars = word.chars();
+                    match chars.next() {
+                        None => String::new(),
+                        Some(first) => first.to_uppercase().chain(chars).collect(),
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Whether this game should be exposed in the game_catalog sensor
+    pub fn is_exposed(&self) -> bool {
+        match self {
+            GameConfig::Simple(_) => true,
+            GameConfig::Full { exposed, .. } => *exposed,
+        }
+    }
+
+    /// Whether this game was auto-discovered from Steam
+    pub fn is_auto_discovered(&self) -> bool {
+        match self {
+            GameConfig::Simple(_) => false,
+            GameConfig::Full {
+                auto_discovered, ..
+            } => *auto_discovered,
+        }
+    }
+
+    /// Get app_id if available
+    pub fn app_id(&self) -> Option<u32> {
+        match self {
+            GameConfig::Simple(_) => None,
+            GameConfig::Full { app_id, .. } => *app_id,
+        }
+    }
+
+    /// Get the launch command for this game.
+    /// Steam games: "steam:{app_id}", non-Steam: explicit launch_command field.
+    pub fn launch_command(&self) -> Option<String> {
+        match self {
+            GameConfig::Simple(_) => None,
+            GameConfig::Full {
+                app_id,
+                launch_command,
+                ..
+            } => launch_command
+                .clone()
+                .or_else(|| app_id.map(|id| format!("steam:{id}"))),
+        }
+    }
+
+    /// Create from Steam discovery
+    pub fn from_steam(game_id: String, app_id: u32, name: String) -> Self {
+        GameConfig::Full {
+            game_id,
+            app_id: Some(app_id),
+            name: Some(name),
+            launch_command: None,
+            auto_discovered: true,
+            exposed: true,
+        }
+    }
+}
+
+/// Feature toggles
+///
+/// All features default to `false` (opt-in) except `power_events` which
+/// defaults to `true` since sleep/wake/display tracking is fundamental.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureConfig {
+    #[serde(default)]
+    pub game_detection: bool,
+    #[serde(default)]
+    pub idle_tracking: bool,
+    #[serde(default = "default_true")]
+    pub power_events: bool,
+    #[serde(default)]
+    pub notifications: bool,
+    #[serde(default)]
+    pub system_sensors: bool,
+    #[serde(default)]
+    pub audio_control: bool,
+    #[serde(default)]
+    pub steam_updates: bool,
+    #[serde(default)]
+    pub discord: bool,
+    #[serde(default)]
+    pub gpu_sensor: bool,
+    #[serde(default)]
+    pub network_sensor: bool,
+    #[serde(default)]
+    pub disk_sensor: bool,
+    #[serde(default)]
+    pub uptime_sensor: bool,
+    #[serde(default)]
+    pub hwinfo_sensor: bool,
+}
+
+impl Default for FeatureConfig {
+    fn default() -> Self {
+        Self {
+            game_detection: false,
+            idle_tracking: false,
+            power_events: true,
+            notifications: false,
+            system_sensors: false,
+            audio_control: false,
+            steam_updates: false,
+            discord: false,
+            gpu_sensor: false,
+            network_sensor: false,
+            disk_sensor: false,
+            uptime_sensor: false,
+            hwinfo_sensor: false,
+        }
+    }
+}
+
+/// Custom sensor definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomSensor {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub sensor_type: CustomSensorType,
+    #[serde(default = "default_sensor_interval")]
+    pub interval_seconds: u64,
+    #[serde(default)]
+    pub unit: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    // Type-specific fields
+    #[serde(default)]
+    pub script: Option<String>,
+    #[serde(default)]
+    pub process: Option<String>,
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub registry_key: Option<String>,
+    #[serde(default)]
+    pub registry_value: Option<String>,
+}
+
+/// Custom sensor types
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomSensorType {
+    Powershell,
+    ProcessExists,
+    FileContents,
+    Registry,
+}
+
+fn default_sensor_interval() -> u64 {
+    30
+}
+
+/// Custom command definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomCommand {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub command_type: CustomCommandType,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub admin: bool,
+    // Type-specific fields
+    #[serde(default)]
+    pub script: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub command: Option<String>,
+}
+
+/// Custom command types
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomCommandType {
+    Powershell,
+    Executable,
+    Shell,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct MqttConfig {
+    pub broker: String,
+    #[serde(default)]
+    pub user: String,
+    #[serde(default)]
+    pub pass: String,
+    #[serde(default)]
+    pub client_id: Option<String>,
+}
+
+impl std::fmt::Debug for MqttConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MqttConfig")
+            .field("broker", &self.broker)
+            .field("user", &self.user)
+            .field("pass", &"[REDACTED]")
+            .field("client_id", &self.client_id)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntervalConfig {
+    #[serde(default = "default_game_sensor")]
+    pub game_sensor: u64,
+    #[serde(default = "default_last_active")]
+    pub last_active: u64,
+    #[serde(default = "default_steam_check")]
+    pub steam_check: u64,
+    #[serde(default = "default_system_sensors")]
+    pub system_sensors: u64,
+}
+
+impl Default for IntervalConfig {
+    fn default() -> Self {
+        Self {
+            game_sensor: default_game_sensor(),
+            last_active: default_last_active(),
+            steam_check: default_steam_check(),
+            system_sensors: default_system_sensors(),
+        }
+    }
+}
+
+fn default_game_sensor() -> u64 {
+    5
+}
+fn default_last_active() -> u64 {
+    10
+}
+fn default_steam_check() -> u64 {
+    30
+}
+fn default_system_sensors() -> u64 {
+    10
+}
+
+impl Config {
+    /// Check if this is a first run (no config file exists)
+    pub fn is_first_run() -> Result<bool> {
+        Self::migrate_config_location()?;
+        let config_path = Self::config_path()?;
+        Ok(!config_path.exists())
+    }
+
+    /// Load configuration from userConfig.json
+    pub fn load() -> Result<Self> {
+        Self::migrate_config_location()?;
+
+        let config_path = Self::config_path()?;
+
+        if !config_path.exists() {
+            bail!(
+                "Configuration file not found at {:?}\n\
+                 Run the setup wizard first.",
+                config_path
+            );
+        }
+
+        let content = std::fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read {:?}", config_path))?;
+
+        // Migrate config if needed (adds missing fields)
+        let content = Self::migrate_config(&config_path, &content)?;
+
+        let mut config: Config =
+            serde_json::from_str(&content).with_context(|| "Failed to parse userConfig.json")?;
+
+        // Load MQTT password from credential file (or migrate from inline JSON)
+        Self::load_credential(&mut config, &config_path)?;
+
+        config.validate()?;
+
+        Ok(config)
+    }
+
+    /// Load config without decrypting the credential.
+    /// Used by `--reset-password` when the existing credential can't be decrypted.
+    pub fn load_without_credential() -> Result<Self> {
+        Self::migrate_config_location()?;
+
+        let config_path = Self::config_path()?;
+
+        if !config_path.exists() {
+            bail!(
+                "Configuration file not found at {:?}\n\
+                 Run the setup wizard first.",
+                config_path
+            );
+        }
+
+        let content = std::fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read {:?}", config_path))?;
+
+        let content = Self::migrate_config(&config_path, &content)?;
+
+        let mut config: Config =
+            serde_json::from_str(&content).with_context(|| "Failed to parse userConfig.json")?;
+
+        // Clear any inline password remnant without decrypting
+        config.mqtt.pass = String::new();
+
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Load the MQTT credential from the separate file, or migrate from inline JSON.
+    fn load_credential(config: &mut Config, config_path: &PathBuf) -> Result<()> {
+        let inline_pass = std::mem::take(&mut config.mqtt.pass);
+        let cred_path = crate::credential::credential_path()?;
+
+        if cred_path.exists() {
+            // Credential file takes priority
+            config.mqtt.pass = crate::credential::load_from_file().map_err(|e| {
+                anyhow::Error::new(crate::credential::CredentialDecryptFailed).context(e.message)
+            })?;
+
+            // Clean up stale inline password from JSON if present
+            if !inline_pass.is_empty() {
+                Self::clear_inline_password(config_path).ok();
+            }
+        } else if !inline_pass.is_empty() {
+            // Migration: password was stored inline in JSON - move to credential file
+            let plaintext = crate::credential::decrypt(&inline_pass).map_err(|e| {
+                anyhow::Error::new(crate::credential::CredentialDecryptFailed).context(e.message)
+            })?;
+            config.mqtt.pass = plaintext;
+            crate::credential::save_to_file(&config.mqtt.pass)?;
+            Self::clear_inline_password(config_path).ok();
+            info!("Migrated MQTT password to credential file");
+        }
+        // else: no password configured (anonymous MQTT)
+
+        Ok(())
+    }
+
+    /// Blank out the `mqtt.pass` field in the JSON config file.
+    fn clear_inline_password(config_path: &PathBuf) -> Result<()> {
+        let content = std::fs::read_to_string(config_path)?;
+        let mut json: serde_json::Value = serde_json::from_str(&content)?;
+        if let Some(mqtt) = json.get_mut("mqtt").and_then(|v| v.as_object_mut()) {
+            mqtt.insert("pass".to_string(), serde_json::Value::String(String::new()));
+        }
+        let content = serde_json::to_string_pretty(&json)?;
+        std::fs::write(config_path, content)?;
+        Ok(())
+    }
+
+    /// Migrate config by adding missing fields with defaults
+    fn migrate_config(config_path: &PathBuf, content: &str) -> Result<String> {
+        let mut json: serde_json::Value =
+            serde_json::from_str(content).with_context(|| "Failed to parse config as JSON")?;
+
+        let obj = json
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("Config must be a JSON object"))?;
+
+        let mut migrated = false;
+
+        // Fix zero intervals (bug from v1.9.0-beta.1/2)
+        if let Some(intervals) = obj.get_mut("intervals").and_then(|v| v.as_object_mut()) {
+            if intervals.get("game_sensor").and_then(|v| v.as_u64()) == Some(0) {
+                intervals.insert("game_sensor".to_string(), serde_json::json!(5));
+                migrated = true;
+            }
+            if intervals.get("last_active").and_then(|v| v.as_u64()) == Some(0) {
+                intervals.insert("last_active".to_string(), serde_json::json!(10));
+                migrated = true;
+            }
+            if intervals.get("system_sensors").and_then(|v| v.as_u64()) == Some(0) {
+                intervals.insert("system_sensors".to_string(), serde_json::json!(10));
+                migrated = true;
+            }
+        }
+
+        // Ensure features object exists
+        if !obj.contains_key("features") {
+            obj.insert("features".to_string(), serde_json::json!({}));
+            migrated = true;
+        }
+
+        // Remove legacy show_tray_icon fields (tray feature removed)
+        if obj.remove("show_tray_icon").is_some() {
+            migrated = true;
+        }
+        if let Some(features) = obj.get_mut("features").and_then(|v| v.as_object_mut())
+            && features.remove("show_tray_icon").is_some()
+        {
+            migrated = true;
+        }
+
+        // Ensure power_events defaults to true for new features sections
+        let features = obj
+            .get_mut("features")
+            .and_then(|v| v.as_object_mut())
+            .ok_or_else(|| {
+                anyhow::anyhow!("config migration: 'features' key missing after insert")
+            })?;
+        if !features.contains_key("power_events") {
+            features.insert("power_events".to_string(), serde_json::Value::Bool(true));
+            migrated = true;
+        }
+
+        if migrated {
+            // Write back the migrated config
+            let new_content = serde_json::to_string_pretty(&json)?;
+            std::fs::write(config_path, &new_content)
+                .with_context(|| format!("Failed to write migrated config to {:?}", config_path))?;
+            info!("Migrated userConfig.json - moved feature toggles into features section");
+            Ok(new_content)
+        } else {
+            Ok(content.to_string())
+        }
+    }
+
+    /// Get the path to userConfig.json in the platform config directory
+    pub fn config_path() -> Result<PathBuf> {
+        let dir = Self::config_dir()?;
+        Ok(dir.join("userConfig.json"))
+    }
+
+    /// Get the platform-specific config directory
+    fn config_dir() -> Result<PathBuf> {
+        #[cfg(windows)]
+        {
+            let appdata =
+                std::env::var("APPDATA").context("APPDATA environment variable not set")?;
+            Ok(PathBuf::from(appdata).join("pc-bridge"))
+        }
+        #[cfg(not(windows))]
+        {
+            let config_home = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                format!("{}/.config", home)
+            });
+            Ok(PathBuf::from(config_home).join("pc-bridge"))
+        }
+    }
+
+    /// Legacy config path (next to the executable) - used for migration only
+    fn legacy_config_path() -> Result<PathBuf> {
+        let exe = std::env::current_exe()?;
+        let dir = exe.parent().context("No parent directory")?;
+        Ok(dir.join("userConfig.json"))
+    }
+
+    /// Migrate config from legacy location (next to exe) to platform config directory
+    fn migrate_config_location() -> Result<()> {
+        let new_path = Self::config_path()?;
+        if new_path.exists() {
+            return Ok(()); // Already at new location
+        }
+
+        let old_path = match Self::legacy_config_path() {
+            Ok(p) if p.exists() => p,
+            _ => return Ok(()), // No legacy config to migrate
+        };
+
+        // Create new directory
+        if let Some(parent) = new_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create config directory {:?}", parent))?;
+        }
+
+        // Copy to new location (then remove old)
+        std::fs::copy(&old_path, &new_path).with_context(|| {
+            format!(
+                "Failed to migrate config from {:?} to {:?}",
+                old_path, new_path
+            )
+        })?;
+
+        if let Err(e) = std::fs::remove_file(&old_path) {
+            warn!(
+                "Config migrated but failed to remove old file {:?}: {}",
+                old_path, e
+            );
+        } else {
+            info!("Migrated config from {:?} to {:?}", old_path, new_path);
+        }
+
+        Ok(())
+    }
+
+    /// Merge Steam-discovered games into the config and save
+    ///
+    /// Adds newly installed games and removes auto-discovered games that are
+    /// no longer in the Steam library. Manual entries are never removed.
+    /// Returns (added, removed) counts.
+    pub fn merge_steam_games(
+        &mut self,
+        steam_games: &crate::steam::SteamGameDiscovery,
+    ) -> Result<(usize, usize)> {
+        let mut added = 0;
+
+        for (exe_key, game) in &steam_games.games {
+            // exe_key is already lowercase, no extension (e.g., "cs2")
+            if self.games.contains_key(exe_key) {
+                continue;
+            }
+
+            // Generate game_id from name - only allow ASCII alphanumeric and underscore
+            let game_id: String = game
+                .name
+                .to_lowercase()
+                .chars()
+                .filter_map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        Some(c)
+                    } else if c == ' ' || c == '-' {
+                        Some('_')
+                    } else {
+                        None // Strip ™, ®, :, ', etc.
+                    }
+                })
+                .collect();
+
+            self.games.insert(
+                exe_key.clone(),
+                GameConfig::from_steam(game_id, game.app_id, game.name.clone()),
+            );
+            added += 1;
+        }
+
+        // Remove auto-discovered games no longer in Steam library (single-pass, zero alloc)
+        let mut removed = 0usize;
+        self.games.retain(|key, gc| {
+            if gc.is_auto_discovered() && !steam_games.games.contains_key(key.as_str()) {
+                info!("Removing uninstalled Steam game: {}", key);
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+
+        if added > 0 || removed > 0 {
+            self.save()?;
+        }
+
+        Ok((added, removed))
+    }
+
+    /// Save current config to userConfig.json.
+    ///
+    /// The MQTT password is stored in a separate credential file (encrypted
+    /// via DPAPI on Windows).  The JSON config always has `pass: ""`.
+    pub fn save(&self) -> Result<()> {
+        let config_path = Self::config_path()?;
+
+        // Ensure directory exists (needed for first save to AppData)
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create config directory {:?}", parent))?;
+        }
+
+        // Save encrypted password to separate credential file
+        crate::credential::save_to_file(&self.mqtt.pass)
+            .with_context(|| "Failed to save MQTT credential")?;
+
+        // Write config JSON without the password
+        let mut to_save = self.clone();
+        to_save.mqtt.pass = String::new();
+
+        let content = serde_json::to_string_pretty(&to_save)?;
+        std::fs::write(&config_path, content)
+            .with_context(|| format!("Failed to write config to {:?}", config_path))?;
+        Ok(())
+    }
+
+    /// Validate configuration values
+    fn validate(&self) -> Result<()> {
+        if self.device_name.is_empty() {
+            bail!("device_name is required");
+        }
+        if self.device_name == "my-pc" {
+            bail!("device_name is still the default 'my-pc' - please change it");
+        }
+        if self.device_name.contains(char::is_whitespace) {
+            bail!("device_name cannot contain whitespace");
+        }
+        if self.mqtt.broker.is_empty() {
+            bail!("mqtt.broker is required");
+        }
+        if !self.mqtt.broker.starts_with("tcp://")
+            && !self.mqtt.broker.starts_with("ssl://")
+            && !self.mqtt.broker.starts_with("ws://")
+            && !self.mqtt.broker.starts_with("wss://")
+        {
+            bail!("mqtt.broker must start with tcp://, ssl://, ws://, or wss://");
+        }
+
+        // Validate custom sensors
+        for sensor in &self.custom_sensors {
+            Self::validate_custom_sensor(sensor)?;
+        }
+
+        // Validate custom commands
+        for cmd in &self.custom_commands {
+            Self::validate_custom_command(cmd, self.custom_command_privileges_allowed)?;
+        }
+
+        Ok(())
+    }
+
+    /// Validate a custom sensor definition
+    fn validate_custom_sensor(sensor: &CustomSensor) -> Result<()> {
+        if sensor.name.is_empty() {
+            bail!("Custom sensor name cannot be empty");
+        }
+        if sensor.name.contains(char::is_whitespace) {
+            bail!(
+                "Custom sensor name '{}' cannot contain whitespace",
+                sensor.name
+            );
+        }
+
+        match sensor.sensor_type {
+            CustomSensorType::Powershell => {
+                if sensor.script.is_none()
+                    || sensor.script.as_ref().map(|s| s.is_empty()).unwrap_or(true)
+                {
+                    bail!(
+                        "Custom sensor '{}' (powershell) requires 'script' field",
+                        sensor.name
+                    );
+                }
+            }
+            CustomSensorType::ProcessExists => {
+                if sensor.process.is_none()
+                    || sensor
+                        .process
+                        .as_ref()
+                        .map(|s| s.is_empty())
+                        .unwrap_or(true)
+                {
+                    bail!(
+                        "Custom sensor '{}' (process_exists) requires 'process' field",
+                        sensor.name
+                    );
+                }
+            }
+            CustomSensorType::FileContents => {
+                if sensor.file_path.is_none()
+                    || sensor
+                        .file_path
+                        .as_ref()
+                        .map(|s| s.is_empty())
+                        .unwrap_or(true)
+                {
+                    bail!(
+                        "Custom sensor '{}' (file_contents) requires 'file_path' field",
+                        sensor.name
+                    );
+                }
+            }
+            CustomSensorType::Registry => {
+                if sensor.registry_key.is_none()
+                    || sensor
+                        .registry_key
+                        .as_ref()
+                        .map(|s| s.is_empty())
+                        .unwrap_or(true)
+                {
+                    bail!(
+                        "Custom sensor '{}' (registry) requires 'registry_key' field",
+                        sensor.name
+                    );
+                }
+                if sensor.registry_value.is_none()
+                    || sensor
+                        .registry_value
+                        .as_ref()
+                        .map(|s| s.is_empty())
+                        .unwrap_or(true)
+                {
+                    bail!(
+                        "Custom sensor '{}' (registry) requires 'registry_value' field",
+                        sensor.name
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate a custom command definition
+    fn validate_custom_command(cmd: &CustomCommand, privileges_allowed: bool) -> Result<()> {
+        if cmd.name.is_empty() {
+            bail!("Custom command name cannot be empty");
+        }
+        if cmd.name.contains(char::is_whitespace) {
+            bail!(
+                "Custom command name '{}' cannot contain whitespace",
+                cmd.name
+            );
+        }
+
+        if cmd.admin && !privileges_allowed {
+            bail!(
+                "Custom command '{}' has admin=true but custom_command_privileges_allowed=false. \
+                 Set custom_command_privileges_allowed=true if you understand the security implications.",
+                cmd.name
+            );
+        }
+
+        match cmd.command_type {
+            CustomCommandType::Powershell => {
+                if cmd.script.is_none() || cmd.script.as_ref().map(|s| s.is_empty()).unwrap_or(true)
+                {
+                    bail!(
+                        "Custom command '{}' (powershell) requires 'script' field",
+                        cmd.name
+                    );
+                }
+            }
+            CustomCommandType::Executable => {
+                if cmd.path.is_none() || cmd.path.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                    bail!(
+                        "Custom command '{}' (executable) requires 'path' field",
+                        cmd.name
+                    );
+                }
+            }
+            CustomCommandType::Shell => {
+                if cmd.command.is_none()
+                    || cmd.command.as_ref().map(|s| s.is_empty()).unwrap_or(true)
+                {
+                    bail!(
+                        "Custom command '{}' (shell) requires 'command' field",
+                        cmd.name
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get device ID (device_name with dashes replaced by underscores)
+    pub fn device_id(&self) -> String {
+        self.device_name.replace('-', "_")
+    }
+
+    /// Get MQTT client ID
+    pub fn client_id(&self) -> String {
+        self.mqtt
+            .client_id
+            .clone()
+            .unwrap_or_else(|| format!("pc-agent-{}", self.device_name))
+    }
+}
+
+/// Watch userConfig.json for changes and reload games on modification
+pub async fn watch_config(state: Arc<AppState>) {
+    let config_path = match Config::config_path() {
+        Ok(p) => p,
+        Err(e) => {
+            error!("Cannot watch config: {}", e);
+            return;
+        }
+    };
+
+    let dir = match config_path.parent() {
+        Some(d) => d.to_path_buf(),
+        None => {
+            error!("Cannot get config directory");
+            return;
+        }
+    };
+
+    let filename = config_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+
+    // Create watcher in a blocking task since notify isn't async
+    let filename_clone = filename.clone();
+    let _watch_handle = tokio::task::spawn_blocking(move || {
+        let tx = tx;
+        let mut watcher = match notify::recommended_watcher(move |res: Result<Event, _>| {
+            if let Ok(event) = res {
+                let _ = tx.blocking_send(event);
+            }
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                error!("Failed to create file watcher: {}", e);
+                return;
+            }
+        };
+
+        if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
+            error!("Failed to watch config directory: {}", e);
+            return;
+        }
+
+        info!("Watching for changes to {:?}", dir.join(&filename_clone));
+
+        // Keep watcher alive until shutdown - blocks instantly (no polling)
+        let _ = stop_rx.recv();
+    });
+
+    let mut shutdown_rx = state.shutdown_tx.subscribe();
+
+    // Debounce: editors emit multiple events per save (write temp, rename, update).
+    // Wait 500ms after the last event before reloading to avoid redundant work.
+    let mut debounce_deadline: Option<tokio::time::Instant> = None;
+
+    loop {
+        let debounce_sleep = match debounce_deadline {
+            Some(d) => tokio::time::sleep_until(d),
+            None => tokio::time::sleep(std::time::Duration::from_hours(24)),
+        };
+        tokio::pin!(debounce_sleep);
+
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.recv() => {
+                info!("Config watcher shutting down");
+                drop(stop_tx); // Unblocks the watcher thread instantly
+                break;
+            }
+            () = &mut debounce_sleep, if debounce_deadline.is_some() => {
+                debounce_deadline = None;
+                info!("Config file changed, reloading...");
+                reload_hot_config(&state).await;
+            }
+            Some(event) = rx.recv() => {
+                // Check if it's our file
+                let is_our_file = event.paths.iter().any(|p| {
+                    p.file_name()
+                        .map(|n| n.to_string_lossy() == filename)
+                        .unwrap_or(false)
+                });
+
+                if is_our_file {
+                    match event.kind {
+                        EventKind::Modify(_) | EventKind::Create(_) => {
+                            debounce_deadline = Some(
+                                tokio::time::Instant::now()
+                                    + std::time::Duration::from_millis(500),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Reload hot-reloadable config fields (games, intervals, commands, sensors, security flags)
+async fn reload_hot_config(state: &AppState) {
+    // Config::load() does synchronous file I/O - run on the blocking pool to
+    // avoid stalling the single-threaded tokio runtime.
+    let new_config = match tokio::task::spawn_blocking(Config::load).await {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => {
+            warn!("Failed to reload config: {}", e);
+            return;
+        }
+        Err(e) => {
+            error!("Config reload task panicked: {}", e);
+            return;
+        }
+    };
+
+    {
+        let mut config = state.config.write().await;
+        let old_count = config.games.len();
+        config.games = new_config.games;
+
+        // Reload intervals (sensors pick up changes via config_generation)
+        config.intervals = new_config.intervals;
+
+        // Security-relevant flags
+        config.allow_raw_commands = new_config.allow_raw_commands;
+
+        // Discord keybind
+        config.discord_keybind = new_config.discord_keybind;
+
+        // Also reload custom sensors/commands config
+        let old_sensors_enabled = config.custom_sensors_enabled;
+        let old_commands_enabled = config.custom_commands_enabled;
+
+        config.custom_sensors_enabled = new_config.custom_sensors_enabled;
+        config.custom_commands_enabled = new_config.custom_commands_enabled;
+        config.custom_command_privileges_allowed = new_config.custom_command_privileges_allowed;
+        config.custom_sensors = new_config.custom_sensors;
+        config.custom_commands = new_config.custom_commands;
+
+        let new_game_count = config.games.len();
+
+        // Capture values for logging before dropping lock
+        let new_sensors_enabled = config.custom_sensors_enabled;
+        let new_commands_enabled = config.custom_commands_enabled;
+        let new_privileges_allowed = config.custom_command_privileges_allowed;
+
+        // Drop write lock before notifying subscribers
+        drop(config);
+
+        info!("Reloaded games: {} (was {})", new_game_count, old_count);
+
+        // Notify subscribers (e.g., GameSensor) that config changed
+        let _ = state.config_generation.send(());
+
+        // Log security-relevant changes (using captured locals - no lock needed)
+        if new_sensors_enabled != old_sensors_enabled {
+            if new_sensors_enabled {
+                warn!("custom_sensors_enabled is now TRUE");
+            } else {
+                info!("custom_sensors_enabled is now false");
+            }
+        }
+        if new_commands_enabled != old_commands_enabled {
+            if new_commands_enabled {
+                warn!(
+                    "custom_commands_enabled is now TRUE - arbitrary code execution possible via MQTT"
+                );
+            } else {
+                info!("custom_commands_enabled is now false");
+            }
+        }
+        if new_privileges_allowed {
+            warn!(
+                "custom_command_privileges_allowed is TRUE - commands can run with ADMIN privileges"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_config() -> Config {
+        Config {
+            device_name: "test-pc".to_string(),
+            mqtt: MqttConfig {
+                broker: "tcp://localhost:1883".to_string(),
+                user: String::new(),
+                pass: String::new(),
+                client_id: None,
+            },
+            intervals: IntervalConfig::default(),
+            features: FeatureConfig::default(),
+            games: HashMap::new(),
+            custom_sensors_enabled: false,
+            custom_commands_enabled: false,
+            custom_command_privileges_allowed: false,
+            allow_raw_commands: false,
+            discord_keybind: None,
+            custom_sensors: vec![],
+            custom_commands: vec![],
+            update_channel: default_update_channel(),
+            disk_sensor_paths: Vec::new(),
+        }
+    }
+
+    // ===== New field defaults =====
+
+    #[test]
+    fn test_update_channel_default() {
+        assert_eq!(default_update_channel(), "stable");
+    }
+
+    #[test]
+    fn test_minimal_config_new_fields() {
+        let config = minimal_config();
+        assert_eq!(config.update_channel, "stable");
+        assert!(config.disk_sensor_paths.is_empty());
+        assert!(!config.features.gpu_sensor);
+        assert!(!config.features.network_sensor);
+        assert!(!config.features.disk_sensor);
+        assert!(!config.features.uptime_sensor);
+        assert!(!config.features.hwinfo_sensor);
+    }
+
+    #[test]
+    fn test_feature_config_new_sensors_default_off() {
+        let features = FeatureConfig::default();
+        assert!(!features.gpu_sensor);
+        assert!(!features.network_sensor);
+        assert!(!features.disk_sensor);
+        assert!(!features.uptime_sensor);
+        assert!(!features.hwinfo_sensor);
+    }
+
+    #[test]
+    fn test_config_deserialize_new_fields() {
+        let json = r#"{
+            "device_name": "test-pc",
+            "mqtt": { "broker": "tcp://localhost:1883", "user": "", "pass": "" },
+            "update_channel": "beta",
+            "disk_sensor_paths": ["C:\\", "/home"],
+            "features": {
+                "gpu_sensor": true,
+                "network_sensor": true,
+                "disk_sensor": true,
+                "uptime_sensor": true
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.update_channel, "beta");
+        assert_eq!(config.disk_sensor_paths, vec!["C:\\", "/home"]);
+        assert!(config.features.gpu_sensor);
+        assert!(config.features.network_sensor);
+        assert!(config.features.disk_sensor);
+        assert!(config.features.uptime_sensor);
+    }
+
+    #[test]
+    fn test_config_deserialize_missing_new_fields_uses_defaults() {
+        let json = r#"{
+            "device_name": "test-pc",
+            "mqtt": { "broker": "tcp://localhost:1883", "user": "", "pass": "" }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.update_channel, "stable");
+        assert!(config.disk_sensor_paths.is_empty());
+        assert!(!config.features.gpu_sensor);
+    }
+
+    // ===== GameConfig tests =====
+
+    #[test]
+    fn test_game_config_simple_game_id() {
+        let config = GameConfig::Simple("battlefield_6".to_string());
+        assert_eq!(config.game_id(), "battlefield_6");
+        assert_eq!(config.app_id(), None);
+    }
+
+    #[test]
+    fn test_game_config_full_game_id() {
+        let config = GameConfig::Full {
+            game_id: "counter_strike_2".to_string(),
+            app_id: Some(730),
+            name: Some("Counter-Strike 2".to_string()),
+            launch_command: None,
+            auto_discovered: true,
+            exposed: true,
+        };
+        assert_eq!(config.game_id(), "counter_strike_2");
+        assert_eq!(config.app_id(), Some(730));
+    }
+
+    #[test]
+    fn test_game_config_display_name_from_id() {
+        let config = GameConfig::Simple("battlefield_6".to_string());
+        assert_eq!(config.display_name(), "Battlefield 6");
+    }
+
+    #[test]
+    fn test_game_config_display_name_explicit() {
+        let config = GameConfig::Full {
+            game_id: "cs2".to_string(),
+            app_id: Some(730),
+            name: Some("Counter-Strike 2".to_string()),
+            launch_command: None,
+            auto_discovered: false,
+            exposed: true,
+        };
+        assert_eq!(config.display_name(), "Counter-Strike 2");
+    }
+
+    #[test]
+    fn test_game_config_smart_title_with_numbers() {
+        // Numbers should stay lowercase
+        let config = GameConfig::Simple("gta_5".to_string());
+        assert_eq!(config.display_name(), "Gta 5");
+    }
+
+    #[test]
+    fn test_game_config_from_steam() {
+        let config = GameConfig::from_steam(
+            "counter_strike_2".to_string(),
+            730,
+            "Counter-Strike 2".to_string(),
+        );
+        assert_eq!(config.game_id(), "counter_strike_2");
+        assert_eq!(config.app_id(), Some(730));
+        assert_eq!(config.display_name(), "Counter-Strike 2");
+        match config {
+            GameConfig::Full {
+                auto_discovered, ..
+            } => assert!(auto_discovered),
+            _ => panic!("Expected Full variant"),
+        }
+    }
+
+    // ===== GameConfig JSON serialization tests =====
+
+    #[test]
+    fn test_launch_command_steam_game() {
+        let config = GameConfig::Full {
+            game_id: "cs2".into(),
+            app_id: Some(730),
+            name: None,
+            launch_command: None,
+            auto_discovered: false,
+            exposed: true,
+        };
+        assert_eq!(config.launch_command(), Some("steam:730".into()));
+    }
+
+    #[test]
+    fn test_launch_command_explicit_overrides_steam() {
+        let config = GameConfig::Full {
+            game_id: "fortnite".into(),
+            app_id: None,
+            name: None,
+            launch_command: Some("lnk:C:\\Users\\danke\\Desktop\\Fortnite.lnk".into()),
+            auto_discovered: false,
+            exposed: true,
+        };
+        assert_eq!(
+            config.launch_command(),
+            Some("lnk:C:\\Users\\danke\\Desktop\\Fortnite.lnk".into())
+        );
+    }
+
+    #[test]
+    fn test_launch_command_simple_none() {
+        let config = GameConfig::Simple("test".into());
+        assert_eq!(config.launch_command(), None);
+    }
+
+    #[test]
+    fn test_launch_command_no_app_id_no_explicit() {
+        let config = GameConfig::Full {
+            game_id: "unknown".into(),
+            app_id: None,
+            name: None,
+            launch_command: None,
+            auto_discovered: false,
+            exposed: true,
+        };
+        assert_eq!(config.launch_command(), None);
+    }
+
+    #[test]
+    fn test_launch_command_deserializes_from_json() {
+        let json = r#"{"game_id": "fortnite", "launch_command": "lnk:C:\\Fortnite.lnk"}"#;
+        let config: GameConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.launch_command(), Some("lnk:C:\\Fortnite.lnk".into()));
+    }
+
+    #[test]
+    fn test_game_config_deserialize_simple() {
+        let json = r#""battlefield_6""#;
+        let config: GameConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.game_id(), "battlefield_6");
+    }
+
+    #[test]
+    fn test_game_config_deserialize_full() {
+        let json = r#"{"game_id": "cs2", "app_id": 730, "name": "Counter-Strike 2"}"#;
+        let config: GameConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.game_id(), "cs2");
+        assert_eq!(config.app_id(), Some(730));
+    }
+
+    // ===== Config validation tests =====
+
+    #[test]
+    fn test_validate_empty_device_name() {
+        let mut config = minimal_config();
+        config.device_name = String::new();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_default_device_name() {
+        let mut config = minimal_config();
+        config.device_name = "my-pc".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_whitespace_in_device_name() {
+        let mut config = minimal_config();
+        config.device_name = "my pc".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_empty_broker() {
+        let mut config = minimal_config();
+        config.mqtt.broker = String::new();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_invalid_broker_scheme() {
+        let mut config = minimal_config();
+        config.mqtt.broker = "http://localhost:1883".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_ssl_broker() {
+        let mut config = minimal_config();
+        config.mqtt.broker = "ssl://mqtt.example.com:8883".to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_ws_broker() {
+        let mut config = minimal_config();
+        config.mqtt.broker = "ws://localhost:8083".to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_wss_broker() {
+        let mut config = minimal_config();
+        config.mqtt.broker = "wss://mqtt.example.com:8084".to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    // ===== Custom sensor validation =====
+
+    #[test]
+    fn test_validate_custom_sensor_empty_name() {
+        let sensor = CustomSensor {
+            name: String::new(),
+            sensor_type: CustomSensorType::ProcessExists,
+            interval_seconds: 30,
+            unit: None,
+            icon: None,
+            script: None,
+            process: Some("notepad.exe".to_string()),
+            file_path: None,
+            registry_key: None,
+            registry_value: None,
+        };
+        assert!(Config::validate_custom_sensor(&sensor).is_err());
+    }
+
+    #[test]
+    fn test_validate_custom_sensor_whitespace_name() {
+        let sensor = CustomSensor {
+            name: "my sensor".to_string(),
+            sensor_type: CustomSensorType::ProcessExists,
+            interval_seconds: 30,
+            unit: None,
+            icon: None,
+            script: None,
+            process: Some("notepad.exe".to_string()),
+            file_path: None,
+            registry_key: None,
+            registry_value: None,
+        };
+        assert!(Config::validate_custom_sensor(&sensor).is_err());
+    }
+
+    #[test]
+    fn test_validate_custom_sensor_powershell_missing_script() {
+        let sensor = CustomSensor {
+            name: "test".to_string(),
+            sensor_type: CustomSensorType::Powershell,
+            interval_seconds: 30,
+            unit: None,
+            icon: None,
+            script: None,
+            process: None,
+            file_path: None,
+            registry_key: None,
+            registry_value: None,
+        };
+        assert!(Config::validate_custom_sensor(&sensor).is_err());
+    }
+
+    #[test]
+    fn test_validate_custom_sensor_process_exists_valid() {
+        let sensor = CustomSensor {
+            name: "notepad_running".to_string(),
+            sensor_type: CustomSensorType::ProcessExists,
+            interval_seconds: 30,
+            unit: None,
+            icon: None,
+            script: None,
+            process: Some("notepad.exe".to_string()),
+            file_path: None,
+            registry_key: None,
+            registry_value: None,
+        };
+        assert!(Config::validate_custom_sensor(&sensor).is_ok());
+    }
+
+    #[test]
+    fn test_validate_custom_sensor_registry_needs_both_fields() {
+        let sensor = CustomSensor {
+            name: "reg_test".to_string(),
+            sensor_type: CustomSensorType::Registry,
+            interval_seconds: 30,
+            unit: None,
+            icon: None,
+            script: None,
+            process: None,
+            file_path: None,
+            registry_key: Some("HKLM\\SOFTWARE\\Test".to_string()),
+            registry_value: None, // Missing!
+        };
+        assert!(Config::validate_custom_sensor(&sensor).is_err());
+    }
+
+    // ===== Custom command validation =====
+
+    #[test]
+    fn test_validate_custom_command_admin_not_allowed() {
+        let cmd = CustomCommand {
+            name: "reboot".to_string(),
+            command_type: CustomCommandType::Powershell,
+            icon: None,
+            admin: true,
+            script: Some("Restart-Computer".to_string()),
+            path: None,
+            args: None,
+            command: None,
+        };
+        // privileges_allowed = false
+        assert!(Config::validate_custom_command(&cmd, false).is_err());
+    }
+
+    #[test]
+    fn test_validate_custom_command_admin_allowed() {
+        let cmd = CustomCommand {
+            name: "reboot".to_string(),
+            command_type: CustomCommandType::Powershell,
+            icon: None,
+            admin: true,
+            script: Some("Restart-Computer".to_string()),
+            path: None,
+            args: None,
+            command: None,
+        };
+        // privileges_allowed = true
+        assert!(Config::validate_custom_command(&cmd, true).is_ok());
+    }
+
+    #[test]
+    fn test_validate_custom_command_executable_missing_path() {
+        let cmd = CustomCommand {
+            name: "launch".to_string(),
+            command_type: CustomCommandType::Executable,
+            icon: None,
+            admin: false,
+            script: None,
+            path: None, // Missing!
+            args: None,
+            command: None,
+        };
+        assert!(Config::validate_custom_command(&cmd, false).is_err());
+    }
+
+    // ===== Config helper methods =====
+
+    #[test]
+    fn test_device_id() {
+        let mut config = minimal_config();
+        config.device_name = "dank0i-pc".to_string();
+        assert_eq!(config.device_id(), "dank0i_pc");
+    }
+
+    #[test]
+    fn test_client_id_default() {
+        let mut config = minimal_config();
+        config.device_name = "test-pc".to_string();
+        config.mqtt.client_id = None;
+        assert_eq!(config.client_id(), "pc-agent-test-pc");
+    }
+
+    #[test]
+    fn test_client_id_custom() {
+        let mut config = minimal_config();
+        config.mqtt.client_id = Some("custom-id".to_string());
+        assert_eq!(config.client_id(), "custom-id");
+    }
+
+    // ===== Interval defaults =====
+
+    #[test]
+    fn test_interval_defaults() {
+        let intervals = IntervalConfig::default();
+        assert_eq!(intervals.game_sensor, 5);
+        assert_eq!(intervals.last_active, 10);
+        assert_eq!(intervals.steam_check, 30);
+    }
+
+    // ===== Full config JSON parsing =====
+
+    #[test]
+    fn test_parse_minimal_config_json() {
+        let json = r#"{
+            "device_name": "test-pc",
+            "mqtt": {
+                "broker": "tcp://localhost:1883"
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.device_name, "test-pc");
+        assert!(config.games.is_empty());
+        assert!(!config.custom_sensors_enabled);
+    }
+
+    #[test]
+    fn test_parse_config_with_games() {
+        let json = r#"{
+            "device_name": "test-pc",
+            "mqtt": { "broker": "tcp://localhost:1883" },
+            "games": {
+                "bf2042.exe": "battlefield_6",
+                "cs2.exe": {
+                    "game_id": "counter_strike_2",
+                    "app_id": 730,
+                    "name": "Counter-Strike 2"
+                }
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.games.len(), 2);
+        assert_eq!(
+            config.games.get("bf2042.exe").unwrap().game_id(),
+            "battlefield_6"
+        );
+        assert_eq!(config.games.get("cs2.exe").unwrap().app_id(), Some(730));
+    }
+
+    // --- Integration tests (moved from tests/config_integration.rs) ---
+
+    /// Helper to parse raw JSON for loose-schema tests
+    fn parse_config_json(json: &str) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
+    #[test]
+    fn test_complete_config_parses() {
+        let json = r#"{
+            "device_name": "test-pc",
+            "mqtt": {
+                "broker": "tcp://localhost:1883",
+                "user": "homeassistant",
+                "pass": "secret123"
+            },
+            "features": {
+                "game_detection": true,
+                "idle_tracking": true,
+                "power_events": true,
+                "notifications": true,
+                "system_sensors": true,
+                "audio_control": false,
+                "steam_updates": true
+            },
+            "intervals": {
+                "game_sensor": 5,
+                "last_active": 10,
+                "screensaver": 10,
+                "availability": 30,
+                "steam_check": 60,
+                "steam_updating": 10
+            },
+            "games": {
+                "bf2042.exe": "battlefield_6",
+                "cs2.exe": {
+                    "game_id": "counter_strike_2",
+                    "app_id": 730,
+                    "name": "Counter-Strike 2"
+                },
+                "helldivers2.exe": {
+                    "game_id": "helldivers_2",
+                    "app_id": 553850
+                }
+            },
+            "custom_sensors_enabled": false,
+            "custom_commands_enabled": false,
+            "custom_command_privileges_allowed": false,
+            "custom_sensors": [],
+            "custom_commands": []
+        }"#;
+
+        let config: serde_json::Value = parse_config_json(json).expect("Failed to parse config");
+
+        assert_eq!(config["device_name"], "test-pc");
+        assert_eq!(config["mqtt"]["broker"], "tcp://localhost:1883");
+        assert!(config["features"]["game_detection"].as_bool().unwrap());
+        assert_eq!(config["games"]["bf2042.exe"], "battlefield_6");
+        assert_eq!(config["games"]["cs2.exe"]["app_id"], 730);
+    }
+
+    #[test]
+    fn test_minimal_config_parses() {
+        let json = r#"{
+            "device_name": "minimal-pc",
+            "mqtt": {
+                "broker": "tcp://192.168.1.100:1883"
+            }
+        }"#;
+
+        let config: serde_json::Value =
+            parse_config_json(json).expect("Failed to parse minimal config");
+        assert_eq!(config["device_name"], "minimal-pc");
+    }
+
+    #[test]
+    fn test_config_with_custom_sensors() {
+        let json = r#"{
+            "device_name": "sensor-pc",
+            "mqtt": { "broker": "tcp://localhost:1883" },
+            "custom_sensors_enabled": true,
+            "custom_sensors": [
+                {
+                    "name": "cpu_temp",
+                    "type": "powershell",
+                    "script": "Get-WmiObject MSAcpi_ThermalZoneTemperature -Namespace root/wmi | Select -First 1 | % { ($_.CurrentTemperature - 2732) / 10 }",
+                    "interval_seconds": 60,
+                    "unit": "°C",
+                    "icon": "mdi:thermometer"
+                },
+                {
+                    "name": "notepad_running",
+                    "type": "process_exists",
+                    "process": "notepad.exe",
+                    "interval_seconds": 30
+                }
+            ]
+        }"#;
+
+        let config: serde_json::Value = parse_config_json(json).expect("Failed to parse");
+
+        assert!(config["custom_sensors_enabled"].as_bool().unwrap());
+        assert_eq!(config["custom_sensors"].as_array().unwrap().len(), 2);
+        assert_eq!(config["custom_sensors"][0]["name"], "cpu_temp");
+        assert_eq!(config["custom_sensors"][1]["type"], "process_exists");
+    }
+
+    #[test]
+    fn test_config_with_custom_commands() {
+        let json = r#"{
+            "device_name": "cmd-pc",
+            "mqtt": { "broker": "tcp://localhost:1883" },
+            "custom_commands_enabled": true,
+            "custom_command_privileges_allowed": false,
+            "custom_commands": [
+                {
+                    "name": "open_steam",
+                    "type": "executable",
+                    "path": "C:\\Program Files (x86)\\Steam\\steam.exe",
+                    "args": ["-silent"],
+                    "icon": "mdi:steam"
+                },
+                {
+                    "name": "clear_temp",
+                    "type": "powershell",
+                    "script": "Remove-Item $env:TEMP\\* -Recurse -Force -ErrorAction SilentlyContinue"
+                }
+            ]
+        }"#;
+
+        let config: serde_json::Value = parse_config_json(json).expect("Failed to parse");
+
+        assert!(config["custom_commands_enabled"].as_bool().unwrap());
+        assert!(
+            !config["custom_command_privileges_allowed"]
+                .as_bool()
+                .unwrap()
+        );
+        assert_eq!(config["custom_commands"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_config_game_variants_json() {
+        let json = r#"{
+            "device_name": "game-pc",
+            "mqtt": { "broker": "tcp://localhost:1883" },
+            "games": {
+                "simple_game.exe": "simple_game",
+                "steam_game.exe": {
+                    "game_id": "steam_game",
+                    "app_id": 12345,
+                    "name": "Steam Game: The Game",
+                    "auto_discovered": true
+                },
+                "no_name.exe": {
+                    "game_id": "no_name_game",
+                    "app_id": 67890
+                }
+            }
+        }"#;
+
+        let config: serde_json::Value = parse_config_json(json).expect("Failed to parse");
+        let games = config["games"].as_object().unwrap();
+
+        assert_eq!(games["simple_game.exe"], "simple_game");
+        assert_eq!(games["steam_game.exe"]["game_id"], "steam_game");
+        assert_eq!(games["steam_game.exe"]["app_id"], 12345);
+        assert_eq!(games["steam_game.exe"]["name"], "Steam Game: The Game");
+        assert!(
+            games["steam_game.exe"]["auto_discovered"]
+                .as_bool()
+                .unwrap()
+        );
+        assert_eq!(games["no_name.exe"]["game_id"], "no_name_game");
+        assert!(games["no_name.exe"]["name"].is_null());
+    }
+
+    #[test]
+    fn test_write_and_read_temp_config() {
+        use std::io::Write;
+        let json = r#"{"device_name": "temp-test-pc", "mqtt": {"broker": "tcp://localhost:1883"}}"#;
+
+        let mut temp_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
+        temp_file
+            .write_all(json.as_bytes())
+            .expect("Failed to write");
+
+        let content = std::fs::read_to_string(temp_file.path()).expect("Failed to read");
+        let config: serde_json::Value = serde_json::from_str(&content).expect("Failed to parse");
+
+        assert_eq!(config["device_name"], "temp-test-pc");
+    }
+
+    #[test]
+    fn test_invalid_json_fails() {
+        let bad_json = r#"{ "device_name": "test, "mqtt": {} }"#;
+        assert!(parse_config_json(bad_json).is_err());
+    }
+
+    #[test]
+    fn test_empty_json_object() {
+        let json = "{}";
+        let config: serde_json::Value = parse_config_json(json).expect("Failed to parse");
+        assert!(config["device_name"].is_null());
+    }
+}

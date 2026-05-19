@@ -1,0 +1,216 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 0 * * 0'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ============================================
+  # CODE QUALITY (Linux - fast)
+  # ============================================
+
+  quality:
+    name: Format, Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux dependencies
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: libssl-dev pkg-config libxdo-dev
+      - run: cargo fmt --check
+      - run: cargo clippy -- -D warnings
+      - run: cargo test --all-features
+
+  # ============================================
+  # SECURITY (all parallel, no Rust build needed)
+  # ============================================
+
+  cargo-deny:
+    name: Dependency Policy & Advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command-arguments: --config .cargo/deny.toml
+
+  gitleaks:
+    name: Secret Detection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  trivy:
+    name: Vulnerability Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: aquasecurity/trivy-action@0.35.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
+          ignore-unfixed: true
+
+  semgrep:
+    name: Static Analysis
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v6
+      - run: semgrep scan --config auto --error --exclude-rule "javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket"
+
+  # ============================================
+  # BUILD (tags + PRs only)
+  # ============================================
+
+  build:
+    needs: [quality, cargo-deny, gitleaks, trivy, semgrep]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'pull_request'
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: pc-bridge.exe
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: pc-bridge
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config libxdo-dev
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Check binary size
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $binary = "target/${{ matrix.target }}/release/pc-bridge.exe"
+          $size = (Get-Item $binary).Length
+          $sizeMB = [math]::Round($size / 1MB, 2)
+          Write-Host "Binary size: $sizeMB MB ($size bytes)"
+          if ($size -gt 15MB) {
+            Write-Host "::warning::Binary size ($sizeMB MB) exceeds 15MB threshold"
+          }
+          if ($size -gt 25MB) {
+            Write-Host "::error::Binary size ($sizeMB MB) exceeds 25MB limit"
+            exit 1
+          }
+
+      - name: Sign Windows binary
+        if: matrix.os == 'windows-latest' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          SIGNING_CERT_PFX: ${{ secrets.SIGNING_CERT_PFX }}
+          SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+        run: |
+          $pfxBytes = [Convert]::FromBase64String($env:SIGNING_CERT_PFX)
+          $pfxPath = "$env:RUNNER_TEMP\cert.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
+          
+          $signtool = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object -Descending | Select-Object -First 1
+          & $signtool.FullName sign `
+            /f $pfxPath `
+            /p $env:SIGNING_CERT_PASSWORD `
+            /fd SHA256 `
+            /tr http://timestamp.digicert.com `
+            /td SHA256 `
+            /d "PC Bridge" `
+            /du "https://github.com/dank0i/pc-bridge" `
+            target/${{ matrix.target }}/release/pc-bridge.exe
+          
+          Remove-Item $pfxPath
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: pc-bridge-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact }}
+
+  # ============================================
+  # RELEASE (tags only, after build)
+  # ============================================
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: pc-bridge-x86_64-pc-windows-msvc
+          path: windows
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: pc-bridge-x86_64-unknown-linux-gnu
+          path: linux
+
+      - name: Rename artifacts
+        run: |
+          mv windows/pc-bridge.exe ./pc-bridge-windows.exe
+          mv linux/pc-bridge ./pc-bridge-linux
+          chmod +x pc-bridge-linux
+          rm -rf windows linux
+
+      - name: Generate SHA-256 checksums
+        run: |
+          sha256sum pc-bridge-windows.exe > pc-bridge-windows.exe.sha256
+          sha256sum pc-bridge-linux > pc-bridge-linux.sha256
+
+      - name: Upload assets to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            pc-bridge-windows.exe
+            pc-bridge-windows.exe.sha256
+            pc-bridge-linux
+            pc-bridge-linux.sha256
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: gh release edit "$TAG" --draft=false --repo "$REPO"
