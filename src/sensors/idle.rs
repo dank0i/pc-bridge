@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use tokio::time::interval;
+use tokio::time::{MissedTickBehavior, interval};
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 
@@ -35,6 +35,8 @@ impl IdleSensor {
         drop(config);
 
         let mut tick = interval(Duration::from_secs(interval_secs));
+
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
         let mut process_rx = self.state.process_watcher.subscribe();
         let mut config_rx = self.state.config_generation.subscribe();
@@ -72,6 +74,7 @@ impl IdleSensor {
                     let new_interval = config.intervals.last_active.max(1);
                     drop(config);
                     tick = interval(Duration::from_secs(new_interval));
+                    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
                     debug!("Idle sensor: interval updated to {}s", new_interval);
                 }
                 _ = tick.tick() => {

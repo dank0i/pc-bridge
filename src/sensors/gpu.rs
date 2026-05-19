@@ -7,7 +7,7 @@
 use log::warn;
 use log::{debug, info};
 use std::sync::Arc;
-use tokio::time::{Duration, interval};
+use tokio::time::{Duration, MissedTickBehavior, interval};
 
 use crate::AppState;
 
@@ -29,6 +29,8 @@ impl GpuSensor {
         drop(config);
 
         let mut tick = interval(Duration::from_secs(interval_secs));
+
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
         let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
         let mut prev_gpu = String::new();
