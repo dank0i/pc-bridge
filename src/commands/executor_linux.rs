@@ -140,7 +140,10 @@ impl CommandExecutor {
                 } else {
                     "systemctl hibernate"
                 };
-                let _ = Command::new("bash").args(["-c", cmd]).spawn();
+                // .status() blocks until systemctl returns (which is fast -
+                // the suspend itself is async via systemd) and reaps the
+                // process so we don't leak a zombie.
+                let _ = Command::new("bash").args(["-c", cmd]).status();
                 return Ok(());
             }
             "notification" => {
@@ -294,9 +297,11 @@ fn send_keybind_linux(keybind: &str) {
         .join("+");
 
     info!("Sending keybind via xdotool: {}", xdotool_keybind);
+    // .status() reaps the child immediately - xdotool returns once the key
+    // event is queued (microseconds).  .spawn() alone would leak a zombie.
     match Command::new("xdotool")
         .args(["key", &xdotool_keybind])
-        .spawn()
+        .status()
     {
         Ok(_) => {}
         Err(e) => warn!("Failed to send keybind via xdotool: {}", e),
