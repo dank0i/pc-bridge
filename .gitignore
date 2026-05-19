@@ -1,0 +1,14 @@
+# User config (contains personal settings)
+userConfig.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+/target/
