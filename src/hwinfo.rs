@@ -491,12 +491,12 @@ impl HwInfoClient {
 mod tests {
     use super::*;
 
+    /// One reading row in the test buffer.
+    /// Tuple shape: (sensor_id, sensor_index, label, unit, value, min, max, avg)
+    type TestReading<'a> = (u32, usize, &'a str, &'a str, f64, f64, f64, f64);
+
     /// Build a minimal HWiNFO-format byte buffer for testing.
-    fn build_test_buffer(
-        version: u32,
-        sensors: &[&str],
-        readings: &[(u32, usize, &str, &str, f64, f64, f64, f64)],
-    ) -> Vec<u8> {
+    fn build_test_buffer(version: u32, sensors: &[&str], readings: &[TestReading]) -> Vec<u8> {
         // Packed layout: sensor element is dwSensorID(4) + dwSensorInst(4) +
         // szSensorNameOrig[128] + szSensorNameUser[128] = 264 bytes (no padding).
         // Reading element is RE_VALUE_AVG(308) + 8 = 316 bytes (packed; Value
