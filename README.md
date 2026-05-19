@@ -31,6 +31,7 @@ PC Bridge runs on your PC and connects to Home Assistant over MQTT. It exposes y
 | **Power Events** | Detects sleep/wake/display state instantly via OS events |
 | **System Sensors** | CPU, memory, battery, active window (native APIs) |
 | **GPU Sensor** | GPU utilization percentage (PDH on Windows, sysfs/nvidia-smi on Linux) |
+| **HWiNFO Sensors** | Hardware monitoring via HWiNFO64 shared memory: GPU/CPU power, temps, clocks, fan RPMs, VRM, framerate (Windows only) |
 | **Network Sensor** | Network throughput (bytes/sec per direction) |
 | **Disk Sensor** | Disk usage for configured paths |
 | **Uptime Sensor** | System uptime in seconds |
@@ -100,6 +101,7 @@ Edit `userConfig.json` next to the executable:
     "steam_updates": false,
     "discord": false,
     "gpu_sensor": false,
+    "hwinfo_sensor": false,
     "network_sensor": false,
     "disk_sensor": false,
     "uptime_sensor": false
@@ -139,6 +141,7 @@ All features are opt-in via the `features` object (except `power_events` which d
 | `steam_updates` | `false` | Detect when Steam games are updating |
 | `discord` | `false` | Discord voice channel join/leave buttons |
 | `gpu_sensor` | `false` | GPU utilization percentage |
+| `hwinfo_sensor` | `false` | Read hardware sensors from HWiNFO64 shared memory (Windows only, requires HWiNFO running). See below for setup. |
 | `network_sensor` | `false` | Network throughput (rx/tx bytes/sec) |
 | `disk_sensor` | `false` | Disk usage for configured `disk_sensor_paths` |
 | `uptime_sensor` | `false` | System uptime in seconds |
@@ -151,6 +154,31 @@ All features are opt-in via the `features` object (except `power_events` which d
 | `disk_sensor_paths` | `[]` | Paths to check for disk usage (e.g. `["C:\\", "D:\\"]` or `["/", "/home"]`) |
 
 > **Note:** Missing fields are automatically added with their defaults when upgrading.
+
+### HWiNFO Sensors (Windows only)
+
+When `hwinfo_sensor: true`, pc-bridge reads ~20 hardware sensors from HWiNFO64's shared memory and exposes them as Home Assistant entities. Entities published:
+
+| Category | Sensors |
+|---|---|
+| GPU | `gpu_power`, `gpu_temp`, `gpu_hotspot_temp`, `gpu_memory_temp`, `gpu_core_clock`, `gpu_memory_clock`, `gpu_core_load`, `gpu_vram_usage_pct`, `gpu_fan_rpm` |
+| CPU | `cpu_package_power`, `cpu_soc_power`, `cpu_package_temp`, `cpu_effective_clock`, `cpu_total_usage` |
+| Mainboard | `vrm_temp`, `case_fan_cpu`, `case_fan_cpu_opt`, `case_fan_system_1`, `case_fan_system_2` |
+| Game | `framerate` |
+
+Plus `hwinfo_diagnostic` showing which sensor names matched and which didn't on your hardware.
+
+#### Setup
+
+1. Install [HWiNFO64](https://www.hwinfo.com/) (free).
+2. Open HWiNFO Settings → check **Shared Memory Support**. Restart HWiNFO.
+3. Set `"hwinfo_sensor": true` in `userConfig.json` and restart pc-bridge.
+
+HWiNFO must be running for the sensors to publish. Entities become `unavailable` in HA when HWiNFO closes; they restore automatically when it reopens.
+
+Sensors are matched by name patterns and tolerate vendor differences (Intel/AMD CPUs, NVIDIA/AMD GPUs, various motherboard sensor naming). Anything that doesn't match on your specific hardware shows up in the `hwinfo_diagnostic` attributes so you can see what's missing.
+
+Publishes are throttled per-sensor: power changes by 5W, temperatures by 1°C, clocks by 50MHz, with a 30-second heartbeat so HA always has a recent value. The producer task only reads 8 bytes of shared memory between updates, so the CPU cost is negligible.
 
 ### Games Configuration
 
