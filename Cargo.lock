@@ -790,6 +790,7 @@ version = "4.4.0"
 dependencies = [
  "anyhow",
  "base64",
+ "bytes",
  "env_logger",
  "libc",
  "log",
