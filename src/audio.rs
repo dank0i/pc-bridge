@@ -322,14 +322,17 @@ pub fn get_volume() -> Option<f32> {
 
 #[cfg(unix)]
 pub fn set_volume(level: f32) -> bool {
+    // .status() waits and reaps; .spawn() alone leaks a zombie because Linux
+    // doesn't auto-reap dropped Child like Windows does.
     std::process::Command::new("pactl")
         .args([
             "set-sink-volume",
             "@DEFAULT_SINK@",
             &format!("{}%", level as u32),
         ])
-        .spawn()
-        .is_ok()
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 #[cfg(unix)]
@@ -352,16 +355,18 @@ pub fn set_mute(mute: bool) -> bool {
             "@DEFAULT_SINK@",
             if mute { "1" } else { "0" },
         ])
-        .spawn()
-        .is_ok()
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 #[cfg(unix)]
 pub fn toggle_mute() -> bool {
     std::process::Command::new("pactl")
         .args(["set-sink-mute", "@DEFAULT_SINK@", "toggle"])
-        .spawn()
-        .is_ok()
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 #[cfg(unix)]
@@ -376,5 +381,5 @@ pub fn send_media_key(key: MediaKey) {
 
     let _ = std::process::Command::new("xdotool")
         .args(["key", key_name])
-        .spawn();
+        .status();
 }

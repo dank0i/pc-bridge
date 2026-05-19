@@ -163,10 +163,12 @@ async fn execute_executable(cmd: &CustomCommand) -> anyhow::Result<()> {
     let admin = cmd.admin;
 
     tokio::task::spawn_blocking(move || {
+        // .status() waits and reaps; .spawn() alone would leak zombies on
+        // Linux (Windows reaps via Child::drop, Linux doesn't).
         if admin {
-            Command::new("sudo").arg(&path).args(&args).spawn()?;
+            Command::new("sudo").arg(&path).args(&args).status()?;
         } else {
-            Command::new(&path).args(&args).spawn()?;
+            Command::new(&path).args(&args).status()?;
         }
 
         Ok::<_, anyhow::Error>(())
@@ -224,10 +226,13 @@ async fn execute_shell(cmd: &CustomCommand) -> anyhow::Result<()> {
     let admin = cmd.admin;
 
     tokio::task::spawn_blocking(move || {
+        // .status() waits and reaps; see execute_executable for details.
         if admin {
-            Command::new("sudo").args(["sh", "-c", &command]).spawn()?;
+            Command::new("sudo")
+                .args(["sh", "-c", &command])
+                .status()?;
         } else {
-            Command::new("sh").args(["-c", &command]).spawn()?;
+            Command::new("sh").args(["-c", &command]).status()?;
         }
 
         Ok::<_, anyhow::Error>(())
