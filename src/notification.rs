@@ -103,7 +103,8 @@ pub fn show_toast(payload: &str) -> anyhow::Result<()> {
         &notif.message
     };
 
-    // Try notify-send (available on most Linux desktops)
+    // Try notify-send (available on most Linux desktops).  .status() waits
+    // and reaps the child; .spawn() alone would leak zombies on Linux.
     let result = Command::new("notify-send")
         .args([
             "--app-name=PC Bridge",
@@ -111,7 +112,7 @@ pub fn show_toast(payload: &str) -> anyhow::Result<()> {
             title,
             message,
         ])
-        .spawn();
+        .status();
 
     match result {
         Ok(_) => {
@@ -136,7 +137,7 @@ pub fn show_toast(payload: &str) -> anyhow::Result<()> {
                     "{}", // hints
                     "-1", // timeout (-1 = default)
                 ])
-                .spawn();
+                .status();
 
             match gdbus_result {
                 Ok(_) => {
