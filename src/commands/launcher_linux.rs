@@ -140,15 +140,53 @@ fn is_safe_identifier(s: &str) -> bool {
 }
 
 /// Check if path doesn't contain dangerous shell metacharacters.
-/// Single quotes are blocked because `exe:` wraps paths in `'...'` - a `'`
-/// in the path would break out.  Double quotes are harmless inside single
-/// quotes, so they're allowed (unlike the Windows version which double-quotes
-/// paths and must block `"`).
+///
+/// The exe: handler builds `format!("'{}' {}", path, args)` and runs it via
+/// `bash -c`. The path goes inside single-quotes (safe-ish), but the args
+/// portion is interpolated UNQUOTED - meaning any redirection or expansion
+/// metacharacter in the full string would execute. We therefore reject the
+/// full union of shell-meaningful characters:
+///
+/// - `;` `|` `&` - command separators
+/// - `$` `` ` `` - variable / command substitution
+/// - `'` - would close the single-quote around the path
+/// - `<` `>` - I/O redirection (the actual exploit in the audit:
+///   `exe:/bin/echo hi > /tmp/owned` would have worked before)
+/// - `(` `)` `{` `}` - subshells and brace expansion
+/// - `*` `?` `[` `]` - glob expansion (could match unintended files)
+/// - `~` - tilde expansion (silent path substitution)
+/// - `\` - backslash escape (allows hiding metacharacters)
+/// - `\n` `\r` - line breaks (multi-statement smuggling)
+///
+/// Spaces remain allowed so the args-after-path split still works.  Double
+/// quotes are harmless inside single quotes, so they're allowed (unlike the
+/// Windows version which double-quotes paths and must block `"`).
 fn is_safe_path(s: &str) -> bool {
     !s.is_empty()
-        && !s
-            .chars()
-            .any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '\'' | '\n' | '\r'))
+        && !s.chars().any(|c| {
+            matches!(
+                c,
+                ';' | '|'
+                    | '&'
+                    | '$'
+                    | '`'
+                    | '\''
+                    | '<'
+                    | '>'
+                    | '('
+                    | ')'
+                    | '{'
+                    | '}'
+                    | '*'
+                    | '?'
+                    | '['
+                    | ']'
+                    | '~'
+                    | '\\'
+                    | '\n'
+                    | '\r'
+            )
+        })
 }
 
 /// Check if string is a safe protocol URL (scheme://path, no shell metacharacters)
@@ -225,6 +263,28 @@ mod tests {
         assert_eq!(expand_launcher_shortcut("url:https://x;rm -rf /"), None);
         assert_eq!(expand_launcher_shortcut("url:https://x|evil"), None);
         assert_eq!(expand_launcher_shortcut("url:https://x&evil"), None);
+    }
+
+    #[test]
+    fn test_exe_rejects_redirection_metacharacters() {
+        // Pre-fix regression: these passed is_safe_path and produced shell
+        // commands that redirected, expanded, or substituted on bash -c.
+        assert_eq!(expand_launcher_shortcut("exe:/bin/echo hi > /tmp/owned"), None);
+        assert_eq!(expand_launcher_shortcut("exe:/bin/cat < /etc/passwd"), None);
+        assert_eq!(expand_launcher_shortcut("exe:/bin/sh -c (true)"), None);
+        assert_eq!(expand_launcher_shortcut("exe:/bin/echo {a,b}"), None);
+        assert_eq!(expand_launcher_shortcut("exe:/bin/echo *"), None);
+        assert_eq!(expand_launcher_shortcut("exe:~/evil"), None);
+        assert_eq!(expand_launcher_shortcut("exe:/bin/echo \\;"), None);
+    }
+
+    #[test]
+    fn test_exe_still_allows_legitimate_paths_and_flags() {
+        // Sanity check: regression guard that the new blocklist didn't break
+        // normal `exe:` use.
+        assert!(expand_launcher_shortcut("exe:/opt/games/the-witness").is_some());
+        assert!(expand_launcher_shortcut("exe:/opt/games/game --windowed").is_some());
+        assert!(expand_launcher_shortcut("exe:/opt/games/game --width=1920").is_some());
     }
 
     #[test]
