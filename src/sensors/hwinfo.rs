@@ -313,7 +313,7 @@ pub const MATCH_RULES: &[MatchRule] = &[
     },
     MatchRule {
         key: "framerate",
-        sensor_substrings: &["rivatuner", "rtss", "framerate"],
+        sensor_substrings: &["rivatuner", "rtss", "framerate", "presentmon"],
         label_substrings: &["Framerate"],
         label_excludes: &[],
         unit_suffix: None,
