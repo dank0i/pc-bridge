@@ -64,6 +64,7 @@ pub fn build_diagnostic_payload(
             let labels = sample_labels(&snap.readings, DIAGNOSTIC_SAMPLE_CAP);
             let sensors_count = unique_sensor_count(&snap.readings);
             let readings_count = snap.readings.len();
+            let unmatched_candidates = build_unmatched_candidates(&snap.readings, unmatched_keys);
             let attributes = serde_json::json!({
                 "snapshot_ok": true,
                 "error": serde_json::Value::Null,
@@ -74,6 +75,7 @@ pub fn build_diagnostic_payload(
                 "sample_labels": labels,
                 "matched_count": matched_keys.len(),
                 "unmatched_keys": unmatched_keys,
+                "unmatched_candidates": unmatched_candidates,
             });
             let state = format!("ok: {}/{} matched", matched_keys.len(), total_rules);
             DiagnosticPayload { state, attributes }
@@ -89,6 +91,7 @@ pub fn build_diagnostic_payload(
                 "sample_labels": Vec::<String>::new(),
                 "matched_count": 0,
                 "unmatched_keys": all_rule_keys(),
+                "unmatched_candidates": serde_json::Value::Object(serde_json::Map::new()),
             });
             // Truncate the error to keep state value under HA's 255-char cap.
             let trimmed: String = msg.chars().take(200).collect();
@@ -106,6 +109,7 @@ pub fn build_diagnostic_payload(
                 "sample_labels": Vec::<String>::new(),
                 "matched_count": 0,
                 "unmatched_keys": all_rule_keys(),
+                "unmatched_candidates": serde_json::Value::Object(serde_json::Map::new()),
             });
             DiagnosticPayload {
                 state: "err: shared memory not open".to_string(),
@@ -150,6 +154,48 @@ fn unique_sensor_count(readings: &[Reading]) -> usize {
 /// All keys from `MATCH_RULES`, in declaration order.
 fn all_rule_keys() -> Vec<&'static str> {
     MATCH_RULES.iter().map(|r| r.key).collect()
+}
+
+/// Maximum candidate readings to surface per unmatched key. Bounded to keep
+/// the diagnostic MQTT payload from ballooning if every sensor is "close".
+const UNMATCHED_CANDIDATES_PER_KEY: usize = 8;
+
+/// For each unmatched key, surface candidate readings whose sensor name passes
+/// the rule's `sensor_substrings` filter - these are the things the label-
+/// match step rejected, so the user can see *what HWiNFO is actually
+/// publishing* under that sensor and tune the rule (or their HWiNFO config).
+///
+/// The returned JSON shape: `{key: [{sensor, label, unit, value}, ...], ...}`
+fn build_unmatched_candidates(readings: &[Reading], unmatched_keys: &[&str]) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    for &key in unmatched_keys {
+        let Some(rule) = MATCH_RULES.iter().find(|r| r.key == key) else {
+            continue;
+        };
+        let mut cands: Vec<serde_json::Value> = Vec::new();
+        for r in readings {
+            if cands.len() >= UNMATCHED_CANDIDATES_PER_KEY {
+                break;
+            }
+            // Sensor filter (empty filter = no constraint).
+            let sensor_ok = rule.sensor_substrings.is_empty()
+                || rule
+                    .sensor_substrings
+                    .iter()
+                    .any(|s| contains_icase(&r.sensor_name, s));
+            if !sensor_ok {
+                continue;
+            }
+            cands.push(serde_json::json!({
+                "sensor": r.sensor_name,
+                "label": r.label,
+                "unit": r.unit,
+                "value": r.value,
+            }));
+        }
+        out.insert(key.to_string(), serde_json::Value::Array(cands));
+    }
+    serde_json::Value::Object(out)
 }
 
 /// MQTT discovery key for the diagnostic sensor. Kept here so both the
@@ -1083,6 +1129,49 @@ mod tests {
         assert_eq!(names[0], "CPU [#0]: AMD Ryzen 7 9800X3D");
         let labels = payload.attributes["sample_labels"].as_array().unwrap();
         assert_eq!(labels[0], "CPU (Tctl/Tdie)");
+    }
+
+    #[test]
+    fn test_diagnostic_unmatched_candidates_lists_sensor_filtered_readings() {
+        // Two PresentMon readings - one is the "framerate" candidate the rule
+        // is looking for, the other is a labelled-differently sibling. Both
+        // should appear under the unmatched_candidates["framerate"] key
+        // because both pass the sensor_substrings filter.
+        let snap = mk_snapshot(vec![
+            mk_reading("PresentMon [Discord.exe]", "Frame Time (ms)", "ms", 16.7),
+            mk_reading("PresentMon [Discord.exe]", "GPU Busy", "%", 12.0),
+            // Unrelated sensor that should NOT appear under framerate.
+            mk_reading("RTX 4090", "GPU Temperature", "°C", 60.0),
+        ]);
+        let unmatched: Vec<&str> = vec!["framerate"];
+        let payload = build_diagnostic_payload(&DiagnosticInput::Ok(&snap), 0, &[], &unmatched);
+        let cands = payload.attributes["unmatched_candidates"]["framerate"]
+            .as_array()
+            .expect("framerate candidates array");
+        assert_eq!(cands.len(), 2, "expected only PresentMon candidates");
+        assert_eq!(cands[0]["label"], "Frame Time (ms)");
+        assert_eq!(cands[1]["label"], "GPU Busy");
+    }
+
+    #[test]
+    fn test_diagnostic_unmatched_candidates_caps_per_key() {
+        // More than UNMATCHED_CANDIDATES_PER_KEY matching readings should
+        // truncate to the cap.
+        let mut readings = Vec::new();
+        for i in 0..20 {
+            readings.push(mk_reading(
+                "PresentMon [Foo.exe]",
+                &format!("Some Label {i}"),
+                "fps",
+                f64::from(i),
+            ));
+        }
+        let snap = mk_snapshot(readings);
+        let payload = build_diagnostic_payload(&DiagnosticInput::Ok(&snap), 0, &[], &["framerate"]);
+        let cands = payload.attributes["unmatched_candidates"]["framerate"]
+            .as_array()
+            .unwrap();
+        assert_eq!(cands.len(), UNMATCHED_CANDIDATES_PER_KEY);
     }
 
     #[test]
