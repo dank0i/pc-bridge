@@ -18,20 +18,16 @@ const USER_AGENT: &str = concat!("pc-bridge/", env!("CARGO_PKG_VERSION"));
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-/// GitHub release info (minimal fields we need)
+/// GitHub release info (minimal fields we need). Only used by the beta
+/// channel, which still queries the API; the stable channel resolves the
+/// version from a CDN redirect and never deserializes this. Extra JSON fields
+/// (assets, etc.) are ignored by serde.
 #[derive(serde::Deserialize)]
 struct GitHubRelease {
     tag_name: String,
     #[serde(default)]
     #[allow(dead_code)]
     prerelease: bool,
-    assets: Vec<GitHubAsset>,
-}
-
-#[derive(serde::Deserialize)]
-struct GitHubAsset {
-    name: String,
-    browser_download_url: String,
 }
 
 /// Create an HTTP agent configured to use native-tls (OS TLS stack).
@@ -51,6 +47,59 @@ fn http_agent() -> ureq::Agent {
         .build();
     let config = ureq::Agent::config_builder().tls_config(tls).build();
     ureq::Agent::new_with_config(config)
+}
+
+/// Like [`http_agent`] but does NOT follow redirects, so a 3xx response is
+/// returned directly with its `Location` header intact. Used to resolve the
+/// latest stable version from `github.com/.../releases/latest`, which 302s to
+/// `/releases/tag/vX.Y.Z`. This path is served by GitHub's web CDN, not
+/// `api.github.com`, so it is not subject to the 60-req/hour unauthenticated
+/// API rate limit that blocks updates on shared-NAT networks.
+fn http_agent_no_redirect() -> ureq::Agent {
+    let tls = TlsConfig::builder()
+        .provider(TlsProvider::NativeTls)
+        .root_certs(RootCerts::PlatformVerifier)
+        .build();
+    let config = ureq::Agent::config_builder()
+        .tls_config(tls)
+        .max_redirects(0)
+        .build();
+    ureq::Agent::new_with_config(config)
+}
+
+/// Release asset filename for the current platform. These are fixed by the CI
+/// release workflow, so the updater can construct download URLs directly
+/// instead of enumerating assets from the API.
+fn platform_asset_name() -> &'static str {
+    if cfg!(windows) {
+        "pc-bridge-windows.exe"
+    } else {
+        "pc-bridge-linux"
+    }
+}
+
+/// Parse the version out of a GitHub release tag URL such as
+/// `/dank0i/pc-bridge/releases/tag/v2.1.3` (the `Location` header value) or a
+/// full `https://github.com/.../releases/tag/v2.1.3` URL.
+///
+/// Returns the version without the leading `v` (e.g. `"2.1.3"`), or `None` if
+/// the final path segment isn't a `v`-prefixed numeric tag.
+fn parse_version_from_release_url(url: &str) -> Option<String> {
+    let tag = url.trim_end_matches('/').rsplit('/').next()?;
+    let v = tag.strip_prefix('v')?;
+    if v.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        Some(v.to_string())
+    } else {
+        None
+    }
+}
+
+/// Build the base download URL for a given version's release assets.
+fn download_base_for(version: &str) -> String {
+    format!(
+        "https://github.com/{}/{}/releases/download/v{}",
+        GITHUB_OWNER, GITHUB_REPO, version
+    )
 }
 
 /// Clean up leftover files from a previous update.
@@ -88,73 +137,89 @@ pub async fn check_for_updates(update_channel: String) {
         return;
     }
 
-    let use_beta = update_channel == "beta";
+    // Stable resolves the version via the CDN-served redirect (no API limit).
+    // Beta still needs the API, since there's no static URL for "latest
+    // prerelease" - that path can hit the unauthenticated rate limit.
+    let remote_version = if update_channel == "beta" {
+        resolve_latest_via_api().await
+    } else {
+        resolve_latest_via_redirect().await
+    };
 
-    match fetch_latest_release(use_beta).await {
-        Ok(release) => {
-            let remote_version = release.tag_name.trim_start_matches('v');
-
-            if is_newer_version(remote_version, CURRENT_VERSION) {
-                info!(
-                    "Update available: {} -> {}",
-                    CURRENT_VERSION, remote_version
-                );
-
-                // Find the platform-appropriate asset
-                let asset = if cfg!(windows) {
-                    release.assets.iter().find(|a| a.name.ends_with(".exe"))
-                } else {
-                    release.assets.iter().find(|a| a.name == "pc-bridge-linux")
-                };
-
-                if let Some(asset) = asset {
-                    // Look for a .sha256 sidecar (e.g. "pc-bridge.exe.sha256")
-                    let checksum_asset = release
-                        .assets
-                        .iter()
-                        .find(|a| a.name == format!("{}.sha256", asset.name));
-
-                    match download_update(
-                        &asset.browser_download_url,
-                        &asset.name,
-                        checksum_asset.map(|a| a.browser_download_url.as_str()),
-                    )
-                    .await
-                    {
-                        Ok(update_path) => {
-                            info!("Update downloaded, installing...");
-                            install_and_restart(&update_path);
-                        }
-                        Err(e) => {
-                            warn!("Failed to download update: {}", e);
-                        }
-                    }
-                } else {
-                    warn!("No matching asset found in release for this platform");
-                }
-            } else {
-                info!("Already up to date (v{})", CURRENT_VERSION);
-            }
-        }
+    let remote_version = match remote_version {
+        Ok(v) => v,
         Err(e) => {
             warn!("Failed to check for updates: {}", e);
+            return;
+        }
+    };
+
+    if !is_newer_version(&remote_version, CURRENT_VERSION) {
+        info!("Already up to date (v{})", CURRENT_VERSION);
+        return;
+    }
+
+    info!(
+        "Update available: {} -> {}",
+        CURRENT_VERSION, remote_version
+    );
+
+    let asset_name = platform_asset_name();
+    let base = download_base_for(&remote_version);
+    let asset_url = format!("{}/{}", base, asset_name);
+    let checksum_url = format!("{}/{}.sha256", base, asset_name);
+
+    match download_update(&asset_url, asset_name, Some(&checksum_url)).await {
+        Ok(update_path) => {
+            info!("Update downloaded, installing...");
+            install_and_restart(&update_path);
+        }
+        Err(e) => {
+            warn!("Failed to download update: {}", e);
         }
     }
 }
 
-async fn fetch_latest_release(include_prerelease: bool) -> anyhow::Result<GitHubRelease> {
-    let url = if include_prerelease {
-        // Fetch all releases and pick the first (newest) one
-        format!(
-            "https://api.github.com/repos/{}/{}/releases?per_page=1",
-            GITHUB_OWNER, GITHUB_REPO
-        )
-    } else {
-        format!(
-            "https://api.github.com/repos/{}/{}/releases/latest",
-            GITHUB_OWNER, GITHUB_REPO
-        )
-    };
+/// Resolve the latest STABLE version by following the `releases/latest`
+/// redirect on the GitHub web host (CDN-served, no API rate limit).
+async fn resolve_latest_via_redirect() -> anyhow::Result<String> {
+    let url = format!(
+        "https://github.com/{}/{}/releases/latest",
+        GITHUB_OWNER, GITHUB_REPO
+    );
+
+    let location = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+        let response = http_agent_no_redirect()
+            .head(&url)
+            .header("User-Agent", USER_AGENT)
+            .call()?;
+
+        let status = response.status().as_u16();
+        if !(300..400).contains(&status) {
+            anyhow::bail!("expected redirect from releases/latest, got HTTP {status}");
+        }
+
+        response
+            .headers()
+            .get("location")
+            .ok_or_else(|| anyhow::anyhow!("redirect had no Location header"))?
+            .to_str()
+            .map(str::to_string)
+            .map_err(|e| anyhow::anyhow!("non-ASCII Location header: {e}"))
+    })
+    .await??;
+
+    parse_version_from_release_url(&location)
+        .ok_or_else(|| anyhow::anyhow!("could not parse version from redirect: {location}"))
+}
+
+/// Resolve the latest version (including prereleases) via the GitHub API.
+/// Only used for the beta channel.
+async fn resolve_latest_via_api() -> anyhow::Result<String> {
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/releases?per_page=1",
+        GITHUB_OWNER, GITHUB_REPO
+    );
 
     let response = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
         let body = http_agent()
@@ -167,16 +232,12 @@ async fn fetch_latest_release(include_prerelease: bool) -> anyhow::Result<GitHub
     })
     .await??;
 
-    if include_prerelease {
-        let releases: Vec<GitHubRelease> = serde_json::from_str(&response)?;
-        releases
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("No releases found"))
-    } else {
-        let release: GitHubRelease = serde_json::from_str(&response)?;
-        Ok(release)
-    }
+    let releases: Vec<GitHubRelease> = serde_json::from_str(&response)?;
+    let release = releases
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("No releases found"))?;
+    Ok(release.tag_name.trim_start_matches('v').to_string())
 }
 
 async fn download_update(
@@ -395,6 +456,57 @@ fn install_and_restart(update_path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_version_from_location_header() {
+        // The bare path form GitHub returns in the Location header.
+        assert_eq!(
+            parse_version_from_release_url("/dank0i/pc-bridge/releases/tag/v2.1.3").as_deref(),
+            Some("2.1.3")
+        );
+    }
+
+    #[test]
+    fn test_parse_version_from_full_url() {
+        assert_eq!(
+            parse_version_from_release_url(
+                "https://github.com/dank0i/pc-bridge/releases/tag/v2.1.3"
+            )
+            .as_deref(),
+            Some("2.1.3")
+        );
+    }
+
+    #[test]
+    fn test_parse_version_tolerates_trailing_slash() {
+        assert_eq!(
+            parse_version_from_release_url("https://github.com/x/y/releases/tag/v10.20.30/")
+                .as_deref(),
+            Some("10.20.30")
+        );
+    }
+
+    #[test]
+    fn test_parse_version_rejects_non_version_tags() {
+        // No "v" prefix, or non-numeric after "v" → not a version we recognise.
+        assert_eq!(parse_version_from_release_url("/x/y/releases/latest"), None);
+        assert_eq!(
+            parse_version_from_release_url("/x/y/releases/tag/nightly"),
+            None
+        );
+        assert_eq!(
+            parse_version_from_release_url("/x/y/releases/tag/vNext"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_download_base_for_constructs_expected_url() {
+        assert_eq!(
+            download_base_for("2.1.3"),
+            "https://github.com/dank0i/pc-bridge/releases/download/v2.1.3"
+        );
+    }
 
     #[test]
     fn test_is_newer_version_major_bump() {

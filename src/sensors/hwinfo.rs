@@ -23,7 +23,7 @@ use crate::hwinfo::{Reading, Snapshot};
 /// Maximum number of sensor names and labels to include in the diagnostic
 /// payload. Bounded so a machine with hundreds of sensors doesn't produce a
 /// 100 KB MQTT message every 5 seconds.
-const DIAGNOSTIC_SAMPLE_CAP: usize = 16;
+const DIAGNOSTIC_SAMPLE_CAP: usize = 32;
 
 /// The result of a single snapshot attempt, as exposed to the diagnostic
 /// builder. `Ok` carries a borrowed `Snapshot`; `Err` carries the human
@@ -158,12 +158,17 @@ fn all_rule_keys() -> Vec<&'static str> {
 
 /// Maximum candidate readings to surface per unmatched key. Bounded to keep
 /// the diagnostic MQTT payload from ballooning if every sensor is "close".
-const UNMATCHED_CANDIDATES_PER_KEY: usize = 8;
+const UNMATCHED_CANDIDATES_PER_KEY: usize = 24;
 
-/// For each unmatched key, surface candidate readings whose sensor name passes
-/// the rule's `sensor_substrings` filter - these are the things the label-
-/// match step rejected, so the user can see *what HWiNFO is actually
-/// publishing* under that sensor and tune the rule (or their HWiNFO config).
+/// For each unmatched key, surface candidate readings the label-match step
+/// rejected, so the user can see *what HWiNFO is actually publishing* and tune
+/// the rule (or their HWiNFO config).
+///
+/// A reading is a candidate when it passes the rule's `sensor_substrings`
+/// filter AND (if the rule has a `unit_suffix`) its unit matches. The unit
+/// gate matters for rules with an empty sensor filter - e.g. `vrm_temp` would
+/// otherwise flood the list with the first N unrelated readings (memory, etc.)
+/// instead of the `°C` readings that actually contain the VRM temperature.
 ///
 /// The returned JSON shape: `{key: [{sensor, label, unit, value}, ...], ...}`
 fn build_unmatched_candidates(readings: &[Reading], unmatched_keys: &[&str]) -> serde_json::Value {
@@ -184,6 +189,13 @@ fn build_unmatched_candidates(readings: &[Reading], unmatched_keys: &[&str]) -> 
                     .iter()
                     .any(|s| contains_icase(&r.sensor_name, s));
             if !sensor_ok {
+                continue;
+            }
+            // Unit gate: only narrow when the rule constrains by unit. Keeps
+            // empty-sensor-filter rules from drowning in unrelated readings.
+            if let Some(suffix) = rule.unit_suffix
+                && !r.unit.ends_with(suffix)
+            {
                 continue;
             }
             cands.push(serde_json::json!({
@@ -1158,7 +1170,7 @@ mod tests {
         // More than UNMATCHED_CANDIDATES_PER_KEY matching readings should
         // truncate to the cap.
         let mut readings = Vec::new();
-        for i in 0..20 {
+        for i in 0..(UNMATCHED_CANDIDATES_PER_KEY as u32 + 8) {
             readings.push(mk_reading(
                 "PresentMon [Foo.exe]",
                 &format!("Some Label {i}"),
@@ -1172,6 +1184,29 @@ mod tests {
             .as_array()
             .unwrap();
         assert_eq!(cands.len(), UNMATCHED_CANDIDATES_PER_KEY);
+    }
+
+    #[test]
+    fn test_diagnostic_unmatched_candidates_unit_gates_empty_sensor_rules() {
+        // vrm_temp has an empty sensor filter + unit_suffix "°C". Memory
+        // readings (MB) must be excluded; only the °C reading should surface,
+        // so the user can see the actual VRM temperature label.
+        let snap = mk_snapshot(vec![
+            mk_reading("System: Mobo", "Virtual Memory Committed", "MB", 11635.0),
+            mk_reading("System: Mobo", "Physical Memory Load", "%", 25.9),
+            mk_reading("Mobo (NCT6798D)", "VRM MOS", "°C", 48.0),
+        ]);
+        let payload = build_diagnostic_payload(&DiagnosticInput::Ok(&snap), 0, &[], &["vrm_temp"]);
+        let cands = payload.attributes["unmatched_candidates"]["vrm_temp"]
+            .as_array()
+            .expect("vrm_temp candidates array");
+        assert_eq!(
+            cands.len(),
+            1,
+            "only the °C reading should pass the unit gate"
+        );
+        assert_eq!(cands[0]["label"], "VRM MOS");
+        assert_eq!(cands[0]["unit"], "°C");
     }
 
     #[test]
