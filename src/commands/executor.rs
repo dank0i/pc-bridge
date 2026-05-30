@@ -15,10 +15,15 @@ use crate::notification;
 use crate::power::wake_display;
 use crate::steam::SteamGameDiscovery;
 
-/// Maximum time to wait for Steam to appear in the process list (seconds)
-const STEAM_WAIT_TIMEOUT_SECS: u64 = 20;
-/// Grace period after Steam process is detected before launching the game (seconds)
-const STEAM_INIT_DELAY_SECS: u64 = 5;
+/// Maximum time to wait for Steam to appear in the process list (seconds).
+/// Generous because a WoL cold boot may have to start Steam from scratch and
+/// the Steam bootstrapper can self-update before `steam.exe` proper appears.
+const STEAM_WAIT_TIMEOUT_SECS: u64 = 90;
+/// Grace period after Steam process is detected before launching the game
+/// (seconds). A cold Steam still needs to connect and log in before it will
+/// honor a `steam://rungameid` request, so this is longer than a warm launch
+/// would need.
+const STEAM_INIT_DELAY_SECS: u64 = 12;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const MAX_CONCURRENT_COMMANDS: usize = 5;
@@ -343,7 +348,27 @@ async fn wait_for_steam(state: &Arc<AppState>) {
         }
     }
 
-    info!("Steam not running, waiting for it to start...");
+    // Steam isn't running -- typical on a WoL cold boot. Start it proactively
+    // instead of waiting passively for autostart: if Steam autostart is disabled
+    // it would otherwise never appear, we'd burn the whole timeout, then fire
+    // `steam://rungameid` into a cold/absent Steam where it is silently dropped.
+    // Starting Steam first guarantees the rungameid request lands in a running,
+    // initialized client. `steam://open/main` works cold because the protocol
+    // handler is registered at install time, independent of Steam running.
+    info!("Steam not running, starting it before launch...");
+    if let Err(e) = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            r#"Start-Process "steam://open/main""#,
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+    {
+        warn!("Failed to start Steam proactively: {}", e);
+    }
+
+    info!("Waiting for Steam to finish starting...");
     let mut change_rx = state.process_watcher.subscribe();
     let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_secs(STEAM_WAIT_TIMEOUT_SECS);
@@ -1231,12 +1256,15 @@ mod tests {
 
     #[test]
     fn test_expand_env_known_var() {
-        std::env::set_var("PC_BRIDGE_TEST_VAR", "replaced");
+        // SAFETY: edition 2024 marks env mutation unsafe because it races other
+        // threads reading the environment. This uses a test-only var name that
+        // no other test touches, so the mutation is effectively isolated.
+        unsafe { std::env::set_var("PC_BRIDGE_TEST_VAR", "replaced") };
         assert_eq!(
             expand_env_vars("before %PC_BRIDGE_TEST_VAR% after"),
             "before replaced after"
         );
-        std::env::remove_var("PC_BRIDGE_TEST_VAR");
+        unsafe { std::env::remove_var("PC_BRIDGE_TEST_VAR") };
     }
 
     #[test]
@@ -1256,11 +1284,17 @@ mod tests {
 
     #[test]
     fn test_expand_env_multiple_vars() {
-        std::env::set_var("PC_BRIDGE_A", "X");
-        std::env::set_var("PC_BRIDGE_B", "Y");
+        // SAFETY: test-only var names that no other test reads; see
+        // test_expand_env_known_var for the edition-2024 rationale.
+        unsafe {
+            std::env::set_var("PC_BRIDGE_A", "X");
+            std::env::set_var("PC_BRIDGE_B", "Y");
+        }
         assert_eq!(expand_env_vars("%PC_BRIDGE_A%-%PC_BRIDGE_B%"), "X-Y");
-        std::env::remove_var("PC_BRIDGE_A");
-        std::env::remove_var("PC_BRIDGE_B");
+        unsafe {
+            std::env::remove_var("PC_BRIDGE_A");
+            std::env::remove_var("PC_BRIDGE_B");
+        }
     }
 
     #[test]
