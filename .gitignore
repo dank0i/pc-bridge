@@ -12,3 +12,4 @@ userConfig.json
 Thumbs.db
 
 /target/
+testkit/target/

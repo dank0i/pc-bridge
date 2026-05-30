@@ -1,0 +1,16 @@
+[package]
+name = "pc-bridge-testkit"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Integration test harness that drives the real pc-bridge binary in dry-run and asserts every command end-to-end over MQTT."
+publish = false
+
+# Standalone crate: intentionally NOT part of the pc-bridge package/workspace,
+# so its dependencies never touch pc-bridge's binary size or cargo-deny budget.
+
+[dependencies]
+anyhow = "1"
+rumqttc = { version = "0.25", default-features = false, features = ["use-native-tls"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process"] }
