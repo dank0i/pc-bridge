@@ -14,6 +14,7 @@ mod commands;
 mod config;
 mod credential;
 mod hwinfo;
+mod logging;
 mod mqtt;
 mod notification;
 mod power;
@@ -96,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
                 if let Ok(handle) = GetStdHandle(STD_INPUT_HANDLE) {
                     let mut original_mode =
                         windows::Win32::System::Console::CONSOLE_MODE::default();
-                    if GetConsoleMode(handle, &mut original_mode).is_ok() {
+                    if GetConsoleMode(handle, &raw mut original_mode).is_ok() {
                         let _ = ORIGINAL_CONSOLE_MODE.set((handle.0 as isize, original_mode));
                         let _ = SetConsoleMode(handle, original_mode | ENABLE_PROCESSED_INPUT);
                     }
@@ -105,12 +106,8 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Initialize logging
-    env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Info)
-        .format_target(false)
-        .format_timestamp_secs()
-        .init();
+    // Initialize logging (rotating file sink + stderr mirror)
+    logging::init();
 
     info!("PC Bridge starting...");
 
@@ -607,15 +604,16 @@ fn kill_existing_instances() {
                 // Check if this process matches any of our exe names
                 let is_match = exe_names.iter().any(|&name| proc_name == name);
 
-                if is_match && entry.th32ProcessID != my_pid {
-                    if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, entry.th32ProcessID) {
-                        info!(
-                            "Killing existing instance: {} (PID {})",
-                            proc_name, entry.th32ProcessID
-                        );
-                        let _ = TerminateProcess(handle, 0);
-                        let _ = CloseHandle(handle);
-                    }
+                if is_match
+                    && entry.th32ProcessID != my_pid
+                    && let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, entry.th32ProcessID)
+                {
+                    info!(
+                        "Killing existing instance: {} (PID {})",
+                        proc_name, entry.th32ProcessID
+                    );
+                    let _ = TerminateProcess(handle, 0);
+                    let _ = CloseHandle(handle);
                 }
 
                 if Process32NextW(snapshot, &raw mut entry).is_err() {
