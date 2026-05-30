@@ -89,9 +89,9 @@ fn get_gpu_usage() -> String {
     static PDH_INIT: OnceLock<Mutex<Option<PdhState>>> = OnceLock::new();
 
     let cell = PDH_INIT.get_or_init(|| {
-        let state = unsafe {
+        unsafe {
             let mut query: isize = 0;
-            let status = PdhOpenQueryW(None, 0, &mut query);
+            let status = PdhOpenQueryW(None, 0, &raw mut query);
             if status != 0 {
                 warn!("PdhOpenQueryW failed: 0x{:08x}", status);
                 return Mutex::new(None);
@@ -100,7 +100,7 @@ fn get_gpu_usage() -> String {
             let counter_path =
                 windows::core::w!("\\GPU Engine(*engtype_3D)\\Utilization Percentage");
             let mut counter: isize = 0;
-            let status = PdhAddEnglishCounterW(query, counter_path, 0, &mut counter);
+            let status = PdhAddEnglishCounterW(query, counter_path, 0, &raw mut counter);
             if status != 0 {
                 warn!("PdhAddEnglishCounterW failed: 0x{:08x}", status);
                 let _ = PdhCloseQuery(query);
@@ -115,8 +115,7 @@ fn get_gpu_usage() -> String {
                 counter,
                 has_first_sample: true,
             }))
-        };
-        state
+        }
     });
 
     let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
@@ -137,7 +136,7 @@ fn get_gpu_usage() -> String {
         }
 
         let mut value = PDH_FMT_COUNTERVALUE::default();
-        let status = PdhGetFormattedCounterValue(pdh.counter, PDH_FMT_DOUBLE, None, &mut value);
+        let status = PdhGetFormattedCounterValue(pdh.counter, PDH_FMT_DOUBLE, None, &raw mut value);
 
         if status == 0 && value.CStatus == PDH_CSTATUS_VALID_DATA {
             format!("{:.1}", value.Anonymous.doubleValue.clamp(0.0, 100.0))

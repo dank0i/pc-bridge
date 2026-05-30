@@ -158,7 +158,7 @@ fn dpapi_encrypt(plaintext: &str) -> Result<String, DecryptError> {
     // reads cbData bytes for encryption.  Casting our &[u8] through *const
     // → *mut is required by the FFI signature only.  data_bytes outlives
     // the call (it borrows from `plaintext`, which lives for the function).
-    let mut input_blob = CRYPT_INTEGER_BLOB {
+    let input_blob = CRYPT_INTEGER_BLOB {
         cbData: data_bytes.len() as u32,
         pbData: data_bytes.as_ptr().cast_mut(),
     };
@@ -172,13 +172,13 @@ fn dpapi_encrypt(plaintext: &str) -> Result<String, DecryptError> {
     // output_blob is populated by Windows and freed below with LocalFree.
     let result = unsafe {
         CryptProtectData(
-            &mut input_blob,
+            &raw const input_blob,
             None,                      // description (optional)
             None,                      // entropy (optional)
             None,                      // reserved
             None,                      // prompt (optional)
             CRYPTPROTECT_UI_FORBIDDEN, // no UI
-            &mut output_blob,
+            &raw mut output_blob,
         )
     };
 
@@ -215,7 +215,7 @@ fn dpapi_decrypt(encoded: &str) -> Result<String, DecryptError> {
 
     // SAFETY (cast_mut): Same FFI ABI quirk as encrypt - CryptUnprotectData
     // does not mutate input, the *mut is only required by the signature.
-    let mut input_blob = CRYPT_INTEGER_BLOB {
+    let input_blob = CRYPT_INTEGER_BLOB {
         cbData: encrypted.len() as u32,
         pbData: encrypted.as_ptr().cast_mut(),
     };
@@ -228,13 +228,13 @@ fn dpapi_decrypt(encoded: &str) -> Result<String, DecryptError> {
     // input_blob and allocates output_blob.  We copy and free below.
     let result = unsafe {
         CryptUnprotectData(
-            &mut input_blob,
+            &raw const input_blob,
             None, // description out (optional)
             None, // entropy (must match encrypt)
             None, // reserved
             None, // prompt (optional)
             CRYPTPROTECT_UI_FORBIDDEN,
-            &mut output_blob,
+            &raw mut output_blob,
         )
     };
 

@@ -22,12 +22,12 @@ pub fn find_steam_path() -> Option<PathBuf> {
 
     // Try HKCU first (current user), then HKLM (all users)
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    if let Ok(steam_key) = hkcu.open_subkey("Software\\Valve\\Steam") {
-        if let Ok(path) = steam_key.get_value::<String, _>("SteamPath") {
-            let p = PathBuf::from(path);
-            if p.exists() {
-                return Some(p);
-            }
+    if let Ok(steam_key) = hkcu.open_subkey("Software\\Valve\\Steam")
+        && let Ok(path) = steam_key.get_value::<String, _>("SteamPath")
+    {
+        let p = PathBuf::from(path);
+        if p.exists() {
+            return Some(p);
         }
     }
 
@@ -36,12 +36,12 @@ pub fn find_steam_path() -> Option<PathBuf> {
         "SOFTWARE\\WOW6432Node\\Valve\\Steam",
         "SOFTWARE\\Valve\\Steam",
     ] {
-        if let Ok(steam_key) = hklm.open_subkey(subkey) {
-            if let Ok(path) = steam_key.get_value::<String, _>("InstallPath") {
-                let p = PathBuf::from(path);
-                if p.exists() {
-                    return Some(p);
-                }
+        if let Ok(steam_key) = hklm.open_subkey(subkey)
+            && let Ok(path) = steam_key.get_value::<String, _>("InstallPath")
+        {
+            let p = PathBuf::from(path);
+            if p.exists() {
+                return Some(p);
             }
         }
     }

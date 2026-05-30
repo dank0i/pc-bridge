@@ -327,14 +327,9 @@ fn start_window_focus_monitor(
         .name("window-focus".into())
         .stack_size(256 * 1024)
         .spawn(move || unsafe {
-            // Store sender in thread-local
-            FOCUS_TX.with(|tx| {
-                *tx.borrow_mut() = Some(event_tx);
-            });
-
-            let class_name = windows::core::w!("PCAgentFocusMonitor");
             // Wrapper needed because DefWindowProcW is generic and doesn't
             // match the extern "system" fn pointer expected by WNDCLASSEXW.
+            // Hoisted to the top of the scope (it captures nothing).
             unsafe extern "system" fn focus_wnd_proc(
                 hwnd: HWND,
                 msg: u32,
@@ -343,6 +338,13 @@ fn start_window_focus_monitor(
             ) -> windows::Win32::Foundation::LRESULT {
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
+
+            // Store sender in thread-local
+            FOCUS_TX.with(|tx| {
+                *tx.borrow_mut() = Some(event_tx);
+            });
+
+            let class_name = windows::core::w!("PCAgentFocusMonitor");
 
             let wc = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,

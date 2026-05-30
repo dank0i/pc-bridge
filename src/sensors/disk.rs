@@ -128,9 +128,9 @@ fn get_disk_usage(path: &str) -> Option<DiskInfo> {
 
         let ok = GetDiskFreeSpaceExW(
             windows::core::PCWSTR(wide_path.as_ptr()),
-            Some(&mut free_available),
-            Some(&mut total),
-            Some(&mut total_free),
+            Some(&raw mut free_available),
+            Some(&raw mut total),
+            Some(&raw mut total_free),
         );
 
         if ok.is_ok() {

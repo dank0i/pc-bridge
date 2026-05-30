@@ -345,7 +345,7 @@ mod tests {
         // Process name has mixed case, pattern is lowered
         let cached = make_patterns(&[("bf2042", GameConfig::Simple("battlefield_6".into()))]);
         let processes = procs(&["BF2042.EXE"]);
-        let (ids, names) = match_games_in_processes(&processes, &cached);
+        let (ids, _names) = match_games_in_processes(&processes, &cached);
         assert_eq!(ids, "battlefield_6");
     }
 
@@ -379,6 +379,7 @@ mod tests {
                 game_id: "helldivers_2".into(),
                 app_id: Some(553850),
                 name: Some("HELLDIVERS 2".into()),
+                launch_command: None,
                 auto_discovered: true,
                 exposed: true,
             },
@@ -397,6 +398,7 @@ mod tests {
                 game_id: "call_of_duty_mw".into(),
                 app_id: None,
                 name: None,
+                launch_command: None,
                 auto_discovered: false,
                 exposed: true,
             },
@@ -501,6 +503,7 @@ mod tests {
                 game_id: "battlefield_6".into(),
                 app_id: Some(1517290),
                 name: Some("Battlefield 2042".into()),
+                launch_command: None,
                 auto_discovered: true,
                 exposed: true,
             },
@@ -562,7 +565,7 @@ mod tests {
 
     #[test]
     fn test_catalog_entries_sort_by_name() {
-        let mut entries = vec![
+        let mut entries = [
             CatalogEntry {
                 game_id: "zelda".into(),
                 name: "Zelda".into(),
@@ -612,6 +615,7 @@ mod tests {
             game_id: "hidden_game".into(),
             app_id: None,
             name: None,
+            launch_command: None,
             auto_discovered: false,
             exposed: false,
         };
@@ -633,6 +637,7 @@ mod tests {
                     game_id: "hidden_game".into(),
                     app_id: None,
                     name: None,
+                    launch_command: None,
                     auto_discovered: false,
                     exposed: false,
                 },
@@ -643,6 +648,7 @@ mod tests {
                     game_id: "counter_strike_2".into(),
                     app_id: Some(730),
                     name: Some("Counter-Strike 2".into()),
+                    launch_command: None,
                     auto_discovered: true,
                     exposed: true,
                 },

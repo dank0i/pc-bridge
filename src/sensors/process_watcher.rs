@@ -263,13 +263,12 @@ impl ProcessWatcher {
                             let pid = event.target_instance.process_id;
                             match event.class.as_deref() {
                                 Some(c) if c.contains("Creation") => {
-                                    if let Some(name) = event.target_instance.name {
-                                        if event_tx
+                                    if let Some(name) = event.target_instance.name
+                                        && event_tx
                                             .blocking_send(ProcessEvent::Created(name, pid))
                                             .is_err()
-                                        {
-                                            break;
-                                        }
+                                    {
+                                        break;
                                     }
                                 }
                                 Some(c) if c.contains("Deletion") => {
@@ -381,7 +380,7 @@ impl ProcessWatcher {
                         }
                     }
                 }
-                _ = tokio::time::sleep_until(next_reconcile) => {
+                () = tokio::time::sleep_until(next_reconcile) => {
                     let (pruned, added) = Self::reconcile(state).await;
                     if pruned > 0 || added > 0 {
                         debug!("Reconciliation: pruned {} stale, added {} new entries, resetting interval to {}s", pruned, added, MIN_RECONCILE_SECS);

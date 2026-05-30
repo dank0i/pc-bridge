@@ -374,11 +374,11 @@ fn install_and_restart(update_path: &Path) {
     let old_path = current_exe.with_extension("exe.old");
 
     // Remove any leftover .old file from a previous update
-    if old_path.exists() {
-        if let Err(e) = std::fs::remove_file(&old_path) {
-            warn!("Failed to remove old update file: {}", e);
-            // Non-fatal - try to rename anyway, it may work if the old .old is unlocked
-        }
+    if old_path.exists()
+        && let Err(e) = std::fs::remove_file(&old_path)
+    {
+        warn!("Failed to remove old update file: {}", e);
+        // Non-fatal - try to rename anyway, it may work if the old .old is unlocked
     }
 
     // Step 1: Rename running exe out of the way
