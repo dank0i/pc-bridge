@@ -101,6 +101,15 @@ impl CommandExecutor {
 
         info!("Executing command: {} (payload: {:?})", name, payload);
 
+        // Dry-run: report what the command would do to the test topic, but
+        // perform no OS side effect. Lets the test kit exercise every command
+        // (including destructive ones like Sleep/Shutdown) safely. Inert unless
+        // --dry-run / PC_BRIDGE_DRY_RUN is set, so it never fires in production.
+        if state.dry_run {
+            crate::commands::dry_run::report(name, payload, state).await;
+            return Ok(());
+        }
+
         match name {
             // Discord: Leave the current voice channel by simulating a keybind
             // (default: Ctrl+F6, Discord's "Disconnect from Voice Channel").

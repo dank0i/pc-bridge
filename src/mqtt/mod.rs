@@ -440,6 +440,17 @@ impl MqttClient {
             .await;
     }
 
+    /// Publish a dry-run command record to the test topic consumed by the
+    /// integration test kit. Not retained. Topic: `pc-bridge/test/executed/<device>`.
+    pub async fn publish_test_action(&self, name: &str, payload: &str, action: &str) {
+        let topic = format!("pc-bridge/test/executed/{}", self.device_name);
+        let body = serde_json::json!({ "name": name, "payload": payload, "action": action });
+        let Ok(value) = serde_json::to_string(&body) else {
+            return;
+        };
+        self.publish_inner(topic, false, value).await;
+    }
+
     /// Publish availability status
     pub async fn publish_availability(&self, online: bool) {
         // Zero-copy static payloads - Bytes::from_static avoids the &[u8] → Vec<u8>
