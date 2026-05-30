@@ -553,6 +553,13 @@ impl Config {
 
     /// Get the platform-specific config directory
     fn config_dir() -> Result<PathBuf> {
+        // Explicit override, used by the integration test kit to point the real
+        // binary at a throwaway config; also handy for portable installs.
+        if let Ok(dir) = std::env::var("PC_BRIDGE_CONFIG_DIR")
+            && !dir.is_empty()
+        {
+            return Ok(PathBuf::from(dir));
+        }
         #[cfg(windows)]
         {
             let appdata =

@@ -59,6 +59,10 @@ pub struct AppState {
     pub process_watcher: ProcessWatcher,
     /// Monotonic start time for uptime tracking in health diagnostics
     pub start_time: std::time::Instant,
+    /// When true, commands are resolved and reported to the test topic but
+    /// their OS side effects are NOT performed. Enabled via `--dry-run` or
+    /// `PC_BRIDGE_DRY_RUN=1` for the integration test kit; off in normal use.
+    pub dry_run: bool,
 }
 
 /// Handle for optional tasks
@@ -115,6 +119,11 @@ async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let force_setup = args.iter().any(|a| a == "--setup");
     let reset_password = args.iter().any(|a| a == "--reset-password");
+    let dry_run = args.iter().any(|a| a == "--dry-run")
+        || matches!(
+            std::env::var("PC_BRIDGE_DRY_RUN").as_deref(),
+            Ok("1" | "true")
+        );
 
     // Kill any existing instances
     kill_existing_instances();
@@ -203,7 +212,13 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(windows)]
         process_watcher,
         start_time: std::time::Instant::now(),
+        dry_run,
     });
+    if dry_run {
+        info!(
+            "DRY-RUN mode enabled: commands report to the test topic, OS side effects are skipped"
+        );
+    }
 
     // Collect task handles for cleanup
     let mut handles: Vec<TaskHandle> = Vec::new();

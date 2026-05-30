@@ -90,6 +90,15 @@ impl CommandExecutor {
 
         info!("Executing command: {} (payload: {:?})", name, payload);
 
+        // Dry-run: report what the command would do to the test topic, but
+        // perform no OS side effect. Shares the canonical resolver with the
+        // Windows executor so the test kit sees identical results on any host.
+        // Inert unless --dry-run / PC_BRIDGE_DRY_RUN is set.
+        if state.dry_run {
+            crate::commands::dry_run::report(name, payload, state).await;
+            return Ok(());
+        }
+
         // ── Native commands (no shell needed) ──────────────────────────
         match name {
             "DiscordLeaveChannel" => {

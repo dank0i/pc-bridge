@@ -1,6 +1,7 @@
 //! Command execution module
 
 pub mod custom;
+pub mod dry_run;
 
 #[cfg(windows)]
 mod executor;
