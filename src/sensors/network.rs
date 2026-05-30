@@ -92,7 +92,7 @@ fn get_network_totals() -> (u64, u64) {
 
     unsafe {
         let mut table = std::ptr::null_mut();
-        if GetIfTable2(&mut table) != WIN32_ERROR(0) || table.is_null() {
+        if GetIfTable2(&raw mut table) != WIN32_ERROR(0) || table.is_null() {
             return (0, 0);
         }
 

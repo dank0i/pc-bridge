@@ -65,15 +65,14 @@ fn dismiss_screensaver() {
                 // Check for .scr extension (case-insensitive)
                 if name.len() >= 4
                     && name.as_bytes()[name.len() - 4..].eq_ignore_ascii_case(b".scr")
+                    && let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, entry.th32ProcessID)
                 {
-                    if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, entry.th32ProcessID) {
-                        info!(
-                            "Terminating screensaver: {} (PID {})",
-                            name, entry.th32ProcessID
-                        );
-                        let _ = TerminateProcess(handle, 0);
-                        let _ = CloseHandle(handle);
-                    }
+                    info!(
+                        "Terminating screensaver: {} (PID {})",
+                        name, entry.th32ProcessID
+                    );
+                    let _ = TerminateProcess(handle, 0);
+                    let _ = CloseHandle(handle);
                 }
 
                 if Process32NextW(snapshot, &raw mut entry).is_err() {

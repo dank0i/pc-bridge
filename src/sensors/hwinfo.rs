@@ -785,6 +785,7 @@ mod win {
             // Skip the attribute publish when min/max/avg/unit haven't moved.
             // f64 exact comparison is fine here: HWiNFO returns the same
             // bit-pattern when the underlying value didn't change.
+            #[allow(clippy::float_cmp)]
             if let Some((min, max, avg, unit)) = last_attrs.get(key)
                 && *min == reading.min
                 && *max == reading.max
