@@ -2,9 +2,16 @@
 //!
 //! Screensaver detection is event-driven via ProcessWatcher push notifications,
 //! providing instant (~1s) MQTT updates when a .scr process starts or stops.
-//! Last-active time is polled via GetLastInputInfo.
+//! Idle time is polled via GetLastInputInfo and published two ways:
+//!   - `idle_seconds`: seconds since last keyboard/mouse input (numeric, HA-friendly)
+//!   - `lastactive`:   RFC3339 timestamp of last input (frozen while idle)
+//!
+//! IMPORTANT: GetLastInputInfo only reports input for the session the calling
+//! process is attached to. If the bridge ever runs outside the interactive user
+//! session (e.g. as a session-0 service) the call fails; we surface that as a
+//! warning and pause updates rather than fabricating "active now".
 
-use log::{debug, info};
+use log::{debug, info, warn};
 use std::sync::Arc;
 use std::time::Duration;
 use time::OffsetDateTime;
@@ -41,12 +48,20 @@ impl IdleSensor {
         let mut process_rx = self.state.process_watcher.subscribe();
         let mut config_rx = self.state.config_generation.subscribe();
 
-        // Publish initial state
-        let last_active = self.get_last_active_time();
-        self.state
-            .mqtt
-            .publish_sensor("lastactive", &format_rfc3339(last_active))
-            .await;
+        // Dedup trackers: only publish when the whole-second value changes.
+        // `idle_seconds` grows each tick while idle (so it keeps publishing);
+        // `lastactive` freezes while idle (so it stops publishing) - both correct.
+        let mut prev_idle_secs: i64 = -1;
+        let mut prev_lastactive_secs: i64 = i64::MIN;
+        let mut query_failed = false;
+
+        // Publish initial idle state
+        self.publish_idle(
+            &mut prev_idle_secs,
+            &mut prev_lastactive_secs,
+            &mut query_failed,
+        )
+        .await;
 
         // Publish initial screensaver state (retained so HA picks it up)
         let screensaver_active = self.state.process_watcher.has_screensaver_running().await;
@@ -57,9 +72,8 @@ impl IdleSensor {
             .publish_sensor_retained("screensaver", screensaver_state)
             .await;
         let mut prev_screensaver_state = screensaver_active;
-        let mut prev_idle_secs: i64 = 0;
 
-        info!("Idle sensor started (screensaver: push-based, lastactive: polled)");
+        info!("Idle sensor started (screensaver: push-based, idle: polled via GetLastInputInfo)");
 
         loop {
             tokio::select! {
@@ -78,12 +92,7 @@ impl IdleSensor {
                     debug!("Idle sensor: interval updated to {}s", new_interval);
                 }
                 _ = tick.tick() => {
-                    let last_active = self.get_last_active_time();
-                    let secs = last_active.unix_timestamp();
-                    if secs != prev_idle_secs {
-                        self.state.mqtt.publish_sensor("lastactive", &format_rfc3339(last_active)).await;
-                        prev_idle_secs = secs;
-                    }
+                    self.publish_idle(&mut prev_idle_secs, &mut prev_lastactive_secs, &mut query_failed).await;
                 }
                 result = process_rx.recv() => {
                     // Process list changed - check screensaver state immediately
@@ -117,7 +126,59 @@ impl IdleSensor {
         }
     }
 
-    fn get_last_active_time(&self) -> OffsetDateTime {
+    /// Poll idle time and publish `idle_seconds` + `lastactive`.
+    ///
+    /// On query failure we keep the last published value rather than fabricating
+    /// "active now" - the old behaviour made the PC look perpetually busy, which
+    /// broke any "PC idle for N minutes" automation downstream.
+    async fn publish_idle(
+        &self,
+        prev_idle_secs: &mut i64,
+        prev_lastactive_secs: &mut i64,
+        query_failed: &mut bool,
+    ) {
+        let Some(idle_ms) = self.get_idle_ms() else {
+            if !*query_failed {
+                warn!(
+                    "GetLastInputInfo failed - pausing idle updates (last values retained). \
+                     The bridge must run in the interactive user session for idle tracking to work."
+                );
+                *query_failed = true;
+            }
+            return;
+        };
+        if *query_failed {
+            info!("GetLastInputInfo recovered; resuming idle updates");
+            *query_failed = false;
+        }
+
+        let idle_secs = (idle_ms / 1000).max(0);
+        debug!("Idle: {idle_secs}s since last input");
+
+        // idle_seconds - numeric, grows while idle, resets to ~0 on input.
+        if idle_secs != *prev_idle_secs {
+            self.state
+                .mqtt
+                .publish_sensor("idle_seconds", &idle_secs.to_string())
+                .await;
+            *prev_idle_secs = idle_secs;
+        }
+
+        // lastactive - timestamp of last input; stays frozen (no republish) while idle.
+        let last_active = OffsetDateTime::now_utc() - time::Duration::milliseconds(idle_ms);
+        let la_secs = last_active.unix_timestamp();
+        if la_secs != *prev_lastactive_secs {
+            self.state
+                .mqtt
+                .publish_sensor("lastactive", &format_rfc3339(last_active))
+                .await;
+            *prev_lastactive_secs = la_secs;
+        }
+    }
+
+    /// Milliseconds since the last keyboard/mouse input, or `None` if the query
+    /// failed (e.g. no access to the interactive input desktop).
+    fn get_idle_ms(&self) -> Option<i64> {
         unsafe {
             let mut lii = LASTINPUTINFO {
                 cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
@@ -125,14 +186,11 @@ impl IdleSensor {
             };
 
             if GetLastInputInfo(&raw mut lii).as_bool() {
-                let current_tick = GetTickCount64();
-                // dwTime is 32-bit, handle wrap correctly
-                let current_tick_32 = current_tick as u32;
-                let idle_ms = current_tick_32.wrapping_sub(lii.dwTime) as i64;
-
-                OffsetDateTime::now_utc() - time::Duration::milliseconds(idle_ms)
+                // dwTime is the low 32 bits of the millisecond tick count; match it.
+                let current_tick_32 = GetTickCount64() as u32;
+                Some(current_tick_32.wrapping_sub(lii.dwTime) as i64)
             } else {
-                OffsetDateTime::now_utc()
+                None
             }
         }
     }

@@ -54,6 +54,17 @@ impl MqttClient {
                 None,
             )
             .await;
+            // Seconds since last keyboard/mouse input - numeric, HA-automation friendly.
+            // Grows while idle, resets to ~0 on activity.
+            self.register_sensor(
+                device,
+                "idle_seconds",
+                "Idle Time",
+                "mdi:timer-sand",
+                Some("duration"),
+                Some("s"),
+            )
+            .await;
             self.register_sensor(
                 device,
                 "screensaver",
