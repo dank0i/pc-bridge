@@ -142,6 +142,7 @@ All features are opt-in via the `features` object (except `power_events` which d
 | `discord` | `false` | Discord voice channel join/leave buttons |
 | `gpu_sensor` | `false` | GPU utilization percentage |
 | `hwinfo_sensor` | `false` | Read hardware sensors from HWiNFO64 shared memory (Windows only, requires HWiNFO running). See below for setup. |
+| `manage_hwinfo` | `false` | Launch & supervise HWiNFO headless (no tray icon) on a hidden desktop. Windows only; requires HWiNFO **Pro** and an elevated pc-bridge. See below. |
 | `network_sensor` | `false` | Network throughput (rx/tx bytes/sec) |
 | `disk_sensor` | `false` | Disk usage for configured `disk_sensor_paths` |
 | `uptime_sensor` | `false` | System uptime in seconds |
@@ -179,6 +180,23 @@ HWiNFO must be running for the sensors to publish. Entities become `unavailable`
 Sensors are matched by name patterns and tolerate vendor differences (Intel/AMD CPUs, NVIDIA/AMD GPUs, various motherboard sensor naming). Anything that doesn't match on your specific hardware shows up in the `hwinfo_diagnostic` attributes so you can see what's missing.
 
 Publishes are throttled per-sensor: power changes by 5W, temperatures by 1°C, clocks by 50MHz, with a 30-second heartbeat so HA always has a recent value. The producer task only reads 8 bytes of shared memory between updates, so the CPU cost is negligible.
+
+### Headless HWiNFO — `manage_hwinfo` (Windows only)
+
+HWiNFO always shows a system-tray icon when it runs in your interactive session, and there's no native way to suppress it. With `manage_hwinfo: true`, pc-bridge runs HWiNFO **on a hidden desktop** instead: the process runs normally (driver, sensors, shared memory) but its tray icon has no taskbar to attach to, so nothing appears. pc-bridge keeps it alive, and if HWiNFO is already running (you started it, or another launcher did) it *adopts* that instance rather than launching a duplicate.
+
+Requirements:
+
+- **HWiNFO Pro.** The free version stops publishing shared memory after ~12 hours; pc-bridge does **not** work around that, so unattended/24-7 use needs Pro.
+- **pc-bridge must run elevated.** HWiNFO's driver requires admin, so pc-bridge has to be elevated to launch it. The clean way to autostart elevated without a UAC prompt is a logon scheduled task (run as **you**, "highest privileges") — this replaces a `shell:startup` shortcut and keeps pc-bridge in your interactive session, so all its other features keep working. Set it up once from an **elevated** terminal:
+
+  ```
+  pc-bridge.exe --install-startup-task
+  ```
+
+  then remove the old startup-folder shortcut and sign out/in. To undo: `pc-bridge.exe --uninstall-startup-task`. (Equivalent manual command: `schtasks /create /tn "pc-bridge" /tr "\"<path>\pc-bridge.exe\"" /sc onlogon /rl HIGHEST /f`. Override the HWiNFO path with `PC_BRIDGE_HWINFO_PATH` if it isn't next to `pc-bridge.exe`.)
+
+When pc-bridge runs elevated, two things are automatically routed back to normal (medium) integrity so they keep working: **game launches** (so anti-cheat like EAC and direct `exe:`/`lnk:` launches don't inherit admin — Steam/Epic URL launches were never affected) and **toast notifications** (which fail from an elevated process, so they're shown from a short-lived de-elevated child). If pc-bridge is *not* elevated, `manage_hwinfo` can still adopt an HWiNFO started elsewhere, but won't launch one itself.
 
 ### Games Configuration
 

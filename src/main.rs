@@ -13,7 +13,11 @@ mod audio;
 mod commands;
 mod config;
 mod credential;
+#[cfg(windows)]
+mod elevation;
 mod hwinfo;
+#[cfg(windows)]
+mod hwinfo_supervisor;
 mod logging;
 mod mqtt;
 mod notification;
@@ -117,6 +121,33 @@ async fn main() -> anyhow::Result<()> {
 
     // Parse CLI arguments
     let args: Vec<String> = std::env::args().collect();
+
+    // `--show-toast <payload>`: show one toast and exit. Used by the command
+    // executor to display notifications from a *de-elevated* child when the main
+    // process runs elevated (WinRT toasts fail from an elevated process). Handled
+    // before kill_existing_instances so this short-lived helper never terminates
+    // the running pc-bridge.
+    if let Some(pos) = args.iter().position(|a| a == "--show-toast") {
+        let payload = args.get(pos + 1).map(String::as_str).unwrap_or("");
+        if !payload.is_empty() {
+            let _ = notification::show_toast(payload);
+        }
+        return Ok(());
+    }
+
+    // `--install-startup-task` / `--uninstall-startup-task`: manage the elevated
+    // logon task that runs pc-bridge with admin rights (needed for headless
+    // HWiNFO via `manage_hwinfo`). Run elevated. Handled before the rest of
+    // startup so they're pure setup operations.
+    #[cfg(windows)]
+    if args.iter().any(|a| a == "--install-startup-task") {
+        return install_startup_task();
+    }
+    #[cfg(windows)]
+    if args.iter().any(|a| a == "--uninstall-startup-task") {
+        return uninstall_startup_task();
+    }
+
     let force_setup = args.iter().any(|a| a == "--setup");
     let reset_password = args.iter().any(|a| a == "--reset-password");
     let dry_run = args.iter().any(|a| a == "--dry-run")
@@ -284,6 +315,14 @@ async fn main() -> anyhow::Result<()> {
         info!("  HWiNFO sensor enabled (Global\\HWiNFO_SENS_SM2 lazy poll @ 500ms)");
     }
 
+    #[cfg(windows)]
+    if config.features.manage_hwinfo {
+        use crate::hwinfo_supervisor::HwInfoSupervisor;
+        let supervisor = HwInfoSupervisor::new(Arc::clone(&state));
+        handles.push(tokio::spawn(supervisor.run()));
+        info!("  HWiNFO supervisor enabled (launches HWiNFO headless; tray-less under a service)");
+    }
+
     if config.features.network_sensor {
         use crate::sensors::NetworkSensor;
         let sensor = NetworkSensor::new(Arc::clone(&state));
@@ -432,6 +471,7 @@ fn log_enabled_features(config: &Config) {
         f.disk_sensor,
         f.uptime_sensor,
         f.hwinfo_sensor,
+        f.manage_hwinfo,
         config.custom_sensors_enabled,
         config.custom_commands_enabled,
     ]
@@ -578,6 +618,63 @@ fn handle_credential_failure() -> anyhow::Result<Config> {
         Ok(config)
     } else {
         Config::load()
+    }
+}
+
+/// Create an elevated logon scheduled task that runs pc-bridge as the current
+/// user with highest privileges. This is the no-UAC way to autostart elevated
+/// (required for headless HWiNFO). Must be run from an elevated process.
+#[cfg(windows)]
+fn install_startup_task() -> anyhow::Result<()> {
+    let exe = std::env::current_exe()?;
+    // Quote the path so a TR with spaces round-trips; std handles the outer
+    // escaping of this single argument.
+    let tr = format!("\"{}\"", exe.display());
+
+    let status = std::process::Command::new("schtasks")
+        .args([
+            "/create",
+            "/tn",
+            "pc-bridge",
+            "/tr",
+            &tr,
+            "/sc",
+            "onlogon",
+            "/rl",
+            "highest",
+            "/f",
+        ])
+        .status()?;
+
+    if status.success() {
+        println!("Installed elevated logon task 'pc-bridge'.");
+        println!(
+            "Now remove the pc-bridge shortcut from your Startup folder (shell:startup) so it isn't launched twice,"
+        );
+        println!("then sign out and back in (or reboot) for the elevated task to take over.");
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "schtasks failed (exit {:?}). Run this from an elevated terminal: \
+             pc-bridge.exe --install-startup-task",
+            status.code()
+        )
+    }
+}
+
+/// Remove the logon scheduled task created by `--install-startup-task`.
+#[cfg(windows)]
+fn uninstall_startup_task() -> anyhow::Result<()> {
+    let status = std::process::Command::new("schtasks")
+        .args(["/delete", "/tn", "pc-bridge", "/f"])
+        .status()?;
+    if status.success() {
+        println!(
+            "Removed logon task 'pc-bridge'. Re-add a Startup shortcut if you want autostart back."
+        );
+        Ok(())
+    } else {
+        anyhow::bail!("schtasks failed (exit {:?})", status.code())
     }
 }
 

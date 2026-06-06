@@ -133,7 +133,18 @@ impl CommandExecutor {
             }
             "notification" => {
                 if !payload.is_empty() {
-                    notification::show_toast(payload)?;
+                    if crate::elevation::is_elevated() {
+                        // WinRT toasts fail from an elevated process — show it
+                        // from a de-elevated child instead.
+                        let exe = std::env::current_exe()?;
+                        crate::elevation::launch_deelevated(
+                            &exe.to_string_lossy(),
+                            &["--show-toast", payload],
+                            None,
+                        )?;
+                    } else {
+                        notification::show_toast(payload)?;
+                    }
                 }
                 return Ok(());
             }
@@ -287,6 +298,20 @@ impl CommandExecutor {
         } else {
             cmd_str
         };
+
+        // When elevated, launch de-elevated so games don't inherit admin
+        // (Fortnite/EAC, Minecraft). Steam/Epic URL launches are unaffected —
+        // they activate through the already-running client. The 5-minute
+        // watchdog below is skipped on this path: it's a safety net game
+        // launches don't need, and the de-elevated child isn't ours to wait on.
+        if crate::elevation::is_elevated() {
+            crate::elevation::launch_deelevated(
+                "powershell.exe",
+                &["-NoProfile", "-Command", &ps_cmd],
+                None,
+            )?;
+            return Ok(());
+        }
 
         // Execute via PowerShell
         let mut child = Command::new("powershell")

@@ -1148,6 +1148,7 @@ mod tests {
             disk_sensor: true,
             uptime_sensor: true,
             hwinfo_sensor: true,
+            manage_hwinfo: true,
         };
         let config = test_config("test-pc", features);
         let topics = MqttClient::build_subscribe_topics("test-pc", &config);
@@ -1849,6 +1850,7 @@ mod tests {
                 disk_sensor: true,
                 uptime_sensor: true,
                 hwinfo_sensor: true,
+                manage_hwinfo: true,
             }
         }
 
