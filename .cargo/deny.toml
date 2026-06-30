@@ -11,6 +11,12 @@ ignore = [
     # notify hasn't migrated yet.  Not a security CVE, just a maintenance
     # notice - revisit when notify drops the dep.
     "RUSTSEC-2024-0384",
+    # egui/eframe dependency tree (settings UI). Unmaintained notices, no fixes:
+    "RUSTSEC-2026-0192", # ttf-parser unmaintained (egui font parsing)
+    "RUSTSEC-2024-0436", # paste unmaintained (egui macros)
+    # anyhow: unsoundness only when calling Error::downcast_mut() on a
+    # context-wrapped error. pc-bridge never does that. Revisit when anyhow ships a fix.
+    "RUSTSEC-2026-0190",
 ]
 
 [licenses]
@@ -28,6 +34,8 @@ allow = [
     "CC0-1.0",
     "BSL-1.0",
     "CDLA-Permissive-2.0",
+    "OFL-1.1",            # egui bundled fonts (Ubuntu, emoji)
+    "LicenseRef-UFL-1.0", # Ubuntu Font License on the bundled Ubuntu font
 ]
 confidence-threshold = 0.8
 
