@@ -58,6 +58,32 @@ pub struct Config {
     pub custom_commands: Vec<CustomCommand>,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            device_name: "pc-bridge".to_string(),
+            mqtt: MqttConfig {
+                broker: String::new(),
+                user: String::new(),
+                pass: String::new(),
+                client_id: None,
+            },
+            intervals: IntervalConfig::default(),
+            features: FeatureConfig::default(),
+            games: HashMap::new(),
+            custom_sensors_enabled: false,
+            custom_commands_enabled: false,
+            custom_command_privileges_allowed: false,
+            allow_raw_commands: false,
+            discord_keybind: None,
+            update_channel: default_update_channel(),
+            disk_sensor_paths: Vec::new(),
+            custom_sensors: Vec::new(),
+            custom_commands: Vec::new(),
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }

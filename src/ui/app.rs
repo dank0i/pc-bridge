@@ -8,6 +8,8 @@
 use eframe::egui;
 use egui::{Color32, RichText, Rounding};
 
+use crate::config::Config;
+
 use super::model::{
     Feature, Game, GameStatus, Group, Kind, Launcher, Status, Transport, library, registry,
 };
@@ -40,35 +42,65 @@ pub struct App {
     custom_sensors_on: bool,
     features: Vec<Feature>,
     library: Vec<Game>,
+    /// The real on-disk config. Settings widgets read/write the App fields
+    /// above; Save folds them back into this and persists.
+    cfg: Config,
 }
 
 impl App {
     pub fn new() -> Self {
+        // Load the real config; fall back to defaults on first run / no file.
+        let cfg = Config::load().unwrap_or_default();
+        let (mqtt_host, mqtt_port) = split_broker(&cfg.mqtt.broker);
         Self {
-            device: "dank0i-pc".to_owned(),
+            device: cfg.device_name.clone(),
             transport: Transport::Mqtt,
-            mqtt_host: "homeassistant.local".to_owned(),
-            mqtt_port: "1883".to_owned(),
-            mqtt_user: "pc-bridge".to_owned(),
-            mqtt_pass: String::new(),
+            mqtt_host,
+            mqtt_port,
+            mqtt_user: cfg.mqtt.user.clone(),
+            mqtt_pass: cfg.mqtt.pass.clone(),
             ha_token: String::new(),
             show_secrets: false,
-            connected: true,
+            connected: false,
             tray_enabled: true,
             autostart: true,
-            beta_updates: false,
-            allow_privileged: true,
+            beta_updates: cfg.update_channel == "beta",
+            allow_privileged: cfg.custom_command_privileges_allowed,
             confirm_destructive: true,
             selected: Group::Games,
             search: String::new(),
             show_library: false,
             custom_tab: Kind::Action,
             group_on: [true; 8],
-            custom_actions_on: true,
-            custom_sensors_on: true,
+            custom_actions_on: cfg.custom_commands_enabled,
+            custom_sensors_on: cfg.custom_sensors_enabled,
             features: registry(),
             library: library(),
+            cfg,
         }
+    }
+
+    /// Fold the edited settings back into the config and persist them.
+    fn save(&mut self) -> anyhow::Result<()> {
+        self.cfg.device_name = self.device.clone();
+        self.cfg.mqtt.broker = if self.mqtt_port.is_empty() {
+            self.mqtt_host.clone()
+        } else {
+            format!("{}:{}", self.mqtt_host, self.mqtt_port)
+        };
+        self.cfg.mqtt.user = self.mqtt_user.clone();
+        self.cfg.mqtt.pass = self.mqtt_pass.clone();
+        self.cfg.custom_command_privileges_allowed = self.allow_privileged;
+        self.cfg.custom_commands_enabled = self.custom_actions_on;
+        self.cfg.custom_sensors_enabled = self.custom_sensors_on;
+        self.cfg.update_channel = if self.beta_updates {
+            "beta".to_owned()
+        } else if self.cfg.update_channel == "disabled" {
+            "disabled".to_owned()
+        } else {
+            "stable".to_owned()
+        };
+        self.cfg.save()
     }
 
     fn master_on(&self, f: &Feature) -> bool {
@@ -98,6 +130,17 @@ fn in_view(f: &Feature, g: Group, ct: Kind) -> bool {
     } else {
         f.group == g
     }
+}
+
+/// Split an MQTT broker string into (host, port), defaulting the port to 1883.
+fn split_broker(broker: &str) -> (String, String) {
+    if let Some((host, port)) = broker.rsplit_once(':')
+        && !port.is_empty()
+        && port.bytes().all(|b| b.is_ascii_digit())
+    {
+        return (host.to_owned(), port.to_owned());
+    }
+    (broker.to_owned(), "1883".to_owned())
 }
 
 impl eframe::App for App {
@@ -835,7 +878,7 @@ fn general_panel(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(GAP);
             ui.horizontal(|ui| {
                 if ui.button("Save").clicked() {
-                    app.connected = true;
+                    app.connected = app.save().is_ok();
                 }
                 if ui.button("Test connection").clicked() {
                     app.connected = true;
