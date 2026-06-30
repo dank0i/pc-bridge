@@ -8,7 +8,9 @@
 use eframe::egui;
 use egui::{Color32, RichText, Rounding};
 
-use crate::config::{Config, FeatureConfig};
+use crate::config::{
+    Config, CustomCommand, CustomCommandType, CustomSensor, CustomSensorType, FeatureConfig,
+};
 
 use super::model::{
     Feature, Game, GameStatus, Group, Kind, Launcher, Status, Transport, games_to_library,
@@ -41,6 +43,10 @@ pub struct App {
     group_on: [bool; 8],
     custom_actions_on: bool,
     custom_sensors_on: bool,
+    /// Editable copies of the user-defined custom entities, folded back into
+    /// the config on save.
+    custom_sensors: Vec<CustomSensor>,
+    custom_commands: Vec<CustomCommand>,
     features: Vec<Feature>,
     library: Vec<Game>,
     /// The real on-disk config. Settings widgets read/write the App fields
@@ -81,6 +87,8 @@ impl App {
             group_on: [true; 8],
             custom_actions_on: cfg.custom_commands_enabled,
             custom_sensors_on: cfg.custom_sensors_enabled,
+            custom_sensors: cfg.custom_sensors.clone(),
+            custom_commands: cfg.custom_commands.clone(),
             features,
             library: games_to_library(&cfg.games),
             cfg,
@@ -106,6 +114,19 @@ impl App {
         // Fold the edited game library back into the config map, preserving the
         // Steam auto-discovered flag for games already known to discovery.
         self.cfg.games = library_to_games(&self.library, &self.cfg.games);
+        // Persist edited custom entities, dropping rows with a blank name.
+        self.cfg.custom_sensors = self
+            .custom_sensors
+            .iter()
+            .filter(|s| !s.name.trim().is_empty())
+            .cloned()
+            .collect();
+        self.cfg.custom_commands = self
+            .custom_commands
+            .iter()
+            .filter(|c| !c.name.trim().is_empty())
+            .cloned()
+            .collect();
         self.cfg.update_channel = if self.beta_updates {
             "beta".to_owned()
         } else if self.cfg.update_channel == "disabled" {
@@ -132,6 +153,21 @@ impl App {
     }
 
     fn count(&self, g: Group) -> (usize, usize) {
+        if g == Group::Custom {
+            // Custom entities live in their own Vecs, not `features`; each set is
+            // all-on or all-off via its master toggle.
+            let total = self.custom_sensors.len() + self.custom_commands.len();
+            let on = if self.custom_sensors_on {
+                self.custom_sensors.len()
+            } else {
+                0
+            } + if self.custom_actions_on {
+                self.custom_commands.len()
+            } else {
+                0
+            };
+            return (on, total);
+        }
         let it = self.features.iter().filter(|f| f.group == g);
         (it.clone().filter(|f| self.effective(f)).count(), it.count())
     }
@@ -434,6 +470,14 @@ fn feature_panel(app: &mut App, ui: &mut egui::Ui) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if games_lib {
                 let _ = ui.button("Scan now");
+            } else if g == Group::Custom {
+                // Custom entities have no per-item toggle; the master gates them
+                // all, so show how many are defined instead of an All toggle.
+                let n = match ct {
+                    Kind::Action => app.custom_commands.len(),
+                    Kind::Sensor => app.custom_sensors.len(),
+                };
+                ui.label(RichText::new(format!("{n} defined")).size(12.0).color(GREY));
             } else {
                 let mut all = all_on;
                 ui.label(
@@ -503,9 +547,16 @@ fn feature_panel(app: &mut App, ui: &mut egui::Ui) {
         },
         _ => app.group_on[g.index()],
     };
+    // Custom entities are user-defined rows edited in place (name, type, and
+    // type-specific fields), not static features, so they get their own form
+    // view bound directly to the config Vecs.
+    if g == Group::Custom {
+        custom_view(app, ui, master_on, ct);
+        return;
+    }
+
     let allow = app.allow_privileged;
     let needle = app.search.to_lowercase();
-    let removable = g == Group::Custom;
 
     // Display order: alphabetical by name.
     let mut indices: Vec<usize> = app
@@ -523,38 +574,280 @@ fn feature_panel(app: &mut App, ui: &mut egui::Ui) {
         .auto_shrink(false)
         .show(ui, |ui| {
             for &i in &indices {
-                if feature_row(ui, &mut app.features[i], master_on, allow, removable) {
+                if feature_row(ui, &mut app.features[i], master_on, allow, false) {
                     to_remove = Some(i);
                 }
                 ui.add_space(GAP);
             }
-            if g == Group::Custom {
-                let label = match ct {
-                    Kind::Action => "+  Add custom action",
-                    Kind::Sensor => "+  Add custom sensor",
-                };
-                if ui.button(label).clicked() {
-                    app.features.push(Feature {
-                        id: "custom_new",
-                        name: "New",
-                        desc: "A custom item you defined.",
-                        group: Group::Custom,
-                        kind: ct,
-                        privileged: false,
-                        enabled: false,
-                        status: Status::Running,
-                        value: String::new(),
-                        interval: if ct == Kind::Sensor { 5 } else { 0 },
-                        entity: "sensor.dank0i_pc_custom_new",
-                        requires: "",
-                        method: "User-defined",
-                        expanded: true,
-                    });
-                }
-            }
         });
     if let Some(i) = to_remove {
         app.features.remove(i);
+    }
+}
+
+/// Render the editable custom sensors/commands for the active tab, bound to the
+/// config Vecs. Custom entities have no per-item enable toggle (the master
+/// toggle gates them all), so each row is a definition form plus a remove.
+fn custom_view(app: &mut App, ui: &mut egui::Ui, master_on: bool, ct: Kind) {
+    let needle = app.search.to_lowercase();
+    let mut remove: Option<usize> = None;
+    egui::ScrollArea::vertical()
+        .auto_shrink(false)
+        .show(ui, |ui| match ct {
+            Kind::Sensor => {
+                for (i, s) in app.custom_sensors.iter_mut().enumerate() {
+                    if !needle.is_empty() && !s.name.to_lowercase().contains(&needle) {
+                        continue;
+                    }
+                    if custom_sensor_row(ui, s, master_on, i) {
+                        remove = Some(i);
+                    }
+                    ui.add_space(GAP);
+                }
+                if ui.button("+  Add custom sensor").clicked() {
+                    app.custom_sensors.push(CustomSensor {
+                        name: String::new(),
+                        sensor_type: CustomSensorType::Powershell,
+                        interval_seconds: 30,
+                        unit: None,
+                        icon: None,
+                        script: None,
+                        process: None,
+                        file_path: None,
+                        registry_key: None,
+                        registry_value: None,
+                    });
+                }
+                if let Some(i) = remove {
+                    app.custom_sensors.remove(i);
+                }
+            }
+            Kind::Action => {
+                for (i, c) in app.custom_commands.iter_mut().enumerate() {
+                    if !needle.is_empty() && !c.name.to_lowercase().contains(&needle) {
+                        continue;
+                    }
+                    if custom_command_row(ui, c, master_on, i) {
+                        remove = Some(i);
+                    }
+                    ui.add_space(GAP);
+                }
+                if ui.button("+  Add custom action").clicked() {
+                    app.custom_commands.push(CustomCommand {
+                        name: String::new(),
+                        command_type: CustomCommandType::Shell,
+                        icon: None,
+                        admin: false,
+                        script: None,
+                        path: None,
+                        args: None,
+                        command: None,
+                    });
+                }
+                if let Some(i) = remove {
+                    app.custom_commands.remove(i);
+                }
+            }
+        });
+}
+
+/// One editable string field bound to an `Option<String>` (blank clears it).
+fn opt_field(ui: &mut egui::Ui, label: &str, value: &mut Option<String>, width: f32) {
+    let mut text = value.clone().unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [108.0, 18.0],
+            egui::Label::new(RichText::new(label).size(12.0).color(GREY)),
+        );
+        ui.add(egui::TextEdit::singleline(&mut text).desired_width(width));
+    });
+    *value = if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    };
+}
+
+/// Editable form for one custom sensor. Returns true if removed.
+fn custom_sensor_row(ui: &mut egui::Ui, s: &mut CustomSensor, master_on: bool, idx: usize) -> bool {
+    let fill = if master_on { ROW } else { ROW_OFF };
+    let mut remove = false;
+    egui::Frame::none()
+        .fill(fill)
+        .rounding(9.0)
+        .inner_margin(egui::Margin::symmetric(PAD_X, PAD_Y))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut s.name)
+                        .hint_text("name")
+                        .desired_width(190.0),
+                );
+                ui.add_space(TIGHT);
+                badge(ui, "SENSOR", ACCENT);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("remove").size(12.0).color(GREY))
+                                .frame(false),
+                        )
+                        .clicked()
+                    {
+                        remove = true;
+                    }
+                });
+            });
+            ui.add_space(TIGHT);
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [108.0, 18.0],
+                    egui::Label::new(RichText::new("Type").size(12.0).color(GREY)),
+                );
+                egui::ComboBox::from_id_salt(("cs_type", idx))
+                    .selected_text(sensor_type_label(&s.sensor_type))
+                    .show_ui(ui, |ui| {
+                        for t in [
+                            CustomSensorType::Powershell,
+                            CustomSensorType::ProcessExists,
+                            CustomSensorType::FileContents,
+                            CustomSensorType::Registry,
+                        ] {
+                            let lbl = sensor_type_label(&t);
+                            ui.selectable_value(&mut s.sensor_type, t, lbl);
+                        }
+                    });
+            });
+            ui.add_space(TIGHT);
+            // Type-specific input(s).
+            match s.sensor_type {
+                CustomSensorType::Powershell => {
+                    opt_field(ui, "Script", &mut s.script, 300.0);
+                }
+                CustomSensorType::ProcessExists => {
+                    opt_field(ui, "Process", &mut s.process, 220.0);
+                }
+                CustomSensorType::FileContents => {
+                    opt_field(ui, "File path", &mut s.file_path, 300.0);
+                }
+                CustomSensorType::Registry => {
+                    opt_field(ui, "Registry key", &mut s.registry_key, 300.0);
+                    ui.add_space(TIGHT);
+                    opt_field(ui, "Value name", &mut s.registry_value, 220.0);
+                }
+            }
+            ui.add_space(TIGHT);
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [108.0, 18.0],
+                    egui::Label::new(RichText::new("Poll every").size(12.0).color(GREY)),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut s.interval_seconds)
+                        .suffix(" s")
+                        .range(1..=86_400),
+                );
+            });
+            ui.add_space(TIGHT);
+            opt_field(ui, "Unit", &mut s.unit, 90.0);
+        });
+    remove
+}
+
+/// Editable form for one custom command. Returns true if removed.
+fn custom_command_row(
+    ui: &mut egui::Ui,
+    c: &mut CustomCommand,
+    master_on: bool,
+    idx: usize,
+) -> bool {
+    let fill = if master_on { ROW } else { ROW_OFF };
+    let mut remove = false;
+    egui::Frame::none()
+        .fill(fill)
+        .rounding(9.0)
+        .inner_margin(egui::Margin::symmetric(PAD_X, PAD_Y))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut c.name)
+                        .hint_text("name")
+                        .desired_width(190.0),
+                );
+                ui.add_space(TIGHT);
+                badge(ui, "ACTION", ORANGE);
+                if c.admin {
+                    ui.add_space(TIGHT);
+                    badge(ui, "ADMIN", RED);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("remove").size(12.0).color(GREY))
+                                .frame(false),
+                        )
+                        .clicked()
+                    {
+                        remove = true;
+                    }
+                });
+            });
+            ui.add_space(TIGHT);
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [108.0, 18.0],
+                    egui::Label::new(RichText::new("Type").size(12.0).color(GREY)),
+                );
+                egui::ComboBox::from_id_salt(("cc_type", idx))
+                    .selected_text(command_type_label(&c.command_type))
+                    .show_ui(ui, |ui| {
+                        for t in [
+                            CustomCommandType::Shell,
+                            CustomCommandType::Powershell,
+                            CustomCommandType::Executable,
+                        ] {
+                            let lbl = command_type_label(&t);
+                            ui.selectable_value(&mut c.command_type, t, lbl);
+                        }
+                    });
+            });
+            ui.add_space(TIGHT);
+            match c.command_type {
+                CustomCommandType::Shell => {
+                    opt_field(ui, "Command", &mut c.command, 300.0);
+                }
+                CustomCommandType::Powershell => {
+                    opt_field(ui, "Script", &mut c.script, 300.0);
+                }
+                CustomCommandType::Executable => {
+                    opt_field(ui, "Path", &mut c.path, 300.0);
+                }
+            }
+            ui.add_space(TIGHT);
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [108.0, 18.0],
+                    egui::Label::new(RichText::new("Run as admin").size(12.0).color(GREY)),
+                );
+                toggle(ui, &mut c.admin);
+            });
+        });
+    remove
+}
+
+fn sensor_type_label(t: &CustomSensorType) -> &'static str {
+    match t {
+        CustomSensorType::Powershell => "PowerShell",
+        CustomSensorType::ProcessExists => "Process running",
+        CustomSensorType::FileContents => "File contents",
+        CustomSensorType::Registry => "Registry value",
+    }
+}
+
+fn command_type_label(t: &CustomCommandType) -> &'static str {
+    match t {
+        CustomCommandType::Shell => "Shell command",
+        CustomCommandType::Powershell => "PowerShell script",
+        CustomCommandType::Executable => "Executable",
     }
 }
 
