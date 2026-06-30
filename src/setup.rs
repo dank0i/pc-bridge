@@ -404,6 +404,7 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
             memory_sensor: config.system_sensors,
             active_window: config.system_sensors,
             session_state: false,
+            audio_device: false,
             volume: config.audio_control,
             media_controls: config.audio_control,
             steam_updates: config.steam_updates,

@@ -173,6 +173,30 @@ fn get_endpoint_volume() -> Option<IAudioEndpointVolume> {
     })
 }
 
+/// Friendly name of the current default audio output device (e.g. "Speakers
+/// (Realtek Audio)"). Reads it fresh each call via the device property store;
+/// returns None if the COM calls fail.
+#[cfg(windows)]
+pub fn get_default_device_name() -> Option<String> {
+    use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+    use windows::Win32::System::Com::{CoTaskMemFree, STGM_READ};
+    use windows::Win32::UI::Shell::PropertiesSystem::PropVariantToStringAlloc;
+
+    ensure_com_init();
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
+        let store = device.OpenPropertyStore(STGM_READ).ok()?;
+        // PROPVARIANT clears itself on drop in this windows-rs version.
+        let pv = store.GetValue(&PKEY_Device_FriendlyName).ok()?;
+        let pwstr = PropVariantToStringAlloc(&pv).ok()?;
+        let name = pwstr.to_string().ok();
+        CoTaskMemFree(Some(pwstr.0 as *const core::ffi::c_void));
+        name.filter(|s| !s.is_empty())
+    }
+}
+
 /// Invalidate the cached endpoint (called on COM errors so next call creates fresh).
 #[cfg(windows)]
 fn invalidate_endpoint_cache() {

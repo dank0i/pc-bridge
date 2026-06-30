@@ -285,6 +285,14 @@ async fn run_agent() -> anyhow::Result<()> {
         info!("  Session lock/unlock sensor enabled");
     }
 
+    #[cfg(windows)]
+    if config.features.audio_device {
+        use crate::sensors::AudioDeviceSensor;
+        let sensor = AudioDeviceSensor::new(Arc::clone(&state));
+        handles.push(tokio::spawn(sensor.run()));
+        info!("  Default audio device sensor enabled");
+    }
+
     if config.features.steam_updates {
         use crate::sensors::SteamSensor;
         let sensor = SteamSensor::new(Arc::clone(&state));
@@ -470,6 +478,7 @@ fn log_enabled_features(config: &Config) {
         f.memory_sensor,
         f.active_window,
         f.session_state,
+        f.audio_device,
         f.volume,
         f.media_controls,
         f.steam_updates,

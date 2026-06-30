@@ -126,6 +126,20 @@ impl MqttClient {
             .await;
         }
 
+        // Default audio output device sensor (Windows-only producer via WASAPI).
+        #[cfg(windows)]
+        if config.features.audio_device {
+            self.register_sensor(
+                device,
+                "audio_device",
+                "Default Audio Device",
+                "mdi:speaker",
+                None,
+                None,
+            )
+            .await;
+        }
+
         // System sensors, split into independent flags. Battery and bridge
         // health ride along whenever the system task runs (any of the three on).
         let system_any = config.features.cpu_sensor
@@ -1019,8 +1033,9 @@ fn feature_entities(config: &Config) -> Vec<(&'static str, &'static str, bool)> 
     ];
     #[cfg(windows)]
     {
-        // Session sensor has a Windows-only producer, so it only exists here.
+        // Session and audio-device sensors have Windows-only producers.
         entities.push(("sensor", "session", f.session_state));
+        entities.push(("sensor", "audio_device", f.audio_device));
         for oid in HWINFO_ENTITY_IDS {
             entities.push(("sensor", oid, f.hwinfo_sensor));
         }

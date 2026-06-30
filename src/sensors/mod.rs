@@ -1,5 +1,7 @@
 //! Sensor modules for game detection, idle tracking, and system monitoring
 
+#[cfg(windows)]
+mod audio_device;
 mod custom;
 mod disk;
 mod gpu;
@@ -24,6 +26,8 @@ mod games_linux;
 #[cfg(unix)]
 mod idle_linux;
 
+#[cfg(windows)]
+pub use audio_device::AudioDeviceSensor;
 pub use custom::CustomSensorManager;
 pub use disk::DiskSensor;
 pub use gpu::GpuSensor;

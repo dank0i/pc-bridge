@@ -100,6 +100,7 @@ windows = { version = "0.58", features = [
     "Win32_System_Shutdown",
     "Win32_System_RemoteDesktop",
     "Win32_System_Com",
+    "Win32_Devices_FunctionDiscovery",
     "Win32_System_Performance",
     "Win32_System_Memory",
     "Win32_UI_Input_KeyboardAndMouse",
