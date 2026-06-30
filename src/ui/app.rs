@@ -283,10 +283,15 @@ fn nav_item(
         } else {
             GREY
         };
+        let label = if a == 0 {
+            "off".to_owned()
+        } else {
+            format!("{a}/{t}")
+        };
         ui.painter().text(
             rect.right_center() - egui::vec2(10.0, 0.0),
             egui::Align2::RIGHT_CENTER,
-            format!("{a}/{t}"),
+            label,
             egui::FontId::proportional(12.0),
             col,
         );
