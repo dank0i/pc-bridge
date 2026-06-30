@@ -55,6 +55,13 @@ native-tls = "0.2"
 # Zero-copy byte buffers for MQTT publish payloads (already in tree via rumqttc)
 bytes = "1"
 
+# Native settings UI: egui/eframe (pure Rust, GPU-rendered, no webview). Runs
+# only in --ui mode; the headless agent never initializes it.
+eframe = "0.29"
+
+# Native file dialogs for the library folder picker in the settings UI
+rfd = "0.15"
+
 # libc for statvfs (disk sensor on Unix)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
