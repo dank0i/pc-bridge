@@ -712,7 +712,7 @@ pub fn games_to_library(games: &HashMap<String, GameConfig>) -> Vec<Game> {
             }
         })
         .collect();
-    v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    v.sort_by_key(|g| g.name.to_lowercase());
     v
 }
 
