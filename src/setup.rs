@@ -389,6 +389,7 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
             game_catalog: config.game_detection,
             steam_library: config.game_detection,
             launch_game: config.game_detection,
+            close_game: config.game_detection,
             idle_tracking: config.idle_tracking,
             sleep_wake: config.power_events,
             display_state: config.power_events,

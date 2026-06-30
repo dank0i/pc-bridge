@@ -496,6 +496,10 @@ impl MqttClient {
             self.register_button(device, "Launch", "mdi:rocket-launch")
                 .await;
         }
+        if config.features.close_game {
+            self.register_button(device, "CloseGame", "mdi:close-box")
+                .await;
+        }
         if config.features.steam_library {
             self.register_button(device, "RefreshSteamGames", "mdi:steam")
                 .await;
@@ -979,6 +983,7 @@ fn feature_entities(config: &Config) -> Vec<(&'static str, &'static str, bool)> 
         ("sensor", "volume_level", f.volume),
         // Buttons
         ("button", "Launch", f.launch_game),
+        ("button", "CloseGame", f.close_game),
         ("button", "RefreshSteamGames", f.steam_library),
         ("button", "Screensaver", f.idle_tracking),
         ("button", "Wake", f.idle_tracking),

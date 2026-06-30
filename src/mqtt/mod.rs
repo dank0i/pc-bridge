@@ -166,6 +166,7 @@ impl MqttClient {
                 "game_catalog": config.features.game_catalog,
                 "steam_library": config.features.steam_library,
                 "launch_game": config.features.launch_game,
+                "close_game": config.features.close_game,
                 "idle_tracking": config.features.idle_tracking,
                 "sleep_wake": config.features.sleep_wake,
                 "display_state": config.features.display_state,
@@ -372,6 +373,7 @@ impl MqttClient {
         // Core commands
         let commands = [
             "Launch",
+            "CloseGame",
             "RefreshSteamGames",
             "Screensaver",
             "Wake",
@@ -1181,6 +1183,7 @@ mod tests {
             game_catalog: true,
             steam_library: true,
             launch_game: true,
+            close_game: true,
             idle_tracking: true,
             sleep_wake: true,
             display_state: true,
@@ -1895,6 +1898,7 @@ mod tests {
                 game_catalog: true,
                 steam_library: true,
                 launch_game: true,
+                close_game: true,
                 idle_tracking: true,
                 sleep_wake: true,
                 display_state: true,

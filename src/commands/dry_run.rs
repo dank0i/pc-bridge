@@ -49,6 +49,7 @@ async fn resolve_action(name: &str, payload: &str, state: &Arc<AppState>) -> Str
         "Logoff" => "native:logoff".to_string(),
         "MonitorOff" => "native:monitor_off".to_string(),
         "MonitorOn" => "native:monitor_on".to_string(),
+        "CloseGame" => "native:close_game".to_string(),
         "Screensaver" => "native:screensaver".to_string(),
         "RefreshSteamGames" => "native:refresh_steam_games".to_string(),
         "MediaPlayPause" => "media:play_pause".to_string(),

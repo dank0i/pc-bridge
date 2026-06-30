@@ -34,8 +34,8 @@ fn get_predefined_command(name: &str) -> Option<&'static str> {
         "Screensaver" => Some(r#"%windir%\System32\scrnsave.scr /s"#),
         // These are handled natively in execute_command
         "Wake" | "Lock" | "Hibernate" | "Restart" | "Shutdown" | "Sleep" | "Logoff"
-        | "MonitorOff" | "MonitorOn" | "VolumeSet" | "VolumeMute" | "MediaPlayPause"
-        | "MediaNext" | "MediaPrevious" | "MediaStop" => None,
+        | "MonitorOff" | "MonitorOn" | "CloseGame" | "VolumeSet" | "VolumeMute"
+        | "MediaPlayPause" | "MediaNext" | "MediaPrevious" | "MediaStop" => None,
         _ => None,
     }
 }
@@ -185,6 +185,10 @@ impl CommandExecutor {
             "MonitorOn" => {
                 // Monitor-on is the same as the display wake sequence.
                 wake_display();
+                return Ok(());
+            }
+            "CloseGame" => {
+                close_running_games(state).await;
                 return Ok(());
             }
             "VolumeSet" => {
@@ -344,6 +348,32 @@ impl CommandExecutor {
         });
 
         Ok(())
+    }
+}
+
+/// Close every currently-running configured game by sending CloseMainWindow to
+/// its process (the same mechanism as the `close:` launcher), matching exactly
+/// what the running-game sensor reports so we never touch unrelated processes.
+async fn close_running_games(state: &Arc<AppState>) {
+    let running: Vec<String> = {
+        let config = state.config.read().await;
+        let proc_state = state.process_watcher.state();
+        let guard = proc_state.read().await;
+        config.matching_game_processes(guard.names().iter().map(|s| &**s))
+    };
+    if running.is_empty() {
+        info!("CloseGame: no running game detected");
+        return;
+    }
+    for proc in running {
+        let Some(cmd) = expand_launcher_shortcut(&format!("close:{proc}")) else {
+            continue;
+        };
+        info!("CloseGame: closing {}", proc);
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &cmd])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
     }
 }
 
@@ -516,6 +546,7 @@ pub(crate) fn resolve_command_action(
         "Logoff" => return CommandAction::Native("Logoff"),
         "MonitorOff" => return CommandAction::Native("MonitorOff"),
         "MonitorOn" => return CommandAction::Native("MonitorOn"),
+        "CloseGame" => return CommandAction::Native("CloseGame"),
         "notification" => {
             if payload.is_empty() {
                 return CommandAction::NoOp("notification_empty");

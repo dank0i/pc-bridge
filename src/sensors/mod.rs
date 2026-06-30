@@ -40,4 +40,6 @@ pub use steam::SteamSensor;
 #[cfg(unix)]
 pub use games_linux::GameSensor;
 #[cfg(unix)]
+pub(crate) use games_linux::current_process_names;
+#[cfg(unix)]
 pub use idle_linux::IdleSensor;

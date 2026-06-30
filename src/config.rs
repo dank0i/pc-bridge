@@ -230,6 +230,8 @@ pub struct FeatureConfig {
     #[serde(default)]
     pub launch_game: bool,
     #[serde(default)]
+    pub close_game: bool,
+    #[serde(default)]
     pub idle_tracking: bool,
     #[serde(default = "default_true")]
     pub sleep_wake: bool,
@@ -282,6 +284,7 @@ impl Default for FeatureConfig {
             game_catalog: false,
             steam_library: false,
             launch_game: false,
+            close_game: false,
             idle_tracking: false,
             sleep_wake: true,
             display_state: true,
@@ -436,6 +439,39 @@ fn default_system_sensors() -> u64 {
 }
 
 impl Config {
+    /// Given a live list of running process names, return those that match a
+    /// configured game, using the same rule as the running-game sensor (prefix
+    /// or `.exe`-stripped exact match, case-insensitive). Powers the
+    /// `CloseGame` command so it closes exactly what the sensor reports.
+    pub fn matching_game_processes<'a>(
+        &self,
+        process_names: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<String> {
+        let patterns: Vec<String> = self.games.keys().map(|p| p.to_lowercase()).collect();
+        if patterns.is_empty() {
+            return Vec::new();
+        }
+        let mut matched = Vec::new();
+        for name in process_names {
+            let base = if name.len() >= 4
+                && name.as_bytes()[name.len() - 4..].eq_ignore_ascii_case(b".exe")
+            {
+                &name[..name.len() - 4]
+            } else {
+                name
+            };
+            let hit = patterns.iter().any(|p| {
+                (name.len() >= p.len()
+                    && name.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes()))
+                    || base.eq_ignore_ascii_case(p)
+            });
+            if hit {
+                matched.push(name.to_string());
+            }
+        }
+        matched
+    }
+
     /// Check if this is a first run (no config file exists)
     pub fn is_first_run() -> Result<bool> {
         Self::migrate_config_location()?;
@@ -1206,6 +1242,30 @@ async fn reload_hot_config(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_matching_game_processes() {
+        let mut config = Config::default();
+        config
+            .games
+            .insert("bf2042".to_string(), GameConfig::Simple("battlefield".into()));
+        config
+            .games
+            .insert("cs2.exe".to_string(), GameConfig::Simple("cs2".into()));
+
+        // Only the configured games match the live process list.
+        let running = ["bf2042.exe", "discord.exe", "cs2.exe", "explorer.exe"];
+        let mut matched = config.matching_game_processes(running.iter().copied());
+        matched.sort();
+        assert_eq!(matched, vec!["bf2042.exe".to_string(), "cs2.exe".to_string()]);
+
+        // No configured games means nothing to close.
+        assert!(
+            Config::default()
+                .matching_game_processes(["bf2042.exe"].iter().copied())
+                .is_empty()
+        );
+    }
 
     fn minimal_config() -> Config {
         Config {

@@ -440,6 +440,7 @@ fn log_enabled_features(config: &Config) {
         f.game_catalog,
         f.steam_library,
         f.launch_game,
+        f.close_game,
         f.idle_tracking,
         f.sleep_wake,
         f.display_state,

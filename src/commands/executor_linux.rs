@@ -21,7 +21,7 @@ const MAX_CONCURRENT_COMMANDS: usize = 5;
 fn get_predefined_command(name: &str) -> Option<&'static str> {
     match name {
         "Screensaver" => Some("xdg-screensaver activate"),
-        "Wake" | "Sleep" | "Hibernate" | "MonitorOff" | "MonitorOn" => None, // Handled natively
+        "Wake" | "Sleep" | "Hibernate" | "MonitorOff" | "MonitorOn" | "CloseGame" => None, // Handled natively
         "Shutdown" => Some("systemctl poweroff"),
         "Lock" => Some("loginctl lock-session"),
         "Restart" => Some("systemctl reboot"),
@@ -164,6 +164,10 @@ impl CommandExecutor {
                 wake_display();
                 return Ok(());
             }
+            "CloseGame" => {
+                close_running_games(state).await;
+                return Ok(());
+            }
             "notification" => {
                 if !payload.is_empty() {
                     notification::show_toast(payload)?;
@@ -290,6 +294,30 @@ impl CommandExecutor {
         });
 
         Ok(())
+    }
+}
+
+/// Close every currently-running configured game via the `close:` launcher
+/// (SIGTERM), matching exactly what the running-game sensor reports. Linux has
+/// no process watcher, so we read `/proc` once on a blocking thread.
+async fn close_running_games(state: &Arc<AppState>) {
+    let names = tokio::task::spawn_blocking(crate::sensors::current_process_names)
+        .await
+        .unwrap_or_default();
+    let running = {
+        let config = state.config.read().await;
+        config.matching_game_processes(names.iter().map(String::as_str))
+    };
+    if running.is_empty() {
+        info!("CloseGame: no running game detected");
+        return;
+    }
+    for proc in running {
+        let Some(cmd) = expand_launcher_shortcut(&format!("close:{proc}")) else {
+            continue;
+        };
+        info!("CloseGame: closing {}", proc);
+        let _ = Command::new("bash").args(["-c", &cmd]).spawn();
     }
 }
 

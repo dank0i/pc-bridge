@@ -254,3 +254,9 @@ fn starts_with_ignore_ascii_case(haystack: &str, prefix: &str) -> bool {
     haystack.len() >= prefix.len()
         && haystack.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
 }
+
+/// Read currently-running process names from `/proc` (blocking). Exposed for the
+/// `CloseGame` command, which has no process watcher on Linux.
+pub(crate) fn current_process_names() -> Vec<String> {
+    GameSensor::get_process_names_blocking().unwrap_or_default()
+}
