@@ -21,6 +21,7 @@ mod power;
 mod sensors;
 mod setup;
 mod steam;
+mod ui;
 mod updater;
 
 use log::{error, info};
@@ -78,8 +79,18 @@ fn restore_console_mode() {
     }
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // The settings window runs in its own mode; the headless agent never loads egui.
+    if std::env::args().any(|a| a == "--ui") {
+        return ui::run();
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(run_agent())
+}
+
+async fn run_agent() -> anyhow::Result<()> {
     // On Windows, attach to parent console if launched from terminal
     // This allows seeing output when run from cmd/powershell
     #[cfg(windows)]
