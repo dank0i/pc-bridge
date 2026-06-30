@@ -227,7 +227,11 @@ pub struct FeatureConfig {
     #[serde(default)]
     pub notifications: bool,
     #[serde(default)]
-    pub system_sensors: bool,
+    pub cpu_sensor: bool,
+    #[serde(default)]
+    pub memory_sensor: bool,
+    #[serde(default)]
+    pub active_window: bool,
     #[serde(default)]
     pub audio_control: bool,
     #[serde(default)]
@@ -253,7 +257,9 @@ impl Default for FeatureConfig {
             idle_tracking: false,
             power_events: true,
             notifications: false,
-            system_sensors: false,
+            cpu_sensor: false,
+            memory_sensor: false,
+            active_window: false,
             audio_control: false,
             steam_updates: false,
             discord: false,
@@ -534,6 +540,24 @@ impl Config {
         // Ensure features object exists
         if !obj.contains_key("features") {
             obj.insert("features".to_string(), serde_json::json!({}));
+            migrated = true;
+        }
+
+        // Migrate the legacy coarse `system_sensors` flag into the granular
+        // cpu_sensor / memory_sensor / active_window flags.
+        if let Some(features) = obj.get_mut("features").and_then(|v| v.as_object_mut())
+            && let Some(val) = features.remove("system_sensors")
+        {
+            let on = val.as_bool().unwrap_or(false);
+            features
+                .entry("cpu_sensor".to_string())
+                .or_insert_with(|| serde_json::json!(on));
+            features
+                .entry("memory_sensor".to_string())
+                .or_insert_with(|| serde_json::json!(on));
+            features
+                .entry("active_window".to_string())
+                .or_insert_with(|| serde_json::json!(on));
             migrated = true;
         }
 

@@ -108,8 +108,12 @@ impl MqttClient {
                 .await;
         }
 
-        // System sensors (CPU, memory, battery, active window)
-        if config.features.system_sensors {
+        // System sensors, split into independent flags. Battery and bridge
+        // health ride along whenever the system task runs (any of the three on).
+        let system_any = config.features.cpu_sensor
+            || config.features.memory_sensor
+            || config.features.active_window;
+        if config.features.cpu_sensor {
             self.register_sensor(
                 device,
                 "cpu_usage",
@@ -119,6 +123,8 @@ impl MqttClient {
                 Some("%"),
             )
             .await;
+        }
+        if config.features.memory_sensor {
             self.register_sensor(
                 device,
                 "memory_usage",
@@ -128,6 +134,19 @@ impl MqttClient {
                 Some("%"),
             )
             .await;
+        }
+        if config.features.active_window {
+            self.register_sensor(
+                device,
+                "active_window",
+                "Active Window",
+                "mdi:application",
+                None,
+                None,
+            )
+            .await;
+        }
+        if system_any {
             self.register_sensor(
                 device,
                 "battery_level",
@@ -142,15 +161,6 @@ impl MqttClient {
                 "battery_charging",
                 "Battery Charging",
                 "mdi:battery-charging",
-                None,
-                None,
-            )
-            .await;
-            self.register_sensor(
-                device,
-                "active_window",
-                "Active Window",
-                "mdi:application",
                 None,
                 None,
             )

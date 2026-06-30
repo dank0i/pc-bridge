@@ -267,7 +267,8 @@ async fn run_agent() -> anyhow::Result<()> {
         info!("  Power events enabled");
     }
 
-    if config.features.system_sensors {
+    if config.features.cpu_sensor || config.features.memory_sensor || config.features.active_window
+    {
         let sensor = SystemSensor::new(Arc::clone(&state));
         handles.push(tokio::spawn(sensor.run()));
         info!("  System sensors enabled (CPU/memory polled, battery/active_window event-driven)");
@@ -434,7 +435,9 @@ fn log_enabled_features(config: &Config) {
         f.idle_tracking,
         f.power_events,
         f.notifications,
-        f.system_sensors,
+        f.cpu_sensor,
+        f.memory_sensor,
+        f.active_window,
         f.audio_control,
         f.steam_updates,
         f.discord,
