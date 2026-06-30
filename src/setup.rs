@@ -385,7 +385,10 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
         },
         intervals: IntervalConfig::default(),
         features: FeatureConfig {
-            game_detection: config.game_detection,
+            running_game: config.game_detection,
+            game_catalog: config.game_detection,
+            steam_library: config.game_detection,
+            launch_game: config.game_detection,
             idle_tracking: config.idle_tracking,
             power_events: config.power_events,
             notifications: config.notifications,

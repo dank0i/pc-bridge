@@ -162,7 +162,10 @@ impl MqttClient {
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
             "features": {
-                "game_detection": config.features.game_detection,
+                "running_game": config.features.running_game,
+                "game_catalog": config.features.game_catalog,
+                "steam_library": config.features.steam_library,
+                "launch_game": config.features.launch_game,
                 "idle_tracking": config.features.idle_tracking,
                 "power_events": config.features.power_events,
                 "notifications": config.features.notifications,
@@ -1137,7 +1140,10 @@ mod tests {
     #[test]
     fn test_subscribe_topics_all_features_enabled() {
         let features = FeatureConfig {
-            game_detection: true,
+            running_game: true,
+            game_catalog: true,
+            steam_library: true,
+            launch_game: true,
             idle_tracking: true,
             power_events: true,
             notifications: true,
@@ -1840,7 +1846,10 @@ mod tests {
 
         fn all_features() -> FeatureConfig {
             FeatureConfig {
-                game_detection: true,
+                running_game: true,
+                game_catalog: true,
+                steam_library: true,
+                launch_game: true,
                 idle_tracking: true,
                 power_events: true,
                 notifications: true,

@@ -236,7 +236,7 @@ async fn run_agent() -> anyhow::Result<()> {
 
     // Start event-driven process watcher if game detection or idle tracking is enabled
     #[cfg(windows)]
-    if config.features.game_detection || config.features.idle_tracking {
+    if config.features.running_game || config.features.idle_tracking {
         let poll_interval = Duration::from_secs(config.intervals.game_sensor.max(5));
         state
             .process_watcher
@@ -249,7 +249,7 @@ async fn run_agent() -> anyhow::Result<()> {
     handles.push(tokio::spawn(command_executor.run()));
 
     // Conditionally start sensors based on features
-    if config.features.game_detection {
+    if config.features.running_game || config.features.game_catalog {
         let sensor = GameSensor::new(Arc::clone(&state));
         handles.push(tokio::spawn(sensor.run()));
         info!("  Game detection enabled");
@@ -431,7 +431,10 @@ async fn run_agent() -> anyhow::Result<()> {
 fn log_enabled_features(config: &Config) {
     let f = &config.features;
     let count = [
-        f.game_detection,
+        f.running_game,
+        f.game_catalog,
+        f.steam_library,
+        f.launch_game,
         f.idle_tracking,
         f.power_events,
         f.notifications,

@@ -23,7 +23,7 @@ impl MqttClient {
         let device = &self.device;
 
         // Conditionally register sensors based on features
-        if config.features.game_detection {
+        if config.features.running_game {
             self.register_sensor_with_attributes(
                 device,
                 "runninggames",
@@ -33,6 +33,8 @@ impl MqttClient {
                 None,
             )
             .await;
+        }
+        if config.features.game_catalog {
             self.register_sensor_with_attributes(
                 device,
                 "game_catalog",
@@ -488,9 +490,11 @@ impl MqttClient {
 
         // Command buttons - gated by their respective features
         // Game launch button + Steam refresh
-        if config.features.game_detection {
+        if config.features.launch_game {
             self.register_button(device, "Launch", "mdi:rocket-launch")
                 .await;
+        }
+        if config.features.steam_library {
             self.register_button(device, "RefreshSteamGames", "mdi:steam")
                 .await;
         }

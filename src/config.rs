@@ -219,7 +219,13 @@ impl GameConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureConfig {
     #[serde(default)]
-    pub game_detection: bool,
+    pub running_game: bool,
+    #[serde(default)]
+    pub game_catalog: bool,
+    #[serde(default)]
+    pub steam_library: bool,
+    #[serde(default)]
+    pub launch_game: bool,
     #[serde(default)]
     pub idle_tracking: bool,
     #[serde(default = "default_true")]
@@ -253,7 +259,10 @@ pub struct FeatureConfig {
 impl Default for FeatureConfig {
     fn default() -> Self {
         Self {
-            game_detection: false,
+            running_game: false,
+            game_catalog: false,
+            steam_library: false,
+            launch_game: false,
             idle_tracking: false,
             power_events: true,
             notifications: false,
@@ -558,6 +567,25 @@ impl Config {
             features
                 .entry("active_window".to_string())
                 .or_insert_with(|| serde_json::json!(on));
+            migrated = true;
+        }
+
+        // Migrate the legacy coarse `game_detection` flag into the granular
+        // running_game / game_catalog / steam_library / launch_game flags.
+        if let Some(features) = obj.get_mut("features").and_then(|v| v.as_object_mut())
+            && let Some(val) = features.remove("game_detection")
+        {
+            let on = val.as_bool().unwrap_or(false);
+            for key in [
+                "running_game",
+                "game_catalog",
+                "steam_library",
+                "launch_game",
+            ] {
+                features
+                    .entry(key.to_string())
+                    .or_insert_with(|| serde_json::json!(on));
+            }
             migrated = true;
         }
 
@@ -1638,7 +1666,7 @@ mod tests {
                 "pass": "secret123"
             },
             "features": {
-                "game_detection": true,
+                "running_game": true,
                 "idle_tracking": true,
                 "power_events": true,
                 "notifications": true,
@@ -1677,7 +1705,7 @@ mod tests {
 
         assert_eq!(config["device_name"], "test-pc");
         assert_eq!(config["mqtt"]["broker"], "tcp://localhost:1883");
-        assert!(config["features"]["game_detection"].as_bool().unwrap());
+        assert!(config["features"]["running_game"].as_bool().unwrap());
         assert_eq!(config["games"]["bf2042.exe"], "battlefield_6");
         assert_eq!(config["games"]["cs2.exe"]["app_id"], 730);
     }
