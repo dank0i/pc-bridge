@@ -2,6 +2,8 @@
 
 #[cfg(windows)]
 mod audio_device;
+#[cfg(windows)]
+mod capture;
 mod custom;
 mod disk;
 mod gpu;
@@ -28,6 +30,8 @@ mod idle_linux;
 
 #[cfg(windows)]
 pub use audio_device::AudioDeviceSensor;
+#[cfg(windows)]
+pub use capture::CaptureSensor;
 pub use custom::CustomSensorManager;
 pub use disk::DiskSensor;
 pub use gpu::GpuSensor;

@@ -140,6 +140,25 @@ impl MqttClient {
             .await;
         }
 
+        // Mic / webcam in-use sensors (Windows-only producer via consent store).
+        #[cfg(windows)]
+        if config.features.mic {
+            self.register_sensor(
+                device,
+                "mic",
+                "Microphone In Use",
+                "mdi:microphone",
+                None,
+                None,
+            )
+            .await;
+        }
+        #[cfg(windows)]
+        if config.features.webcam {
+            self.register_sensor(device, "webcam", "Webcam In Use", "mdi:webcam", None, None)
+                .await;
+        }
+
         // System sensors, split into independent flags. Battery and bridge
         // health ride along whenever the system task runs (any of the three on).
         let system_any = config.features.cpu_sensor
@@ -1033,9 +1052,11 @@ fn feature_entities(config: &Config) -> Vec<(&'static str, &'static str, bool)> 
     ];
     #[cfg(windows)]
     {
-        // Session and audio-device sensors have Windows-only producers.
+        // These sensors have Windows-only producers, so they only exist here.
         entities.push(("sensor", "session", f.session_state));
         entities.push(("sensor", "audio_device", f.audio_device));
+        entities.push(("sensor", "mic", f.mic));
+        entities.push(("sensor", "webcam", f.webcam));
         for oid in HWINFO_ENTITY_IDS {
             entities.push(("sensor", oid, f.hwinfo_sensor));
         }

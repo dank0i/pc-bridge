@@ -262,6 +262,10 @@ pub struct FeatureConfig {
     #[serde(default)]
     pub audio_device: bool,
     #[serde(default)]
+    pub mic: bool,
+    #[serde(default)]
+    pub webcam: bool,
+    #[serde(default)]
     pub volume: bool,
     #[serde(default)]
     pub media_controls: bool,
@@ -304,6 +308,8 @@ impl Default for FeatureConfig {
             active_window: false,
             session_state: false,
             audio_device: false,
+            mic: false,
+            webcam: false,
             volume: false,
             media_controls: false,
             steam_updates: false,
