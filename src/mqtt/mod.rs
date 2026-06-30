@@ -339,6 +339,9 @@ impl MqttClient {
 
         // Register discovery and subscribe based on enabled features
         mqtt.register_discovery(config).await;
+        // Remove any HA entities whose feature is now disabled (e.g. the user
+        // turned a sensor off) so nothing stale lingers on the HA side.
+        mqtt.clear_disabled_entities(config).await;
         mqtt.subscribe_commands(config).await;
 
         Ok((mqtt, cmd_rx))

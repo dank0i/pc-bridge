@@ -580,6 +580,46 @@ impl MqttClient {
         info!("Registered HA discovery");
     }
 
+    /// Publish an empty retained discovery config for every built-in entity
+    /// whose feature is currently disabled, so a turned-off feature leaves
+    /// nothing behind in Home Assistant (the entity is removed, not just marked
+    /// unavailable). Idempotent: clearing an entity that was never registered
+    /// is a harmless no-op (empty payload to an absent retained topic). Runs
+    /// once at startup, right after `register_discovery`.
+    pub(super) async fn clear_disabled_entities(&self, config: &Config) {
+        let mut cleared = 0usize;
+        for (component, object_id, enabled) in feature_entities(config) {
+            if enabled {
+                continue;
+            }
+            let topic = self.config_topic(component, object_id);
+            if self
+                .client
+                .publish(&topic, QoS::AtLeastOnce, true, Vec::<u8>::new())
+                .await
+                .is_ok()
+            {
+                cleared += 1;
+            }
+        }
+        // The notify service uses a 3-segment device-level config topic, not the
+        // per-entity shape, so clear it directly.
+        if !config.features.notifications {
+            let topic = format!("{}/notify/{}/config", DISCOVERY_PREFIX, self.device_name);
+            let _ = self
+                .client
+                .publish(&topic, QoS::AtLeastOnce, true, Vec::<u8>::new())
+                .await;
+        }
+        if cleared > 0 {
+            info!(
+                "Cleared {} disabled HA entit{}",
+                cleared,
+                if cleared == 1 { "y" } else { "ies" }
+            );
+        }
+    }
+
     /// Helper to register a single sensor
     async fn register_sensor(
         &self,
@@ -872,5 +912,148 @@ impl MqttClient {
                 commands.len()
             );
         }
+    }
+}
+
+/// Windows-only HWiNFO sensor object ids (mirrors the `#[cfg(windows)]` HWiNFO
+/// block in `register_discovery`). Listed here so teardown can clear them when
+/// the HWiNFO feature is turned off.
+#[cfg(windows)]
+const HWINFO_ENTITY_IDS: &[&str] = &[
+    "cpu_package_temp",
+    "gpu_temp",
+    "gpu_hotspot_temp",
+    "gpu_memory_temp",
+    "cpu_package_power",
+    "cpu_soc_power",
+    "gpu_power",
+    "cpu_effective_clock",
+    "gpu_core_clock",
+    "gpu_memory_clock",
+    "cpu_total_usage",
+    "gpu_core_load",
+    "gpu_vram_usage_pct",
+    "gpu_fan_rpm",
+    "framerate",
+    "case_fan_cpu",
+    "case_fan_cpu_opt",
+    "case_fan_system_1",
+    "case_fan_system_2",
+    "vrm_temp",
+    "hwinfo_diagnostic",
+];
+
+/// Every built-in HA entity the agent can register, paired with whether the
+/// current config enables it. The teardown pass clears the disabled ones.
+///
+/// Keep in sync with `register_discovery`. A missing entry only means a stale
+/// entity is not auto-removed when its feature is disabled; it never causes a
+/// wrong publish. `bridge_info` is always registered, so it is intentionally
+/// absent (never cleared).
+fn feature_entities(config: &Config) -> Vec<(&'static str, &'static str, bool)> {
+    let f = &config.features;
+    // CPU, memory, and active-window share the system task that also drives the
+    // battery and bridge-health sensors, so those ride along with any of them.
+    let system_any = f.cpu_sensor || f.memory_sensor || f.active_window;
+    #[allow(unused_mut)]
+    let mut entities = vec![
+        // Sensors
+        ("sensor", "runninggames", f.running_game),
+        ("sensor", "game_catalog", f.game_catalog),
+        ("sensor", "lastactive", f.idle_tracking),
+        ("sensor", "idle_seconds", f.idle_tracking),
+        ("sensor", "screensaver", f.idle_tracking),
+        ("sensor", "sleep_state", f.sleep_wake),
+        ("sensor", "display", f.display_state),
+        ("sensor", "cpu_usage", f.cpu_sensor),
+        ("sensor", "memory_usage", f.memory_sensor),
+        ("sensor", "active_window", f.active_window),
+        ("sensor", "battery_level", system_any),
+        ("sensor", "battery_charging", system_any),
+        ("sensor", "bridge_health", system_any),
+        ("sensor", "steam_updating", f.steam_updates),
+        ("sensor", "gpu_usage", f.gpu_sensor),
+        ("sensor", "network_throughput", f.network_sensor),
+        ("sensor", "disk_usage", f.disk_sensor),
+        ("sensor", "system_uptime", f.uptime_sensor),
+        ("sensor", "volume_level", f.volume),
+        // Buttons
+        ("button", "Launch", f.launch_game),
+        ("button", "RefreshSteamGames", f.steam_library),
+        ("button", "Screensaver", f.idle_tracking),
+        ("button", "Wake", f.idle_tracking),
+        ("button", "Shutdown", f.cmd_shutdown),
+        ("button", "Restart", f.cmd_restart),
+        ("button", "Sleep", f.cmd_sleep),
+        ("button", "Hibernate", f.cmd_sleep),
+        ("button", "Lock", f.cmd_lock),
+        ("button", "Logoff", f.cmd_logoff),
+        ("button", "MonitorOff", f.cmd_monitor),
+        ("button", "MonitorOn", f.cmd_monitor),
+        ("button", "DiscordJoin", f.discord),
+        ("button", "DiscordLeaveChannel", f.discord),
+        ("button", "MediaPlayPause", f.media_controls),
+        ("button", "MediaNext", f.media_controls),
+        ("button", "MediaPrevious", f.media_controls),
+        ("button", "MediaStop", f.media_controls),
+        ("button", "VolumeMute", f.media_controls),
+    ];
+    #[cfg(windows)]
+    for oid in HWINFO_ENTITY_IDS {
+        entities.push(("sensor", oid, f.hwinfo_sensor));
+    }
+    entities
+}
+
+#[cfg(test)]
+mod tests {
+    use super::feature_entities;
+    use crate::config::Config;
+
+    fn enabled_of(config: &Config, component: &str, oid: &str) -> Option<bool> {
+        feature_entities(config)
+            .into_iter()
+            .find(|(c, o, _)| *c == component && *o == oid)
+            .map(|(_, _, e)| e)
+    }
+
+    #[test]
+    fn default_config_keeps_power_disables_optin_sensors() {
+        let config = Config::default();
+        // Power features default on.
+        assert_eq!(enabled_of(&config, "button", "Shutdown"), Some(true));
+        assert_eq!(enabled_of(&config, "button", "Logoff"), Some(true));
+        assert_eq!(enabled_of(&config, "sensor", "sleep_state"), Some(true));
+        assert_eq!(enabled_of(&config, "sensor", "display"), Some(true));
+        // Opt-in sensors default off, so teardown clears them.
+        assert_eq!(enabled_of(&config, "sensor", "gpu_usage"), Some(false));
+        assert_eq!(enabled_of(&config, "sensor", "cpu_usage"), Some(false));
+        assert_eq!(enabled_of(&config, "button", "Launch"), Some(false));
+    }
+
+    #[test]
+    fn cmd_sleep_gates_both_sleep_and_hibernate() {
+        let mut config = Config::default();
+        config.features.cmd_sleep = false;
+        assert_eq!(enabled_of(&config, "button", "Sleep"), Some(false));
+        assert_eq!(enabled_of(&config, "button", "Hibernate"), Some(false));
+        // A different power command stays independent.
+        assert_eq!(enabled_of(&config, "button", "Restart"), Some(true));
+    }
+
+    #[test]
+    fn cmd_monitor_gates_both_monitor_buttons() {
+        let mut config = Config::default();
+        config.features.cmd_monitor = false;
+        assert_eq!(enabled_of(&config, "button", "MonitorOff"), Some(false));
+        assert_eq!(enabled_of(&config, "button", "MonitorOn"), Some(false));
+    }
+
+    #[test]
+    fn system_sensors_share_battery_and_health() {
+        let mut config = Config::default();
+        config.features.cpu_sensor = true;
+        assert_eq!(enabled_of(&config, "sensor", "battery_level"), Some(true));
+        assert_eq!(enabled_of(&config, "sensor", "bridge_health"), Some(true));
     }
 }
