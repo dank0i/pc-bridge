@@ -8,7 +8,7 @@
 use eframe::egui;
 use egui::{Color32, RichText, Rounding};
 
-use crate::config::Config;
+use crate::config::{Config, FeatureConfig};
 
 use super::model::{
     Feature, Game, GameStatus, Group, Kind, Launcher, Status, Transport, library, registry,
@@ -52,6 +52,12 @@ impl App {
         // Load the real config; fall back to defaults on first run / no file.
         let cfg = Config::load().unwrap_or_default();
         let (mqtt_host, mqtt_port) = split_broker(&cfg.mqtt.broker);
+        let mut features = registry();
+        for f in &mut features {
+            if let Some(on) = flag_get(&cfg.features, f.id) {
+                f.enabled = on;
+            }
+        }
         Self {
             device: cfg.device_name.clone(),
             transport: Transport::Mqtt,
@@ -74,7 +80,7 @@ impl App {
             group_on: [true; 8],
             custom_actions_on: cfg.custom_commands_enabled,
             custom_sensors_on: cfg.custom_sensors_enabled,
-            features: registry(),
+            features,
             library: library(),
             cfg,
         }
@@ -82,6 +88,9 @@ impl App {
 
     /// Fold the edited settings back into the config and persist them.
     fn save(&mut self) -> anyhow::Result<()> {
+        for f in &self.features {
+            flag_set(&mut self.cfg.features, f.id, f.enabled);
+        }
         self.cfg.device_name = self.device.clone();
         self.cfg.mqtt.broker = if self.mqtt_port.is_empty() {
             self.mqtt_host.clone()
@@ -129,6 +138,38 @@ fn in_view(f: &Feature, g: Group, ct: Kind) -> bool {
         f.group == Group::Custom && f.kind == ct
     } else {
         f.group == g
+    }
+}
+
+/// Read the config flag backing a UI feature, if one exists yet.
+///
+/// Only features that map 1:1 onto a config flag are bound. The five collapsed
+/// coarse flags (system_sensors, audio_control, game_detection, idle_tracking,
+/// power_events) are being split into per-feature flags in follow-up changes;
+/// their UI toggles stay unbound until then.
+fn flag_get(f: &FeatureConfig, id: &str) -> Option<bool> {
+    Some(match id {
+        "gpu" => f.gpu_sensor,
+        "network" => f.network_sensor,
+        "disks" => f.disk_sensor,
+        "uptime" => f.uptime_sensor,
+        "hwinfo" => f.hwinfo_sensor,
+        "steam_downloads" => f.steam_updates,
+        "notifications" => f.notifications,
+        _ => return None,
+    })
+}
+
+fn flag_set(f: &mut FeatureConfig, id: &str, v: bool) {
+    match id {
+        "gpu" => f.gpu_sensor = v,
+        "network" => f.network_sensor = v,
+        "disks" => f.disk_sensor = v,
+        "uptime" => f.uptime_sensor = v,
+        "hwinfo" => f.hwinfo_sensor = v,
+        "steam_downloads" => f.steam_updates = v,
+        "notifications" => f.notifications = v,
+        _ => {}
     }
 }
 
