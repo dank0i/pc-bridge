@@ -12,7 +12,7 @@ use crate::audio::{self, MediaKey};
 use crate::mqtt::CommandReceiver;
 use crate::notification;
 use crate::power::sync_mqtt::{SyncMqttConfig, parse_broker_url, sync_mqtt_publish_sleep};
-use crate::power::wake_display;
+use crate::power::{monitor_off, wake_display};
 use crate::steam::SteamGameDiscovery;
 
 const MAX_CONCURRENT_COMMANDS: usize = 5;
@@ -21,10 +21,11 @@ const MAX_CONCURRENT_COMMANDS: usize = 5;
 fn get_predefined_command(name: &str) -> Option<&'static str> {
     match name {
         "Screensaver" => Some("xdg-screensaver activate"),
-        "Wake" | "Sleep" | "Hibernate" => None, // Handled natively
+        "Wake" | "Sleep" | "Hibernate" | "MonitorOff" | "MonitorOn" => None, // Handled natively
         "Shutdown" => Some("systemctl poweroff"),
         "Lock" => Some("loginctl lock-session"),
         "Restart" => Some("systemctl reboot"),
+        "Logoff" => Some("loginctl terminate-session \"$XDG_SESSION_ID\""),
         _ => None,
     }
 }
@@ -153,6 +154,14 @@ impl CommandExecutor {
                 // the suspend itself is async via systemd) and reaps the
                 // process so we don't leak a zombie.
                 let _ = Command::new("bash").args(["-c", cmd]).status();
+                return Ok(());
+            }
+            "MonitorOff" => {
+                monitor_off();
+                return Ok(());
+            }
+            "MonitorOn" => {
+                wake_display();
                 return Ok(());
             }
             "notification" => {

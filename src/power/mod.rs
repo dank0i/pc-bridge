@@ -15,11 +15,11 @@ mod display_linux;
 mod events_linux;
 
 #[cfg(windows)]
-pub use display::wake_display;
+pub use display::{monitor_off, wake_display};
 #[cfg(windows)]
 pub use events::PowerEventListener;
 
 #[cfg(unix)]
-pub use display_linux::wake_display;
+pub use display_linux::{monitor_off, wake_display};
 #[cfg(unix)]
 pub use events_linux::PowerEventListener;

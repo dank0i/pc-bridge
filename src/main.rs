@@ -261,7 +261,10 @@ async fn run_agent() -> anyhow::Result<()> {
         info!("  Idle tracking enabled");
     }
 
-    if config.features.power_events {
+    // The power listener detects both sleep/wake and display on/off, so spawn
+    // it if either sensor is enabled. Each event's publish is gated by its own
+    // flag below and at the discovery layer.
+    if config.features.sleep_wake || config.features.display_state {
         let listener = PowerEventListener::new(Arc::clone(&state));
         handles.push(tokio::spawn(listener.run()));
         info!("  Power events enabled");
@@ -360,12 +363,14 @@ async fn run_agent() -> anyhow::Result<()> {
         state.mqtt.publish_hwinfo_availability(false).await;
     }
 
-    // Only publish sleep_state if power_events enabled
-    if config.features.power_events {
+    // Seed initial sensor states, each gated by its own flag.
+    if config.features.sleep_wake {
         state
             .mqtt
             .publish_sensor_retained("sleep_state", "awake")
             .await;
+    }
+    if config.features.display_state {
         state.mqtt.publish_sensor_retained("display", "on").await;
     }
 
@@ -436,7 +441,14 @@ fn log_enabled_features(config: &Config) {
         f.steam_library,
         f.launch_game,
         f.idle_tracking,
-        f.power_events,
+        f.sleep_wake,
+        f.display_state,
+        f.cmd_shutdown,
+        f.cmd_restart,
+        f.cmd_sleep,
+        f.cmd_lock,
+        f.cmd_logoff,
+        f.cmd_monitor,
         f.notifications,
         f.cpu_sensor,
         f.memory_sensor,

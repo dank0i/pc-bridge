@@ -78,7 +78,7 @@ impl MqttClient {
             .await;
         }
 
-        if config.features.power_events {
+        if config.features.sleep_wake {
             // sleep_state has no availability (always published)
             let payload = HADiscoveryPayload {
                 name: "Sleep State".to_string(),
@@ -104,8 +104,10 @@ impl MqttClient {
                 .client
                 .publish(&topic, QoS::AtLeastOnce, true, json)
                 .await;
+        }
 
-            // Display power state sensor
+        // Display power state sensor
+        if config.features.display_state {
             self.register_sensor(device, "display", "Display", "mdi:monitor", None, None)
                 .await;
         }
@@ -507,17 +509,31 @@ impl MqttClient {
                 .await;
         }
 
-        // Power control buttons
-        if config.features.power_events {
-            for (name, icon) in [
-                ("Shutdown", "mdi:power"),
-                ("Sleep", "mdi:power-sleep"),
-                ("Lock", "mdi:lock"),
-                ("Hibernate", "mdi:power-sleep"),
-                ("Restart", "mdi:restart"),
-            ] {
-                self.register_button(device, name, icon).await;
-            }
+        // Power control buttons - each gated by its own feature flag.
+        if config.features.cmd_shutdown {
+            self.register_button(device, "Shutdown", "mdi:power").await;
+        }
+        if config.features.cmd_restart {
+            self.register_button(device, "Restart", "mdi:restart").await;
+        }
+        if config.features.cmd_sleep {
+            // Hibernate rides along with Sleep (both are suspend-to-disk/RAM).
+            self.register_button(device, "Sleep", "mdi:power-sleep")
+                .await;
+            self.register_button(device, "Hibernate", "mdi:power-sleep")
+                .await;
+        }
+        if config.features.cmd_lock {
+            self.register_button(device, "Lock", "mdi:lock").await;
+        }
+        if config.features.cmd_logoff {
+            self.register_button(device, "Logoff", "mdi:logout").await;
+        }
+        if config.features.cmd_monitor {
+            self.register_button(device, "MonitorOff", "mdi:monitor-off")
+                .await;
+            self.register_button(device, "MonitorOn", "mdi:monitor")
+                .await;
         }
 
         // Discord buttons

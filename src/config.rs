@@ -214,8 +214,11 @@ impl GameConfig {
 
 /// Feature toggles
 ///
-/// All features default to `false` (opt-in) except `power_events` which
-/// defaults to `true` since sleep/wake/display tracking is fundamental.
+/// All features default to `false` (opt-in) except the power features
+/// (sleep/wake, display state, and the power command buttons) which default
+/// to `true` since power state tracking and basic power control are
+/// fundamental. These were a single coarse `power_events` flag until they were
+/// split into per-feature flags so each can be turned off independently.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureConfig {
     #[serde(default)]
@@ -229,7 +232,21 @@ pub struct FeatureConfig {
     #[serde(default)]
     pub idle_tracking: bool,
     #[serde(default = "default_true")]
-    pub power_events: bool,
+    pub sleep_wake: bool,
+    #[serde(default = "default_true")]
+    pub display_state: bool,
+    #[serde(default = "default_true")]
+    pub cmd_shutdown: bool,
+    #[serde(default = "default_true")]
+    pub cmd_restart: bool,
+    #[serde(default = "default_true")]
+    pub cmd_sleep: bool,
+    #[serde(default = "default_true")]
+    pub cmd_lock: bool,
+    #[serde(default = "default_true")]
+    pub cmd_logoff: bool,
+    #[serde(default = "default_true")]
+    pub cmd_monitor: bool,
     #[serde(default)]
     pub notifications: bool,
     #[serde(default)]
@@ -266,7 +283,14 @@ impl Default for FeatureConfig {
             steam_library: false,
             launch_game: false,
             idle_tracking: false,
-            power_events: true,
+            sleep_wake: true,
+            display_state: true,
+            cmd_shutdown: true,
+            cmd_restart: true,
+            cmd_sleep: true,
+            cmd_lock: true,
+            cmd_logoff: true,
+            cmd_monitor: true,
             notifications: false,
             cpu_sensor: false,
             memory_sensor: false,
@@ -615,15 +639,27 @@ impl Config {
             migrated = true;
         }
 
-        // Ensure power_events defaults to true for new features sections
-        let features = obj
-            .get_mut("features")
-            .and_then(|v| v.as_object_mut())
-            .ok_or_else(|| {
-                anyhow::anyhow!("config migration: 'features' key missing after insert")
-            })?;
-        if !features.contains_key("power_events") {
-            features.insert("power_events".to_string(), serde_json::Value::Bool(true));
+        // Migrate the legacy coarse `power_events` flag into the granular
+        // sleep_wake / display_state / cmd_* flags. Defaults to true when absent
+        // (the old power_events default) so brand-new sections light power up.
+        if let Some(features) = obj.get_mut("features").and_then(|v| v.as_object_mut())
+            && let Some(val) = features.remove("power_events")
+        {
+            let on = val.as_bool().unwrap_or(true);
+            for key in [
+                "sleep_wake",
+                "display_state",
+                "cmd_shutdown",
+                "cmd_restart",
+                "cmd_sleep",
+                "cmd_lock",
+                "cmd_logoff",
+                "cmd_monitor",
+            ] {
+                features
+                    .entry(key.to_string())
+                    .or_insert_with(|| serde_json::json!(on));
+            }
             migrated = true;
         }
 
@@ -1684,7 +1720,8 @@ mod tests {
             "features": {
                 "running_game": true,
                 "idle_tracking": true,
-                "power_events": true,
+                "sleep_wake": true,
+                "display_state": true,
                 "notifications": true,
                 "system_sensors": true,
                 "audio_control": false,

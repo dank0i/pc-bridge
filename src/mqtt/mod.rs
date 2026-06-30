@@ -167,7 +167,14 @@ impl MqttClient {
                 "steam_library": config.features.steam_library,
                 "launch_game": config.features.launch_game,
                 "idle_tracking": config.features.idle_tracking,
-                "power_events": config.features.power_events,
+                "sleep_wake": config.features.sleep_wake,
+                "display_state": config.features.display_state,
+                "cmd_shutdown": config.features.cmd_shutdown,
+                "cmd_restart": config.features.cmd_restart,
+                "cmd_sleep": config.features.cmd_sleep,
+                "cmd_lock": config.features.cmd_lock,
+                "cmd_logoff": config.features.cmd_logoff,
+                "cmd_monitor": config.features.cmd_monitor,
                 "notifications": config.features.notifications,
                 "cpu_sensor": config.features.cpu_sensor,
                 "memory_sensor": config.features.memory_sensor,
@@ -365,16 +372,41 @@ impl MqttClient {
             "RefreshSteamGames",
             "Screensaver",
             "Wake",
-            "Shutdown",
-            "Sleep",
-            "Lock",
-            "Hibernate",
-            "Restart",
             "DiscordJoin",
             "DiscordLeaveChannel",
         ];
 
         for cmd in commands {
+            topics.push(format!(
+                "{}/button/{}/{}/action",
+                DISCOVERY_PREFIX, device_name, cmd
+            ));
+        }
+
+        // Power commands - each gated by its own feature flag so a disabled
+        // power button is not even subscribed to.
+        let mut power_cmds: Vec<&str> = Vec::new();
+        if config.features.cmd_shutdown {
+            power_cmds.push("Shutdown");
+        }
+        if config.features.cmd_restart {
+            power_cmds.push("Restart");
+        }
+        if config.features.cmd_sleep {
+            power_cmds.push("Sleep");
+            power_cmds.push("Hibernate");
+        }
+        if config.features.cmd_lock {
+            power_cmds.push("Lock");
+        }
+        if config.features.cmd_logoff {
+            power_cmds.push("Logoff");
+        }
+        if config.features.cmd_monitor {
+            power_cmds.push("MonitorOff");
+            power_cmds.push("MonitorOn");
+        }
+        for cmd in power_cmds {
             topics.push(format!(
                 "{}/button/{}/{}/action",
                 DISCOVERY_PREFIX, device_name, cmd
@@ -1054,8 +1086,8 @@ mod tests {
         let config = test_config("test-pc", FeatureConfig::default());
         let topics = MqttClient::build_subscribe_topics("test-pc", &config);
 
-        // Default features: power_events=true, all others false
-        // Core commands are always subscribed
+        // Default features: power flags (sleep/wake, display, cmd_*) true, all
+        // others false. Core + enabled power commands are subscribed.
         assert!(
             topics.contains(&"homeassistant/button/test-pc/RefreshSteamGames/action".to_string())
         );
@@ -1147,7 +1179,14 @@ mod tests {
             steam_library: true,
             launch_game: true,
             idle_tracking: true,
-            power_events: true,
+            sleep_wake: true,
+            display_state: true,
+            cmd_shutdown: true,
+            cmd_restart: true,
+            cmd_sleep: true,
+            cmd_lock: true,
+            cmd_logoff: true,
+            cmd_monitor: true,
             notifications: true,
             cpu_sensor: true,
             memory_sensor: true,
@@ -1165,10 +1204,10 @@ mod tests {
         let config = test_config("test-pc", features);
         let topics = MqttClient::build_subscribe_topics("test-pc", &config);
 
-        // Should have core (11) + audio (6) + notifications (1) = 18 topics
+        // Should have core (6) + power (8) + audio (6) + notifications (1) = 21 topics
         assert!(
-            topics.len() >= 18,
-            "Expected at least 18 topics with all features, got {}",
+            topics.len() >= 21,
+            "Expected at least 21 topics with all features, got {}",
             topics.len()
         );
     }
@@ -1854,7 +1893,14 @@ mod tests {
                 steam_library: true,
                 launch_game: true,
                 idle_tracking: true,
-                power_events: true,
+                sleep_wake: true,
+                display_state: true,
+                cmd_shutdown: true,
+                cmd_restart: true,
+                cmd_sleep: true,
+                cmd_lock: true,
+                cmd_logoff: true,
+                cmd_monitor: true,
                 notifications: true,
                 cpu_sensor: true,
                 memory_sensor: true,
@@ -2110,7 +2156,7 @@ mod tests {
         async fn test_command_routing_button() {
             let (port, state, inject) = start_mini_broker().await;
             let features = FeatureConfig {
-                power_events: true,
+                cmd_sleep: true,
                 ..FeatureConfig::default()
             };
             let config = broker_config("test-pc", port, features);
@@ -2175,7 +2221,7 @@ mod tests {
         async fn test_ignores_messages_for_wrong_device() {
             let (port, state, inject) = start_mini_broker().await;
             let features = FeatureConfig {
-                power_events: true,
+                cmd_sleep: true,
                 ..FeatureConfig::default()
             };
             let config = broker_config("test-pc", port, features);

@@ -143,10 +143,9 @@ fn in_view(f: &Feature, g: Group, ct: Kind) -> bool {
 
 /// Read the config flag backing a UI feature, if one exists yet.
 ///
-/// Only features that map 1:1 onto a config flag are bound. The five collapsed
-/// coarse flags (system_sensors, audio_control, game_detection, idle_tracking,
-/// power_events) are being split into per-feature flags in follow-up changes;
-/// their UI toggles stay unbound until then.
+/// Every UI feature that maps 1:1 onto a config flag is bound here. Ids that
+/// have no backing flag (e.g. custom entries) return None and keep their
+/// in-memory state.
 fn flag_get(f: &FeatureConfig, id: &str) -> Option<bool> {
     Some(match id {
         "gpu" => f.gpu_sensor,
@@ -166,6 +165,14 @@ fn flag_get(f: &FeatureConfig, id: &str) -> Option<bool> {
         "media_controls" => f.media_controls,
         "steam_downloads" => f.steam_updates,
         "notifications" => f.notifications,
+        "sleep_wake" => f.sleep_wake,
+        "display_state" => f.display_state,
+        "shutdown" => f.cmd_shutdown,
+        "restart" => f.cmd_restart,
+        "sleep" => f.cmd_sleep,
+        "lock" => f.cmd_lock,
+        "logoff" => f.cmd_logoff,
+        "monitor" => f.cmd_monitor,
         _ => return None,
     })
 }
@@ -189,6 +196,14 @@ fn flag_set(f: &mut FeatureConfig, id: &str, v: bool) {
         "media_controls" => f.media_controls = v,
         "steam_downloads" => f.steam_updates = v,
         "notifications" => f.notifications = v,
+        "sleep_wake" => f.sleep_wake = v,
+        "display_state" => f.display_state = v,
+        "shutdown" => f.cmd_shutdown = v,
+        "restart" => f.cmd_restart = v,
+        "sleep" => f.cmd_sleep = v,
+        "lock" => f.cmd_lock = v,
+        "logoff" => f.cmd_logoff = v,
+        "monitor" => f.cmd_monitor = v,
         _ => {}
     }
 }

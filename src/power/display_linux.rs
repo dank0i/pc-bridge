@@ -28,3 +28,9 @@ pub fn wake_display() {
 
     info!("WakeDisplay: Wake sequence completed");
 }
+
+/// Turn the display off (X11 DPMS).
+pub fn monitor_off() {
+    info!("MonitorOff: turning display off (Linux)");
+    let _ = Command::new("xset").args(["dpms", "force", "off"]).spawn();
+}

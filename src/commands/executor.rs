@@ -12,7 +12,7 @@ use crate::AppState;
 use crate::audio::{self, MediaKey};
 use crate::mqtt::CommandReceiver;
 use crate::notification;
-use crate::power::wake_display;
+use crate::power::{monitor_off, wake_display};
 use crate::steam::SteamGameDiscovery;
 
 /// Maximum time to wait for Steam to appear in the process list (seconds).
@@ -33,8 +33,9 @@ fn get_predefined_command(name: &str) -> Option<&'static str> {
     match name {
         "Screensaver" => Some(r#"%windir%\System32\scrnsave.scr /s"#),
         // These are handled natively in execute_command
-        "Wake" | "Lock" | "Hibernate" | "Restart" | "Shutdown" | "Sleep" | "VolumeSet"
-        | "VolumeMute" | "MediaPlayPause" | "MediaNext" | "MediaPrevious" | "MediaStop" => None,
+        "Wake" | "Lock" | "Hibernate" | "Restart" | "Shutdown" | "Sleep" | "Logoff"
+        | "MonitorOff" | "MonitorOn" | "VolumeSet" | "VolumeMute" | "MediaPlayPause"
+        | "MediaNext" | "MediaPrevious" | "MediaStop" => None,
         _ => None,
     }
 }
@@ -171,6 +172,19 @@ impl CommandExecutor {
             }
             "Restart" => {
                 restart();
+                return Ok(());
+            }
+            "Logoff" => {
+                logoff();
+                return Ok(());
+            }
+            "MonitorOff" => {
+                monitor_off();
+                return Ok(());
+            }
+            "MonitorOn" => {
+                // Monitor-on is the same as the display wake sequence.
+                wake_display();
                 return Ok(());
             }
             "VolumeSet" => {
@@ -499,6 +513,9 @@ pub(crate) fn resolve_command_action(
         "Sleep" => return CommandAction::Native("Sleep"),
         "Hibernate" => return CommandAction::Native("Hibernate"),
         "Restart" => return CommandAction::Native("Restart"),
+        "Logoff" => return CommandAction::Native("Logoff"),
+        "MonitorOff" => return CommandAction::Native("MonitorOff"),
+        "MonitorOn" => return CommandAction::Native("MonitorOn"),
         "notification" => {
             if payload.is_empty() {
                 return CommandAction::NoOp("notification_empty");
@@ -804,6 +821,15 @@ fn shutdown() {
         }
 
         let _ = ExitWindowsEx(EWX_SHUTDOWN | EWX_POWEROFF, SHUTDOWN_REASON(0));
+    }
+}
+
+/// Log off the current user session (native, no PowerShell).
+/// EWX_LOGOFF needs no special privilege, unlike shutdown/restart.
+fn logoff() {
+    use windows::Win32::System::Shutdown::{EWX_LOGOFF, ExitWindowsEx, SHUTDOWN_REASON};
+    unsafe {
+        let _ = ExitWindowsEx(EWX_LOGOFF, SHUTDOWN_REASON(0));
     }
 }
 

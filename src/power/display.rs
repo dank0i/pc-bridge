@@ -12,6 +12,7 @@ use windows::Win32::UI::WindowsAndMessaging::{HWND_BROADCAST, SendMessageW};
 const WM_SYSCOMMAND: u32 = 0x0112;
 const SC_MONITORPOWER: usize = 0xF170;
 const MONITOR_ON: isize = -1;
+const MONITOR_OFF: isize = 2;
 const VK_F15: u16 = 0x7E;
 
 static SLEEP_PREVENTION_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -119,6 +120,19 @@ fn turn_on_monitor() {
             WM_SYSCOMMAND,
             WPARAM(SC_MONITORPOWER),
             LPARAM(MONITOR_ON),
+        );
+    }
+}
+
+/// Turn all monitors off via SC_MONITORPOWER (lParam 2 = power off).
+pub fn monitor_off() {
+    info!("MonitorOff: turning displays off");
+    unsafe {
+        SendMessageW(
+            HWND_BROADCAST,
+            WM_SYSCOMMAND,
+            WPARAM(SC_MONITORPOWER),
+            LPARAM(MONITOR_OFF),
         );
     }
 }
