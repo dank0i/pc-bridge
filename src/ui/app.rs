@@ -11,7 +11,8 @@ use egui::{Color32, RichText, Rounding};
 use crate::config::{Config, FeatureConfig};
 
 use super::model::{
-    Feature, Game, GameStatus, Group, Kind, Launcher, Status, Transport, library, registry,
+    Feature, Game, GameStatus, Group, Kind, Launcher, Status, Transport, games_to_library,
+    library_to_games, registry,
 };
 use super::theme::{
     ACCENT, AMBER, BG, BLOCK, GAP, GREEN, GREY, ORANGE, PAD_X, PAD_Y, PANEL, PURPLE, RED, ROW,
@@ -81,7 +82,7 @@ impl App {
             custom_actions_on: cfg.custom_commands_enabled,
             custom_sensors_on: cfg.custom_sensors_enabled,
             features,
-            library: library(),
+            library: games_to_library(&cfg.games),
             cfg,
         }
     }
@@ -102,6 +103,9 @@ impl App {
         self.cfg.custom_command_privileges_allowed = self.allow_privileged;
         self.cfg.custom_commands_enabled = self.custom_actions_on;
         self.cfg.custom_sensors_enabled = self.custom_sensors_on;
+        // Fold the edited game library back into the config map, preserving the
+        // Steam auto-discovered flag for games already known to discovery.
+        self.cfg.games = library_to_games(&self.library, &self.cfg.games);
         self.cfg.update_channel = if self.beta_updates {
             "beta".to_owned()
         } else if self.cfg.update_channel == "disabled" {

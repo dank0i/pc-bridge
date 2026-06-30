@@ -2,6 +2,10 @@
 //! metadata), the registry, and the game library. This is the shape the real
 //! agent registry will back when wired up.
 
+use std::collections::HashMap;
+
+use crate::config::GameConfig;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Running,
@@ -620,6 +624,9 @@ pub fn registry() -> Vec<Feature> {
 
 // ---- game library ----
 
+// Non-Steam launcher variants are recognized by the UI but not yet produced by
+// the config mapping (only Steam/Manual are derivable from GameConfig today).
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Launcher {
     Steam,
@@ -641,6 +648,9 @@ impl Launcher {
     }
 }
 
+// Live game states (running/downloading/update) come from runtime data the UI
+// will show once wired to the agent; the config mapping reports Installed.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GameStatus {
     Running,
@@ -659,99 +669,153 @@ pub struct Game {
     pub exposed: bool,
 }
 
-pub fn library() -> Vec<Game> {
-    use GameStatus::{Downloading, Installed, Running, UpdatePending};
-    use Launcher::{Epic, Gog, Manual, Steam, Xbox};
-    let g = |name: &str, process: &str, path: &str, appid, launcher, status, exposed| Game {
-        name: name.to_owned(),
-        process: process.to_owned(),
-        path: path.to_owned(),
-        appid,
-        launcher,
-        status,
-        exposed,
-    };
-    vec![
-        g(
-            "Battlefield 6",
-            "bf6.exe",
-            r"D:\SteamLibrary\steamapps\common\Battlefield 6",
-            2_807_960,
-            Steam,
-            Running,
-            true,
-        ),
-        g(
-            "Apex Legends",
-            "r5apex.exe",
-            r"D:\SteamLibrary\steamapps\common\Apex Legends",
-            1_172_470,
-            Steam,
-            Downloading(76),
-            true,
-        ),
-        g(
-            "Marvel Rivals",
-            "MarvelRivals.exe",
-            r"D:\SteamLibrary\steamapps\common\MarvelRivals",
-            2_767_030,
-            Steam,
-            Installed,
-            true,
-        ),
-        g(
-            "Deadlock",
-            "deadlock.exe",
-            r"D:\SteamLibrary\steamapps\common\Deadlock",
-            1_422_450,
-            Steam,
-            UpdatePending,
-            true,
-        ),
-        g(
-            "Fortnite",
-            "FortniteClient-Win64-Shipping.exe",
-            r"C:\Program Files\Epic Games\Fortnite",
-            0,
-            Epic,
-            Installed,
-            true,
-        ),
-        g(
-            "Forza Horizon 5",
-            "ForzaHorizon5.exe",
-            r"C:\XboxGames\Forza Horizon 5",
-            0,
-            Xbox,
-            Installed,
-            false,
-        ),
-        g(
-            "Cyberpunk 2077",
-            "Cyberpunk2077.exe",
-            r"D:\SteamLibrary\steamapps\common\Cyberpunk 2077",
-            1_091_500,
-            Steam,
-            Installed,
-            true,
-        ),
-        g(
-            "The Witcher 3",
-            "witcher3.exe",
-            r"C:\GOG Games\The Witcher 3",
-            0,
-            Gog,
-            Installed,
-            true,
-        ),
-        g(
-            "retroarch (manual)",
-            "retroarch.exe",
-            r"C:\RetroArch",
-            0,
-            Manual,
-            Installed,
-            false,
-        ),
-    ]
+/// Derive a stable game_id (snake_case, ascii-alphanumeric) from a display name.
+fn game_id_from_name(name: &str) -> String {
+    let mut id: String = name
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    // Collapse repeated underscores and trim edges for a clean entity id.
+    while id.contains("__") {
+        id = id.replace("__", "_");
+    }
+    id.trim_matches('_').to_string()
+}
+
+/// Build the editable library view from the real `games` config map.
+/// Sorted by name so the list is stable across launches.
+pub fn games_to_library(games: &HashMap<String, GameConfig>) -> Vec<Game> {
+    let mut v: Vec<Game> = games
+        .iter()
+        .map(|(process, gc)| {
+            let appid = gc.app_id().unwrap_or(0);
+            Game {
+                name: gc.display_name(),
+                process: process.clone(),
+                // Steam games launch from app_id; manual games carry an explicit
+                // launch command in this field.
+                path: if appid != 0 {
+                    String::new()
+                } else {
+                    gc.launch_command().unwrap_or_default()
+                },
+                appid,
+                launcher: if appid != 0 {
+                    Launcher::Steam
+                } else {
+                    Launcher::Manual
+                },
+                status: GameStatus::Installed,
+                exposed: gc.is_exposed(),
+            }
+        })
+        .collect();
+    v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    v
+}
+
+/// Fold the edited library back into a `games` config map. Entries with a blank
+/// process name are dropped (incomplete rows). `prev` preserves the
+/// `auto_discovered` flag for games already known to Steam discovery so a UI
+/// save does not make them look manually added.
+pub fn library_to_games(
+    library: &[Game],
+    prev: &HashMap<String, GameConfig>,
+) -> HashMap<String, GameConfig> {
+    library
+        .iter()
+        .filter(|g| !g.process.trim().is_empty())
+        .map(|g| {
+            let launch_command = if g.appid != 0 || g.path.trim().is_empty() {
+                None
+            } else {
+                Some(g.path.trim().to_string())
+            };
+            let auto_discovered = prev
+                .get(&g.process)
+                .map(GameConfig::is_auto_discovered)
+                .unwrap_or(false);
+            let gc = GameConfig::Full {
+                game_id: game_id_from_name(&g.name),
+                app_id: if g.appid != 0 { Some(g.appid) } else { None },
+                name: Some(g.name.trim().to_string()),
+                launch_command,
+                auto_discovered,
+                exposed: g.exposed,
+            };
+            (g.process.trim().to_string(), gc)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_game_id_from_name() {
+        assert_eq!(game_id_from_name("Battlefield 6"), "battlefield_6");
+        assert_eq!(
+            game_id_from_name("The Witcher 3: Wild Hunt"),
+            "the_witcher_3_wild_hunt"
+        );
+        assert_eq!(game_id_from_name("  Spaced  Out  "), "spaced_out");
+    }
+
+    #[test]
+    fn test_library_round_trip_preserves_auto_discovered() {
+        let mut games = HashMap::new();
+        games.insert(
+            "bf6.exe".to_string(),
+            GameConfig::from_steam("battlefield_6".into(), 2_807_960, "Battlefield 6".into()),
+        );
+        games.insert(
+            "manual.exe".to_string(),
+            GameConfig::Full {
+                game_id: "my_game".into(),
+                app_id: None,
+                name: Some("My Game".into()),
+                launch_command: Some("exe:C:/game.exe".into()),
+                auto_discovered: false,
+                exposed: false,
+            },
+        );
+
+        let lib = games_to_library(&games);
+        assert_eq!(lib.len(), 2);
+        // Sorted by name: "Battlefield 6" before "My Game".
+        assert_eq!(lib[0].name, "Battlefield 6");
+        assert_eq!(lib[0].appid, 2_807_960);
+        assert!(matches!(lib[0].launcher, Launcher::Steam));
+        assert_eq!(lib[1].name, "My Game");
+        assert_eq!(lib[1].path, "exe:C:/game.exe");
+        assert!(!lib[1].exposed);
+
+        let back = library_to_games(&lib, &games);
+        assert_eq!(back.len(), 2);
+        assert_eq!(back.get("bf6.exe").unwrap().app_id(), Some(2_807_960));
+        // Steam game keeps its auto_discovered flag across a UI save.
+        assert!(back.get("bf6.exe").unwrap().is_auto_discovered());
+        assert!(!back.get("manual.exe").unwrap().is_auto_discovered());
+        assert_eq!(
+            back.get("manual.exe").unwrap().launch_command(),
+            Some("exe:C:/game.exe".to_string())
+        );
+    }
+
+    #[test]
+    fn test_library_drops_blank_process_rows() {
+        let lib = vec![Game {
+            name: "x".into(),
+            process: "   ".into(),
+            path: String::new(),
+            appid: 0,
+            launcher: Launcher::Manual,
+            status: GameStatus::Installed,
+            exposed: true,
+        }];
+        assert!(library_to_games(&lib, &HashMap::new()).is_empty());
+    }
 }
