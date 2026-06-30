@@ -188,9 +188,9 @@ pub fn get_default_device_name() -> Option<String> {
         let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
         let store = device.OpenPropertyStore(STGM_READ).ok()?;
         let pv = store.GetValue(&PKEY_Device_FriendlyName).ok()?;
-        // GetValue returns windows-core's managed PROPVARIANT; it converts a
-        // VT_LPWSTR value to a String via TryFrom.
-        let name = String::try_from(&pv).ok()?;
+        // PROPVARIANT's Display impl runs PropVariantToBSTR, which renders the
+        // VT_LPWSTR friendly name as a String.
+        let name = pv.to_string();
         (!name.is_empty()).then_some(name)
     }
 }
