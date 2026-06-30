@@ -532,7 +532,7 @@ impl MqttClient {
         }
 
         // Audio control commands (media keys) if enabled
-        if config.features.audio_control {
+        if config.features.media_controls {
             for (name, icon) in [
                 ("MediaPlayPause", "mdi:play-pause"),
                 ("MediaNext", "mdi:skip-next"),
@@ -542,7 +542,8 @@ impl MqttClient {
             ] {
                 self.register_button(device, name, icon).await;
             }
-
+        }
+        if config.features.volume {
             // Register volume sensor
             self.register_sensor(
                 device,

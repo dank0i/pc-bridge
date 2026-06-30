@@ -172,7 +172,8 @@ impl MqttClient {
                 "cpu_sensor": config.features.cpu_sensor,
                 "memory_sensor": config.features.memory_sensor,
                 "active_window": config.features.active_window,
-                "audio_control": config.features.audio_control,
+                "volume": config.features.volume,
+                "media_controls": config.features.media_controls,
                 "steam_updates": config.features.steam_updates,
                 "discord": config.features.discord,
                 "gpu_sensor": config.features.gpu_sensor,
@@ -380,8 +381,8 @@ impl MqttClient {
             ));
         }
 
-        // Audio commands if enabled
-        if config.features.audio_control {
+        // Audio commands if either volume or media controls are enabled
+        if config.features.volume || config.features.media_controls {
             let audio_commands = [
                 "MediaPlayPause",
                 "MediaNext",
@@ -1077,7 +1078,8 @@ mod tests {
     #[test]
     fn test_subscribe_topics_with_audio() {
         let features = FeatureConfig {
-            audio_control: true,
+            volume: true,
+            media_controls: true,
             ..FeatureConfig::default()
         };
         let config = test_config("test-pc", features);
@@ -1150,7 +1152,8 @@ mod tests {
             cpu_sensor: true,
             memory_sensor: true,
             active_window: true,
-            audio_control: true,
+            volume: true,
+            media_controls: true,
             steam_updates: true,
             discord: true,
             gpu_sensor: true,
@@ -1856,7 +1859,8 @@ mod tests {
                 cpu_sensor: true,
                 memory_sensor: true,
                 active_window: true,
-                audio_control: true,
+                volume: true,
+                media_controls: true,
                 steam_updates: true,
                 discord: true,
                 gpu_sensor: true,

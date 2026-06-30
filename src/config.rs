@@ -239,7 +239,9 @@ pub struct FeatureConfig {
     #[serde(default)]
     pub active_window: bool,
     #[serde(default)]
-    pub audio_control: bool,
+    pub volume: bool,
+    #[serde(default)]
+    pub media_controls: bool,
     #[serde(default)]
     pub steam_updates: bool,
     #[serde(default)]
@@ -269,7 +271,8 @@ impl Default for FeatureConfig {
             cpu_sensor: false,
             memory_sensor: false,
             active_window: false,
-            audio_control: false,
+            volume: false,
+            media_controls: false,
             steam_updates: false,
             discord: false,
             gpu_sensor: false,
@@ -582,6 +585,19 @@ impl Config {
                 "steam_library",
                 "launch_game",
             ] {
+                features
+                    .entry(key.to_string())
+                    .or_insert_with(|| serde_json::json!(on));
+            }
+            migrated = true;
+        }
+
+        // Migrate the legacy coarse `audio_control` flag into volume + media_controls.
+        if let Some(features) = obj.get_mut("features").and_then(|v| v.as_object_mut())
+            && let Some(val) = features.remove("audio_control")
+        {
+            let on = val.as_bool().unwrap_or(false);
+            for key in ["volume", "media_controls"] {
                 features
                     .entry(key.to_string())
                     .or_insert_with(|| serde_json::json!(on));
