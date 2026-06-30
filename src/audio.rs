@@ -179,8 +179,7 @@ fn get_endpoint_volume() -> Option<IAudioEndpointVolume> {
 #[cfg(windows)]
 pub fn get_default_device_name() -> Option<String> {
     use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
-    use windows::Win32::System::Com::{CoTaskMemFree, STGM_READ};
-    use windows::Win32::UI::Shell::PropertiesSystem::PropVariantToStringAlloc;
+    use windows::Win32::System::Com::STGM_READ;
 
     ensure_com_init();
     unsafe {
@@ -188,11 +187,11 @@ pub fn get_default_device_name() -> Option<String> {
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
         let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
         let store = device.OpenPropertyStore(STGM_READ).ok()?;
-        // PROPVARIANT clears itself on drop in this windows-rs version.
         let pv = store.GetValue(&PKEY_Device_FriendlyName).ok()?;
-        let pwstr = PropVariantToStringAlloc(&pv).ok()?;
+        // PKEY_Device_FriendlyName is a VT_LPWSTR. Copy the wide string out
+        // (to_string allocates a fresh String) before `pv` drops and frees it.
+        let pwstr = pv.Anonymous.Anonymous.Anonymous.pwszVal;
         let name = pwstr.to_string().ok();
-        CoTaskMemFree(Some(pwstr.0 as *const core::ffi::c_void));
         name.filter(|s| !s.is_empty())
     }
 }
