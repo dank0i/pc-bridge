@@ -1246,9 +1246,10 @@ mod tests {
     #[test]
     fn test_matching_game_processes() {
         let mut config = Config::default();
-        config
-            .games
-            .insert("bf2042".to_string(), GameConfig::Simple("battlefield".into()));
+        config.games.insert(
+            "bf2042".to_string(),
+            GameConfig::Simple("battlefield".into()),
+        );
         config
             .games
             .insert("cs2.exe".to_string(), GameConfig::Simple("cs2".into()));
@@ -1257,7 +1258,10 @@ mod tests {
         let running = ["bf2042.exe", "discord.exe", "cs2.exe", "explorer.exe"];
         let mut matched = config.matching_game_processes(running.iter().copied());
         matched.sort();
-        assert_eq!(matched, vec!["bf2042.exe".to_string(), "cs2.exe".to_string()]);
+        assert_eq!(
+            matched,
+            vec!["bf2042.exe".to_string(), "cs2.exe".to_string()]
+        );
 
         // No configured games means nothing to close.
         assert!(
