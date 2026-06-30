@@ -8,6 +8,8 @@ mod custom;
 mod disk;
 mod gpu;
 mod network;
+#[cfg(windows)]
+mod now_playing;
 mod system;
 mod uptime;
 
@@ -36,6 +38,8 @@ pub use custom::CustomSensorManager;
 pub use disk::DiskSensor;
 pub use gpu::GpuSensor;
 pub use network::NetworkSensor;
+#[cfg(windows)]
+pub use now_playing::NowPlayingSensor;
 pub use system::SystemSensor;
 pub use uptime::UptimeSensor;
 

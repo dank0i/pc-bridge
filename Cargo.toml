@@ -121,6 +121,9 @@ windows = { version = "0.58", features = [
     # WinRT for toast notifications
     "Data_Xml_Dom",
     "UI_Notifications",
+    # WinRT media session (now playing)
+    "Media_Control",
+    "Foundation",
 ] }
 windows-core = "0.58"
 base64 = "0.22"

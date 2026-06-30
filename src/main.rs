@@ -301,6 +301,14 @@ async fn run_agent() -> anyhow::Result<()> {
         info!("  Mic/webcam in-use sensor enabled");
     }
 
+    #[cfg(windows)]
+    if config.features.now_playing {
+        use crate::sensors::NowPlayingSensor;
+        let sensor = NowPlayingSensor::new(Arc::clone(&state));
+        handles.push(tokio::spawn(sensor.run()));
+        info!("  Now playing (media session) sensor enabled");
+    }
+
     if config.features.steam_updates {
         use crate::sensors::SteamSensor;
         let sensor = SteamSensor::new(Arc::clone(&state));
@@ -489,6 +497,7 @@ fn log_enabled_features(config: &Config) {
         f.audio_device,
         f.mic,
         f.webcam,
+        f.now_playing,
         f.volume,
         f.media_controls,
         f.steam_updates,

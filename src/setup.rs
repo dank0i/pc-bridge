@@ -407,6 +407,7 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
             audio_device: false,
             mic: false,
             webcam: false,
+            now_playing: false,
             volume: config.audio_control,
             media_controls: config.audio_control,
             steam_updates: config.steam_updates,

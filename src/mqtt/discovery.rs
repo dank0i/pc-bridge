@@ -159,6 +159,20 @@ impl MqttClient {
                 .await;
         }
 
+        // Now playing (media session) sensor (Windows-only producer via GSMTC).
+        #[cfg(windows)]
+        if config.features.now_playing {
+            self.register_sensor(
+                device,
+                "now_playing",
+                "Now Playing",
+                "mdi:music",
+                None,
+                None,
+            )
+            .await;
+        }
+
         // System sensors, split into independent flags. Battery and bridge
         // health ride along whenever the system task runs (any of the three on).
         let system_any = config.features.cpu_sensor
@@ -1057,6 +1071,7 @@ fn feature_entities(config: &Config) -> Vec<(&'static str, &'static str, bool)> 
         entities.push(("sensor", "audio_device", f.audio_device));
         entities.push(("sensor", "mic", f.mic));
         entities.push(("sensor", "webcam", f.webcam));
+        entities.push(("sensor", "now_playing", f.now_playing));
         for oid in HWINFO_ENTITY_IDS {
             entities.push(("sensor", oid, f.hwinfo_sensor));
         }
