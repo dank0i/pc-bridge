@@ -157,6 +157,7 @@ fn flag_get(f: &FeatureConfig, id: &str) -> Option<bool> {
         "cpu" => f.cpu_sensor,
         "memory" => f.memory_sensor,
         "active_window" => f.active_window,
+        "idle" => f.idle_tracking,
         "steam_downloads" => f.steam_updates,
         "notifications" => f.notifications,
         _ => return None,
@@ -173,6 +174,7 @@ fn flag_set(f: &mut FeatureConfig, id: &str, v: bool) {
         "cpu" => f.cpu_sensor = v,
         "memory" => f.memory_sensor = v,
         "active_window" => f.active_window = v,
+        "idle" => f.idle_tracking = v,
         "steam_downloads" => f.steam_updates = v,
         "notifications" => f.notifications = v,
         _ => {}
