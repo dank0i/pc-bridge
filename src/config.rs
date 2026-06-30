@@ -258,6 +258,8 @@ pub struct FeatureConfig {
     #[serde(default)]
     pub active_window: bool,
     #[serde(default)]
+    pub session_state: bool,
+    #[serde(default)]
     pub volume: bool,
     #[serde(default)]
     pub media_controls: bool,
@@ -298,6 +300,7 @@ impl Default for FeatureConfig {
             cpu_sensor: false,
             memory_sensor: false,
             active_window: false,
+            session_state: false,
             volume: false,
             media_controls: false,
             steam_updates: false,

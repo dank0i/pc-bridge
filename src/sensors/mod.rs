@@ -15,6 +15,8 @@ mod games;
 mod idle;
 #[cfg(windows)]
 mod process_watcher;
+#[cfg(windows)]
+mod session;
 mod steam;
 
 #[cfg(unix)]
@@ -35,6 +37,8 @@ pub use games::GameSensor;
 pub use idle::IdleSensor;
 #[cfg(windows)]
 pub use process_watcher::ProcessWatcher;
+#[cfg(windows)]
+pub use session::SessionSensor;
 pub use steam::SteamSensor;
 
 #[cfg(unix)]

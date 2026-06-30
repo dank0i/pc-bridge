@@ -277,6 +277,14 @@ async fn run_agent() -> anyhow::Result<()> {
         info!("  System sensors enabled (CPU/memory polled, battery/active_window event-driven)");
     }
 
+    #[cfg(windows)]
+    if config.features.session_state {
+        use crate::sensors::SessionSensor;
+        let sensor = SessionSensor::new(Arc::clone(&state));
+        handles.push(tokio::spawn(sensor.run()));
+        info!("  Session lock/unlock sensor enabled");
+    }
+
     if config.features.steam_updates {
         use crate::sensors::SteamSensor;
         let sensor = SteamSensor::new(Arc::clone(&state));
@@ -373,6 +381,13 @@ async fn run_agent() -> anyhow::Result<()> {
     if config.features.display_state {
         state.mqtt.publish_sensor_retained("display", "on").await;
     }
+    #[cfg(windows)]
+    if config.features.session_state {
+        state
+            .mqtt
+            .publish_sensor_retained("session", "unlocked")
+            .await;
+    }
 
     // Wait for shutdown signal (Ctrl+C or broadcast)
     info!("PC Bridge running. Press Ctrl+C to stop.");
@@ -454,6 +469,7 @@ fn log_enabled_features(config: &Config) {
         f.cpu_sensor,
         f.memory_sensor,
         f.active_window,
+        f.session_state,
         f.volume,
         f.media_controls,
         f.steam_updates,

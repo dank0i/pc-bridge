@@ -112,6 +112,20 @@ impl MqttClient {
                 .await;
         }
 
+        // Session lock/unlock sensor (Windows-only producer via WTS).
+        #[cfg(windows)]
+        if config.features.session_state {
+            self.register_sensor(
+                device,
+                "session",
+                "Session State",
+                "mdi:account-lock",
+                None,
+                None,
+            )
+            .await;
+        }
+
         // System sensors, split into independent flags. Battery and bridge
         // health ride along whenever the system task runs (any of the three on).
         let system_any = config.features.cpu_sensor
@@ -1004,8 +1018,12 @@ fn feature_entities(config: &Config) -> Vec<(&'static str, &'static str, bool)> 
         ("button", "VolumeMute", f.media_controls),
     ];
     #[cfg(windows)]
-    for oid in HWINFO_ENTITY_IDS {
-        entities.push(("sensor", oid, f.hwinfo_sensor));
+    {
+        // Session sensor has a Windows-only producer, so it only exists here.
+        entities.push(("sensor", "session", f.session_state));
+        for oid in HWINFO_ENTITY_IDS {
+            entities.push(("sensor", oid, f.hwinfo_sensor));
+        }
     }
     entities
 }
