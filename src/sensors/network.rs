@@ -56,18 +56,25 @@ impl NetworkSensor {
                 _ = tick.tick() => {
                     // GetIfTable2 (Windows) enumerates the interface table; keep
                     // it off the single-threaded runtime.
-                    let Ok(curr) = tokio::task::spawn_blocking(get_network_totals).await else {
+                    let Ok(Some(curr)) = tokio::task::spawn_blocking(get_network_totals).await else {
+                        // Join error or a read failure: skip this tick rather than
+                        // treating a failure as 0 bytes (which would make the next
+                        // successful tick report the whole lifetime counter as a
+                        // multi-GB/s spike).
                         continue;
                     };
-                    // Divide by the actual elapsed time, not the nominal interval:
-                    // a skipped tick (Skip behavior) or spawn_blocking latency
-                    // makes the real gap longer, which would over-report the rate.
                     let now = std::time::Instant::now();
                     let elapsed = now.duration_since(last_sample_at).as_secs_f64().max(0.001);
                     last_sample_at = now;
-                    let rx_per_sec = (curr.0.saturating_sub(prev_sample.0) as f64 / elapsed) as u64;
-                    let tx_per_sec = (curr.1.saturating_sub(prev_sample.1) as f64 / elapsed) as u64;
-                    prev_sample = curr;
+                    // First valid sample after startup/failure: seed, no delta yet.
+                    let Some(prev) = prev_sample else {
+                        prev_sample = Some(curr);
+                        continue;
+                    };
+                    // Divide by actual elapsed time, not the nominal interval.
+                    let rx_per_sec = (curr.0.saturating_sub(prev.0) as f64 / elapsed) as u64;
+                    let tx_per_sec = (curr.1.saturating_sub(prev.1) as f64 / elapsed) as u64;
+                    prev_sample = Some(curr);
 
                     let rx_str = format_bytes_per_sec(rx_per_sec);
                     let tx_str = format_bytes_per_sec(tx_per_sec);
@@ -94,7 +101,7 @@ impl NetworkSensor {
 
 /// Returns (total_rx_bytes, total_tx_bytes) across all interfaces
 #[cfg(windows)]
-fn get_network_totals() -> (u64, u64) {
+fn get_network_totals() -> Option<(u64, u64)> {
     use windows::Win32::Foundation::WIN32_ERROR;
     use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2};
 
@@ -104,7 +111,7 @@ fn get_network_totals() -> (u64, u64) {
     unsafe {
         let mut table = std::ptr::null_mut();
         if GetIfTable2(&raw mut table) != WIN32_ERROR(0) || table.is_null() {
-            return (0, 0);
+            return None;
         }
 
         let num_entries = (*table).NumEntries as usize;
@@ -122,7 +129,7 @@ fn get_network_totals() -> (u64, u64) {
         }
 
         FreeMibTable(table as *const _);
-        (rx, tx)
+        Some((rx, tx))
     }
 }
 
@@ -165,12 +172,9 @@ fn parse_proc_net_dev(content: &str) -> (u64, u64) {
 }
 
 #[cfg(unix)]
-fn get_network_totals() -> (u64, u64) {
-    if let Ok(content) = std::fs::read_to_string("/proc/net/dev") {
-        parse_proc_net_dev(&content)
-    } else {
-        (0, 0)
-    }
+fn get_network_totals() -> Option<(u64, u64)> {
+    let content = std::fs::read_to_string("/proc/net/dev").ok()?;
+    Some(parse_proc_net_dev(&content))
 }
 
 #[cfg(test)]

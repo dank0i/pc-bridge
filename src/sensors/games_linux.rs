@@ -66,6 +66,9 @@ impl GameSensor {
         self.publish_game_catalog(&games).await;
 
         let mut tick = interval(Duration::from_secs(interval_secs));
+        // Skip missed ticks so a suspend/resume doesn't fire a burst of catch-up
+        // game scans.
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
         let mut config_rx = self.state.config_generation.subscribe();
         let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
