@@ -666,10 +666,20 @@ fn get_cpu_times() -> CpuTimes {
             .filter_map(|s| s.parse().ok())
             .collect();
 
-        if parts.len() >= 4 {
-            // user, nice, system, idle
+        // Fields: user nice system idle iowait irq softirq steal ...
+        // Dropping iowait/irq/softirq/steal shrinks the total and over-reports
+        // usage (up to ~2x under I/O load), so fold them in: iowait counts as
+        // idle (CPU is waiting, not working); irq/softirq/steal count as busy.
+        if parts.len() >= 8 {
             let user = parts[0] + parts[1]; // user + nice
-            let kernel = parts[2]; // system
+            let kernel = parts[2] + parts[5] + parts[6] + parts[7]; // system + irq + softirq + steal
+            let idle = parts[3] + parts[4]; // idle + iowait
+            return CpuTimes { idle, kernel, user };
+        }
+        if parts.len() >= 4 {
+            // Older kernels without the iowait/irq/... columns.
+            let user = parts[0] + parts[1];
+            let kernel = parts[2];
             let idle = parts[3];
             return CpuTimes { idle, kernel, user };
         }

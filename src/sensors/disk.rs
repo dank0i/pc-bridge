@@ -166,7 +166,9 @@ fn get_disk_usage(path: &str) -> Option<DiskInfo> {
 
         let block_size = stat.f_frsize as u64;
         let total = stat.f_blocks as u64 * block_size;
-        let free = stat.f_bfree as u64 * block_size;
+        // f_bavail (space available to non-root) rather than f_bfree, so used% and
+        // free match what `df` and file managers show (excludes the root reserve).
+        let free = stat.f_bavail as u64 * block_size;
 
         DiskInfo::from_bytes(total, free)
     }
