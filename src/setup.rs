@@ -96,13 +96,17 @@ fn clear_screen() {
 /// Print a header box
 fn print_header(title: &str) {
     let width = 44;
-    let padding = (width - 2 - title.len()) / 2;
+    // Truncate an over-long title so the padding arithmetic can't underflow.
+    let max_title = width - 3;
+    let title: String = title.chars().take(max_title).collect();
+    let tlen = title.chars().count();
+    let padding = (width - 2 - tlen) / 2;
     println!("╔{}╗", "═".repeat(width - 2));
     println!(
         "║{}{}{} ║",
         " ".repeat(padding),
         title,
-        " ".repeat(width - 3 - padding - title.len())
+        " ".repeat(width - 3 - padding - tlen)
     );
     println!("╚{}╝", "═".repeat(width - 2));
     println!();

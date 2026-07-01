@@ -160,6 +160,30 @@ impl App {
         self.cfg.save()
     }
 
+    /// Best-effort reachability check: resolve the broker host and open a TCP
+    /// connection with a short timeout. Not a full MQTT handshake, but honest
+    /// (the previous button just claimed "connected" unconditionally).
+    fn test_connection(&self) -> bool {
+        use std::net::{TcpStream, ToSocketAddrs};
+        use std::time::Duration;
+
+        let host = self
+            .mqtt_host
+            .trim_start_matches("tcp://")
+            .trim_start_matches("ssl://")
+            .trim_start_matches("wss://")
+            .trim_start_matches("ws://");
+        let port = if self.mqtt_port.is_empty() {
+            "1883"
+        } else {
+            &self.mqtt_port
+        };
+        let Ok(mut addrs) = format!("{host}:{port}").to_socket_addrs() else {
+            return false;
+        };
+        addrs.any(|addr| TcpStream::connect_timeout(&addr, Duration::from_secs(3)).is_ok())
+    }
+
     fn master_on(&self, f: &Feature) -> bool {
         if f.group == Group::Custom {
             match f.kind {
@@ -1312,7 +1336,7 @@ fn general_panel(app: &mut App, ui: &mut egui::Ui) {
                     }
                 });
                 if ui.button("Test connection").clicked() {
-                    app.connected = true;
+                    app.connected = app.test_connection();
                 }
                 ui.add_space(GAP);
                 let (txt, col) = if app.connected {

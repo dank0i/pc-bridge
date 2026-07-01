@@ -38,6 +38,18 @@ Debt concentrates in three seams:
 
 ---
 
+## Progress log (fix pass)
+
+- ☑ **Tier 0 complete** (0.1–0.7): UI Save load-guard; group masters persist; native commands gated on feature flags; `pkill -x` + `.exe`-exact CloseGame matcher; iterative appinfo parse; atomic config/credential writes; fatal-on-DPAPI-failure.
+- ☑ **Tier 1**: 1.1 (idempotent process add), 1.2 (try_send dispatch), 1.3 (Linux timeout kills the tree), 1.10 (credential 0600-atomic), 1.13 (preemptible backoff).
+- ☑ **Tier 2**: 2.8 (device_name topic sanitize), 2.12 (checked notify exit codes).
+- ⏸ **Deferred with reason** (see notes inline): 1.5 (env-expansion, local-only, per-variant), 1.6 (hwinfo slice, blind UB), 1.7 (permit restructure), 1.8/1.12 (fold into Tier 3), 1.9 (updater signing — needs keypair + CI step), 1.11 (blind binary-offset arithmetic, drops last game only).
+- ⏳ **Remaining**: most of Tier 2, all of Tier 3, README→UI + `model.rs` mockup, phantom UI toggles (2.14 / 0.2 tail).
+
+Note: 0.2's non-dangerous phantom toggles (tray/autostart/confirm/ha_token) are parked for the UI pass (wire or remove, with visual verification).
+
+---
+
 ## ☐ Tier 0 — Dangerous (data loss / security / crash) — fix first
 
 | # | Tag | File:line | Issue |

@@ -33,6 +33,7 @@ impl NetworkSensor {
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
         let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
         let mut prev_sample = get_network_totals();
+        let mut last_sample_at = std::time::Instant::now();
         let mut prev_rx = String::new();
         let mut prev_tx = String::new();
 
@@ -58,8 +59,14 @@ impl NetworkSensor {
                     let Ok(curr) = tokio::task::spawn_blocking(get_network_totals).await else {
                         continue;
                     };
-                    let rx_per_sec = (curr.0.saturating_sub(prev_sample.0)) / interval_secs;
-                    let tx_per_sec = (curr.1.saturating_sub(prev_sample.1)) / interval_secs;
+                    // Divide by the actual elapsed time, not the nominal interval:
+                    // a skipped tick (Skip behavior) or spawn_blocking latency
+                    // makes the real gap longer, which would over-report the rate.
+                    let now = std::time::Instant::now();
+                    let elapsed = now.duration_since(last_sample_at).as_secs_f64().max(0.001);
+                    last_sample_at = now;
+                    let rx_per_sec = (curr.0.saturating_sub(prev_sample.0) as f64 / elapsed) as u64;
+                    let tx_per_sec = (curr.1.saturating_sub(prev_sample.1) as f64 / elapsed) as u64;
                     prev_sample = curr;
 
                     let rx_str = format_bytes_per_sec(rx_per_sec);
