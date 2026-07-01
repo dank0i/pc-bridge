@@ -32,6 +32,13 @@ impl IdleSensor {
         let mut interval_secs = config.intervals.last_active.max(1); // Prevent panic on 0
         drop(config);
 
+        // On wlroots Wayland (no D-Bus idle), start the ext-idle-notify listener
+        // that backs the D-Bus-less idle path. Idempotent; the runtime
+        // is_wayland_session() guard means it's a no-op off Wayland.
+        if crate::linux_wayland::is_wayland_session() {
+            crate::linux_idle::ensure_started();
+        }
+
         let mut tick = interval(Duration::from_secs(interval_secs));
         // Skip missed ticks so a stall (e.g. after resume) doesn't fire a burst
         // of catch-up xprintidle subprocesses.
@@ -159,6 +166,12 @@ impl IdleSensor {
         // Bundled D-Bus (GNOME Mutter / KDE) - the Wayland path, and a fallback on
         // X11 GNOME/KDE too.
         if let Some(ms) = crate::linux_dbus::idle_millis() {
+            return Some((ms / 1000) as i64);
+        }
+
+        // ext-idle-notify (wlroots: Sway/Hyprland) - a background listener keeps
+        // this current; covers Wayland compositors with no D-Bus idle interface.
+        if let Some(ms) = crate::linux_idle::idle_millis() {
             return Some((ms / 1000) as i64);
         }
 

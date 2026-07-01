@@ -90,6 +90,9 @@ zbus = { version = "5", default-features = false, features = [
 # on wlroots compositors (Sway, Hyprland, gaming stacks).
 wayland-client = { version = "0.31", features = ["dlopen"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# ext-idle-notify-v1 for idle detection on wlroots compositors (Sway/Hyprland),
+# which expose no D-Bus idle interface.
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 
 
 
