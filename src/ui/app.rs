@@ -1,7 +1,7 @@
 //! App state and all views. A group/subsection master toggle (next to the name)
-//! gates features while keeping each one's individual last-known state; a
-//! separate bulk "All" toggle sets the individual states. Uniform spacing via
-//! the theme scale. No em-dashes anywhere.
+//! is a bulk switch: it is derived from the features (on if any is enabled) and
+//! writes its new state through to every feature in the group, so what you see is
+//! what gets saved. Uniform spacing via the theme scale. No em-dashes anywhere.
 
 #![allow(clippy::too_many_lines)]
 
@@ -122,10 +122,10 @@ impl App {
             anyhow::bail!("refusing to overwrite a config that failed to load: {e}");
         }
         for f in &self.features {
-            // Honor the group master: a group toggled off saves its features
-            // off, so the persisted state matches what the UI shows.
-            let on = f.enabled && self.master_on(f);
-            flag_set(&mut self.cfg.features, f.id, on);
+            // Persist each feature's own state. The group master is a bulk switch
+            // that already writes through to f.enabled (see the group header), so
+            // there is no separate overlay to fold in here.
+            flag_set(&mut self.cfg.features, f.id, f.enabled);
         }
         self.cfg.device_name = self.device.clone();
         self.cfg.mqtt.broker = if self.mqtt_port.is_empty() {
@@ -525,7 +525,20 @@ fn feature_panel(app: &mut App, ui: &mut egui::Ui) {
             },
             _ => {
                 let i = g.index();
+                // The master is derived from the features (on if any is enabled),
+                // so it never drifts from what's persisted. Toggling it is a bulk
+                // switch: write the new state through to every feature in the
+                // group, rather than keeping a display-only overlay that would be
+                // lost on save/reload.
+                let derived = app.features.iter().any(|f| f.group == g && f.enabled);
+                app.group_on[i] = derived;
                 toggle(ui, &mut app.group_on[i]);
+                if app.group_on[i] != derived {
+                    let on = app.group_on[i];
+                    for f in app.features.iter_mut().filter(|f| f.group == g) {
+                        f.enabled = on;
+                    }
+                }
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
