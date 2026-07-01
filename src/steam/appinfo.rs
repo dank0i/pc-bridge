@@ -160,19 +160,30 @@ impl AppInfoReader {
     /// Returns: (name, executable)
     /// Performance: ~0.05-0.1ms per lookup (reuses internal buffer)
     pub fn get_game_info(&mut self, app_id: u32) -> Option<(String, String)> {
-        let entry = self.index.get(&app_id)?;
+        let (offset, size) = {
+            let entry = self.index.get(&app_id)?;
+            (entry.offset, entry.size as usize)
+        };
 
-        // Seek to data section
-        let data_offset = entry.offset + 8 + if self.version >= 29 { 44 } else { 40 };
+        // `offset` already points past app_id+size (build_index stored
+        // entry_start+8). Between it and the binary VDF is the fixed metadata:
+        //   infoState(4) lastUpdated(4) picsToken(8) textVdfSha1(20) changeNumber(4) = 40
+        // and v29+ adds a 20-byte binary-VDF hash -> 60. (No extra +8 here: that
+        // was double-counting the app_id+size already baked into `offset`.)
+        let metadata = if self.version >= 29 { 60 } else { 40 };
+        if size <= metadata {
+            return None;
+        }
+        let data_offset = offset + metadata as u64;
+        let vdf_len = size - metadata;
+
         self.file.seek(SeekFrom::Start(data_offset)).ok()?;
-
         // Reuse buffer - resize without shrinking (grows to max entry, stays there)
-        let size = entry.size as usize;
-        self.read_buf.resize(size, 0);
-        self.file.read_exact(&mut self.read_buf[..size]).ok()?;
+        self.read_buf.resize(vdf_len, 0);
+        self.file.read_exact(&mut self.read_buf[..vdf_len]).ok()?;
 
         // Parse binary VDF to find name and executable
-        Self::parse_game_info(&self.read_buf[..size])
+        Self::parse_game_info(&self.read_buf[..vdf_len])
     }
 
     /// Parse binary VDF data to extract game name and Windows launch executable
