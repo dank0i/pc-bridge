@@ -410,6 +410,30 @@ pub fn toggle_mute() -> bool {
 
 #[cfg(unix)]
 pub fn send_media_key(key: MediaKey) {
+    // Volume mute isn't a media-transport action; toggle the sink directly.
+    if matches!(key, MediaKey::VolumeMute) {
+        toggle_mute();
+        return;
+    }
+
+    // Prefer playerctl (MPRIS): works on both X11 and Wayland, unlike xdotool.
+    let action = match key {
+        MediaKey::PlayPause => "play-pause",
+        MediaKey::Next => "next",
+        MediaKey::Previous => "previous",
+        MediaKey::Stop => "stop",
+        MediaKey::VolumeMute => unreachable!(),
+    };
+    let played = std::process::Command::new("playerctl")
+        .arg(action)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if played {
+        return;
+    }
+
+    // Fallback: synthesize the media key via xdotool (X11 only).
     let key_name = match key {
         MediaKey::PlayPause => "XF86AudioPlay",
         MediaKey::Next => "XF86AudioNext",
@@ -417,7 +441,6 @@ pub fn send_media_key(key: MediaKey) {
         MediaKey::Stop => "XF86AudioStop",
         MediaKey::VolumeMute => "XF86AudioMute",
     };
-
     let _ = std::process::Command::new("xdotool")
         .args(["key", key_name])
         .status();
