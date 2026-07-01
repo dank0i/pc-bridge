@@ -111,16 +111,43 @@ fn read_now_playing() -> String {
         ])
         .output();
     match out {
-        Ok(o) if o.status.success() => {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            // A player with no metadata yields e.g. "playing:  - "; treat blank
-            // artist+title as idle.
-            if s.is_empty() || s.ends_with(':') || s.ends_with(": - ") {
-                "idle".to_string()
-            } else {
-                s
-            }
-        }
+        Ok(o) if o.status.success() => parse_playerctl(&String::from_utf8_lossy(&o.stdout)),
         _ => "idle".to_string(),
+    }
+}
+
+/// Turn a `playerctl` line into a sensor value. A player with no metadata yields
+/// e.g. "playing:  - "; any result whose artist/title part has no real content
+/// becomes "idle".
+#[cfg(unix)]
+fn parse_playerctl(raw: &str) -> String {
+    let s = raw.trim();
+    let has_content = s
+        .split_once(": ")
+        .map_or("", |(_, rest)| rest)
+        .chars()
+        .any(|c| c.is_alphanumeric());
+    if has_content {
+        s.to_string()
+    } else {
+        "idle".to_string()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::parse_playerctl;
+
+    #[test]
+    fn test_parse_playerctl() {
+        assert_eq!(
+            parse_playerctl("playing: Queen - Bohemian Rhapsody\n"),
+            "playing: Queen - Bohemian Rhapsody"
+        );
+        assert_eq!(parse_playerctl("paused: Artist - "), "paused: Artist -");
+        // No metadata / no player -> idle.
+        assert_eq!(parse_playerctl("playing:  - "), "idle");
+        assert_eq!(parse_playerctl("stopped: -"), "idle");
+        assert_eq!(parse_playerctl(""), "idle");
     }
 }
