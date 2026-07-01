@@ -160,6 +160,17 @@ impl Supervisor {
             TASKS.iter().map(|t| (t.enabled)(&cfg)).collect()
         };
 
+        // Set when we start a task this pass; if so we yield at the end so every
+        // freshly-spawned task gets polled (and thus subscribes its cancel) before
+        // the next reconcile could stop it. Note the missed-cancel window is
+        // already closed on this single-threaded runtime: reconcile reads CURRENT
+        // config, so for a later reconcile to cancel a just-started task the config
+        // must have changed, which requires the writer task to run, which requires
+        // us to yield - and any yield also polls the new task. Pure-async sensors
+        // additionally subscribe synchronously at spawn (the `c.subscribe()`
+        // argument is evaluated before tokio::spawn). This yield is belt-and-braces.
+        let mut spawned_any = false;
+
         for (def, want) in TASKS.iter().zip(wants) {
             // "In the map" is not "alive": a task that returned on its own (e.g.
             // an init failure early-return) leaves a finished handle. Treat that
@@ -177,6 +188,7 @@ impl Supervisor {
                     let (tx, _) = broadcast::channel(1);
                     let handle = (def.spawn)(Arc::clone(&self.state), tx.clone());
                     self.running.insert(def.name, (handle, tx));
+                    spawned_any = true;
                     info!("Supervisor: started {}", def.name);
                 }
                 (false, true) => {
@@ -197,6 +209,12 @@ impl Supervisor {
                 }
                 _ => {}
             }
+        }
+
+        // Let freshly-spawned tasks run to their first await (subscribing their
+        // cancel) before we could be asked to stop them.
+        if spawned_any {
+            tokio::task::yield_now().await;
         }
     }
 

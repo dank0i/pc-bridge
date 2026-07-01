@@ -71,9 +71,12 @@ fn get_gpu_usage() -> String {
     // The query handle is persisted across calls (PDH needs two samples to
     // compute a rate).
     use windows::Win32::System::Performance::{
-        PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PdhAddEnglishCounterW,
-        PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterValue, PdhOpenQueryW,
+        PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PdhAddEnglishCounterW,
+        PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW, PdhOpenQueryW,
     };
+
+    // PDH "more data" - returned by the array getter's first (sizing) call.
+    const PDH_MORE_DATA: u32 = 0x8000_07D2;
 
     // PDH requires two samples to compute a rate, so we use a thread-local static
     // to persist the query handle across calls.
@@ -117,12 +120,14 @@ fn get_gpu_usage() -> String {
                     let _ = PdhCloseQuery(query);
                     None
                 } else {
-                    // Collect first sample (needed for rate counters).
-                    let _ = PdhCollectQueryData(query);
+                    // Don't collect here: leave has_first_sample=false so the
+                    // FIRST real tick takes sample 1 and the SECOND takes sample 2
+                    // a full interval later. Collecting now would make the first
+                    // formatted read span ~0 time (a meaningless spike/zero).
                     Some(PdhState {
                         query,
                         counter,
-                        has_first_sample: true,
+                        has_first_sample: false,
                     })
                 }
             }
@@ -145,11 +150,55 @@ fn get_gpu_usage() -> String {
             return "unavailable".to_string();
         }
 
-        let mut value = PDH_FMT_COUNTERVALUE::default();
-        let status = PdhGetFormattedCounterValue(pdh.counter, PDH_FMT_DOUBLE, None, &raw mut value);
+        // The counter path is a WILDCARD (*engtype_3D), so it expands to one
+        // instance per process/engine node. PdhGetFormattedCounterValue (single
+        // value) is wrong for a wildcard - it errors or returns just one arbitrary
+        // instance, under-reporting a GPU whose 3D work is spread across engines.
+        // Use the array getter and sum the instances (clamped to 100).
+        //
+        // First call sizes the buffer (itembuffer=None -> PDH_MORE_DATA); second
+        // fills it.
+        let mut buf_size: u32 = 0;
+        let mut item_count: u32 = 0;
+        let status = PdhGetFormattedCounterArrayW(
+            pdh.counter,
+            PDH_FMT_DOUBLE,
+            &raw mut buf_size,
+            &raw mut item_count,
+            None,
+        );
+        if status != PDH_MORE_DATA || buf_size == 0 {
+            return "unavailable".to_string();
+        }
 
-        if status == 0 && value.CStatus == PDH_CSTATUS_VALID_DATA {
-            format!("{:.1}", value.Anonymous.doubleValue.clamp(0.0, 100.0))
+        // Back the buffer with PDH_FMT_COUNTERVALUE_ITEM_W-aligned storage sized to
+        // the byte count PDH asked for (it packs the instance name strings after
+        // the item array).
+        let elem = std::mem::size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>();
+        let cap = (buf_size as usize).div_ceil(elem).max(1);
+        let mut buffer: Vec<PDH_FMT_COUNTERVALUE_ITEM_W> = Vec::with_capacity(cap);
+        let status = PdhGetFormattedCounterArrayW(
+            pdh.counter,
+            PDH_FMT_DOUBLE,
+            &raw mut buf_size,
+            &raw mut item_count,
+            Some(buffer.as_mut_ptr()),
+        );
+        if status != 0 || item_count == 0 {
+            return "unavailable".to_string();
+        }
+
+        let items = std::slice::from_raw_parts(buffer.as_ptr(), item_count as usize);
+        let mut sum = 0.0_f64;
+        let mut any_valid = false;
+        for item in items {
+            if item.FmtValue.CStatus == PDH_CSTATUS_VALID_DATA {
+                any_valid = true;
+                sum += item.FmtValue.Anonymous.doubleValue;
+            }
+        }
+        if any_valid {
+            format!("{:.1}", sum.clamp(0.0, 100.0))
         } else {
             "unavailable".to_string()
         }

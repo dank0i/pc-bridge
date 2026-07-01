@@ -231,20 +231,22 @@ impl CommandExecutor {
                 }
                 return Ok(());
             }
+            // Media keys go through SendInput; offload like the other input/COM
+            // paths so the SendInput call can't stall the single-threaded runtime.
             "MediaPlayPause" => {
-                audio::send_media_key(MediaKey::PlayPause);
+                tokio::task::spawn_blocking(|| audio::send_media_key(MediaKey::PlayPause));
                 return Ok(());
             }
             "MediaNext" => {
-                audio::send_media_key(MediaKey::Next);
+                tokio::task::spawn_blocking(|| audio::send_media_key(MediaKey::Next));
                 return Ok(());
             }
             "MediaPrevious" => {
-                audio::send_media_key(MediaKey::Previous);
+                tokio::task::spawn_blocking(|| audio::send_media_key(MediaKey::Previous));
                 return Ok(());
             }
             "MediaStop" => {
-                audio::send_media_key(MediaKey::Stop);
+                tokio::task::spawn_blocking(|| audio::send_media_key(MediaKey::Stop));
                 return Ok(());
             }
             "RefreshSteamGames" => {

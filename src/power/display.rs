@@ -7,7 +7,9 @@ use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
 };
-use windows::Win32::UI::WindowsAndMessaging::{HWND_BROADCAST, SendMessageW};
+use windows::Win32::UI::WindowsAndMessaging::{
+    HWND_BROADCAST, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW,
+};
 
 const WM_SYSCOMMAND: u32 = 0x0112;
 const SC_MONITORPOWER: usize = 0xF170;
@@ -112,14 +114,22 @@ pub fn wake_display_with_retry(max_attempts: usize, delay_between: Duration) {
     info!("WakeDisplay: Wake sequence completed");
 }
 
-/// Send SC_MONITORPOWER to turn on all monitors
+/// Send SC_MONITORPOWER to turn on all monitors.
+///
+/// Uses SendMessageTimeoutW, not SendMessageW: a broadcast blocks until EVERY
+/// top-level window handles it, so one hung window (a frozen game) would park the
+/// caller forever. SMTO_ABORTIFHUNG skips hung windows; the 2s cap bounds the rest
+/// so we never permanently leak a blocking-pool thread.
 fn turn_on_monitor() {
     unsafe {
-        SendMessageW(
+        SendMessageTimeoutW(
             HWND_BROADCAST,
             WM_SYSCOMMAND,
             WPARAM(SC_MONITORPOWER),
             LPARAM(MONITOR_ON),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            2000,
+            None,
         );
     }
 }
@@ -128,11 +138,14 @@ fn turn_on_monitor() {
 pub fn monitor_off() {
     info!("MonitorOff: turning displays off");
     unsafe {
-        SendMessageW(
+        SendMessageTimeoutW(
             HWND_BROADCAST,
             WM_SYSCOMMAND,
             WPARAM(SC_MONITORPOWER),
             LPARAM(MONITOR_OFF),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            2000,
+            None,
         );
     }
 }

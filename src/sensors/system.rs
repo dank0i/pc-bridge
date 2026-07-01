@@ -332,7 +332,7 @@ fn start_window_focus_monitor(
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-    use windows::Win32::UI::Accessibility::SetWinEventHook;
+    use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, MSG,
         PostMessageW, RegisterClassExW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_USER,
@@ -450,6 +450,13 @@ fn start_window_focus_monitor(
                 DispatchMessageW(&raw const msg);
             }
 
+            // Explicitly unhook before the thread exits. OUTOFCONTEXT hooks are
+            // meant to be cleaned up on thread termination, but since the sensor
+            // can be stopped and restarted at runtime (supervisor), don't rely on
+            // that - unhook so repeated disable/enable can't accumulate hooks.
+            if !hook.is_invalid() {
+                let _ = UnhookWinEvent(hook);
+            }
             let _ = DestroyWindow(hwnd);
         }) {
         Ok(_) => {}
