@@ -124,19 +124,19 @@ fn get_gpu_usage() -> String {
 
     let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
     let Some(pdh) = guard.as_mut() else {
-        return "0.0".to_string();
+        return "unavailable".to_string();
     };
 
     unsafe {
         if !pdh.has_first_sample {
             let _ = PdhCollectQueryData(pdh.query);
             pdh.has_first_sample = true;
-            return "0.0".to_string();
+            return "unavailable".to_string();
         }
 
         let status = PdhCollectQueryData(pdh.query);
         if status != 0 {
-            return "0.0".to_string();
+            return "unavailable".to_string();
         }
 
         let mut value = PDH_FMT_COUNTERVALUE::default();
@@ -145,7 +145,7 @@ fn get_gpu_usage() -> String {
         if status == 0 && value.CStatus == PDH_CSTATUS_VALID_DATA {
             format!("{:.1}", value.Anonymous.doubleValue.clamp(0.0, 100.0))
         } else {
-            "0.0".to_string()
+            "unavailable".to_string()
         }
     }
 }
@@ -174,7 +174,7 @@ fn get_gpu_usage() -> String {
         }
     }
 
-    "0.0".to_string()
+    "unavailable".to_string()
 }
 
 /// Parse the AMD sysfs `gpu_busy_percent` file content.

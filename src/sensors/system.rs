@@ -207,9 +207,12 @@ impl SystemSensor {
             prev.cpu = cpu_str;
         }
 
-        // Memory usage (percentage)
-        let mem = get_memory_percent();
-        let mem_str = format!("{mem:.1}");
+        // Memory usage (percentage); unavailable on a read/parse failure rather
+        // than a misleading 0% or 100%.
+        let mem_str = match get_memory_percent() {
+            Some(m) => format!("{m:.1}"),
+            None => "unavailable".to_string(),
+        };
         if mem_str != prev.mem {
             self.state
                 .mqtt
@@ -707,7 +710,7 @@ fn calculate_cpu_usage(prev: &mut CpuTimes) -> f64 {
 // ============================================================================
 
 #[cfg(windows)]
-fn get_memory_percent() -> f64 {
+fn get_memory_percent() -> Option<f64> {
     use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 
     unsafe {
@@ -717,33 +720,34 @@ fn get_memory_percent() -> f64 {
         };
 
         if GlobalMemoryStatusEx(&raw mut mem).is_ok() {
-            mem.dwMemoryLoad as f64
+            Some(mem.dwMemoryLoad as f64)
         } else {
-            0.0
+            None
         }
     }
 }
 
 #[cfg(unix)]
-fn get_memory_percent() -> f64 {
-    // Read /proc/meminfo
-    if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
-        let mut total: u64 = 0;
-        let mut available: u64 = 0;
+fn get_memory_percent() -> Option<f64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let mut total: u64 = 0;
+    let mut available: Option<u64> = None;
 
-        for line in meminfo.lines() {
-            if line.starts_with("MemTotal:") {
-                total = parse_meminfo_value(line);
-            } else if line.starts_with("MemAvailable:") {
-                available = parse_meminfo_value(line);
-            }
-        }
-
-        if total > 0 {
-            return ((total - available) as f64 / total as f64) * 100.0;
+    for line in meminfo.lines() {
+        if line.starts_with("MemTotal:") {
+            total = parse_meminfo_value(line);
+        } else if line.starts_with("MemAvailable:") {
+            available = Some(parse_meminfo_value(line));
         }
     }
-    0.0
+
+    // Missing MemAvailable would otherwise leave available=0 → a false 100%.
+    let available = available?;
+    if total == 0 {
+        return None;
+    }
+    // saturating_sub: some environments report available > total.
+    Some((total.saturating_sub(available) as f64 / total as f64) * 100.0)
 }
 
 #[cfg(unix)]
