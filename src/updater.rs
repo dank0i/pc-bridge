@@ -21,17 +21,17 @@ const USER_AGENT: &str = concat!("pc-bridge/", env!("CARGO_PKG_VERSION"));
 /// without the private key.
 ///
 /// Setup (one time): generate a keypair with `minisign -G -p update.pub -s
-/// update.sec` (keep `update.sec` offline / as a CI secret), paste the base64
-/// line from `update.pub` (the line after the comment) below, and in the
-/// release CI sign each asset with `minisign -S -s update.sec -m
-/// pc-bridge-<os>.exe`, uploading the resulting `.minisig` next to the asset
-/// and its `.sha256`.
+/// update.sec` (keep `update.sec` offline / as a CI secret) and paste the base64
+/// line from `update.pub` (the line after the comment) below.
 ///
-/// The CI also signs a per-asset `{version, sha256}` manifest. The updater trusts
-/// that SIGNED version for its anti-rollback check (a compromised host can only
-/// replay old manifests, whose version matches their binary, so it can't serve an
-/// old validly-signed build under a newer tag) and verifies the downloaded binary
-/// against the manifest's hash.
+/// Per platform the release ships THREE files: the binary, a `{version, sha256}`
+/// `.manifest`, and the manifest's `.minisig`. The updater fetches + minisign-
+/// verifies the manifest, trusts its SIGNED version for anti-rollback (a
+/// compromised host can only replay an old manifest, whose version matches its
+/// binary, so it can't serve an old validly-signed build under a newer tag), then
+/// authenticates the downloaded binary by SHA-256 against the manifest hash. That
+/// hash chain makes a separate per-binary signature (or a standalone `.sha256`)
+/// redundant, so neither is shipped.
 ///
 /// While this is empty, updates are refused (there is no signed manifest to trust).
 /// Once set, a missing/invalid signature or manifest aborts the update.
@@ -330,24 +330,18 @@ async fn download_update(
         std::io::copy(&mut body.as_reader(), &mut file)?;
         drop(file);
 
-        // Verify the binary against the SIGNED manifest hash - refuse without it.
+        // Authenticate the binary against the SIGNED manifest hash - refuse without
+        // it. The manifest is minisign-signed (see fetch_verified_manifest), so a
+        // SHA-256 match here transitively authenticates the binary: forging a
+        // malicious binary with the same hash needs a SHA-256 collision. A separate
+        // per-binary .minisig would add nothing over (signed manifest + hash), so we
+        // don't ship or check one. With no embedded key, expected_sha256 is None and
+        // we refuse (fail-closed) rather than install anything unverified.
         if let Some(hash) = expected_sha256 {
             verify_sha256_hex(&path, &hash)?;
         } else {
             let _ = std::fs::remove_file(&path);
             anyhow::bail!("No signed manifest hash - refusing to install unverified binary");
-        }
-
-        // Cryptographic signature: defends against a compromised release host
-        // serving a malicious binary with a matching checksum. Fail-closed once
-        // a public key is embedded; checksum-only (with a warning) until then.
-        // (const_is_empty: this is deliberately toggled by editing the const.)
-        #[allow(clippy::const_is_empty)]
-        if UPDATE_PUBLIC_KEY.is_empty() {
-            warn!("Update is not signature-verified (no update public key embedded)");
-        } else if let Err(e) = verify_signature(&path, &format!("{url}.minisig")) {
-            let _ = std::fs::remove_file(&path);
-            return Err(e);
         }
 
         Ok(())
@@ -356,15 +350,6 @@ async fn download_update(
 
     info!("Downloaded update to {:?}", update_path);
     Ok(update_path)
-}
-
-/// Download the `.minisig` sidecar and verify it against the downloaded file
-/// using the embedded [`UPDATE_PUBLIC_KEY`]. Only called when a key is set.
-fn verify_signature(file_path: &Path, sig_url: &str) -> anyhow::Result<()> {
-    let bytes = std::fs::read(file_path)?;
-    verify_signature_bytes(&bytes, sig_url)?;
-    info!("Update signature verified (minisign)");
-    Ok(())
 }
 
 /// Verify a minisign signature (fetched from `sig_url`) over `bytes` using the
