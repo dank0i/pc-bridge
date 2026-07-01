@@ -55,7 +55,7 @@ use crate::mqtt::MqttClient;
 use crate::power::PowerEventListener;
 #[cfg(windows)]
 use crate::sensors::ProcessWatcher;
-use crate::sensors::{IdleSensor, SystemSensor};
+use crate::sensors::SystemSensor;
 
 /// Application state shared across tasks
 pub struct AppState {
@@ -302,15 +302,10 @@ async fn run_agent() -> anyhow::Result<()> {
         }));
     }
 
-    // Pure-async polling sensors (gpu, network, disk, uptime, games, custom) are
-    // started/stopped live by the supervisor as their feature flags change; see
-    // its spawn below. The thread-spawning sensors stay startup-gated here.
-
-    if config.features.idle_tracking {
-        let sensor = IdleSensor::new(Arc::clone(&state));
-        handles.push(tokio::spawn(sensor.run()));
-        info!("  Idle tracking enabled");
-    }
+    // Sensors with NO per-task OS thread are started/stopped live by the
+    // supervisor as their feature flags change (see its spawn below): gpu,
+    // network, disk, uptime, games, custom, steam, idle, volume, audio_device,
+    // capture. Sensors that hold long-lived OS threads stay startup-gated here.
 
     // The power listener detects both sleep/wake and display on/off, so spawn
     // it if either sensor is enabled. Each event's publish is gated by its own
@@ -335,39 +330,11 @@ async fn run_agent() -> anyhow::Result<()> {
         info!("  Session lock/unlock sensor enabled");
     }
 
-    if config.features.audio_device {
-        use crate::sensors::AudioDeviceSensor;
-        let sensor = AudioDeviceSensor::new(Arc::clone(&state));
-        handles.push(tokio::spawn(sensor.run()));
-        info!("  Default audio device sensor enabled");
-    }
-
-    if config.features.mic || config.features.webcam {
-        use crate::sensors::CaptureSensor;
-        let sensor = CaptureSensor::new(Arc::clone(&state));
-        handles.push(tokio::spawn(sensor.run()));
-        info!("  Mic/webcam in-use sensor enabled");
-    }
-
     if config.features.now_playing {
         use crate::sensors::NowPlayingSensor;
         let sensor = NowPlayingSensor::new(Arc::clone(&state));
         handles.push(tokio::spawn(sensor.run()));
         info!("  Now playing (media session) sensor enabled");
-    }
-
-    if config.features.volume {
-        use crate::sensors::VolumeSensor;
-        let sensor = VolumeSensor::new(Arc::clone(&state));
-        handles.push(tokio::spawn(sensor.run()));
-        info!("  Volume sensor enabled");
-    }
-
-    if config.features.steam_updates {
-        use crate::sensors::SteamSensor;
-        let sensor = SteamSensor::new(Arc::clone(&state));
-        handles.push(tokio::spawn(sensor.run()));
-        info!("  Steam update detection enabled (filesystem watcher)");
     }
 
     #[cfg(windows)]
@@ -378,7 +345,7 @@ async fn run_agent() -> anyhow::Result<()> {
         info!("  HWiNFO sensor enabled (Global\\HWiNFO_SENS_SM2 lazy poll @ 500ms)");
     }
 
-    // gpu / network / disk / uptime are supervised (started below).
+    // (all no-persistent-thread sensors are supervised; see the supervisor spawn below)
 
     // Custom sensors: the manager TASK is supervised (started below); the
     // discovery registration is done here once (and on hot-reload).

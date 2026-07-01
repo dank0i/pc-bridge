@@ -23,7 +23,8 @@ use tokio::task::JoinHandle;
 use crate::AppState;
 use crate::config::Config;
 use crate::sensors::{
-    CustomSensorManager, DiskSensor, GameSensor, GpuSensor, NetworkSensor, UptimeSensor,
+    AudioDeviceSensor, CaptureSensor, CustomSensorManager, DiskSensor, GameSensor, GpuSensor,
+    IdleSensor, NetworkSensor, SteamSensor, UptimeSensor, VolumeSensor,
 };
 
 /// Run `fut` until it finishes on its own (global shutdown, handled inside the
@@ -75,6 +76,35 @@ const TASKS: &[TaskDef] = &[
         name: "custom_sensors",
         enabled: |c| c.custom_sensors_enabled && !c.custom_sensors.is_empty(),
         spawn: |s, c| tokio::spawn(cancelable(CustomSensorManager::new(s).run(), c)),
+    },
+    // These hold no per-task OS thread either: steam's fs-watcher is dropped with
+    // the future; volume/audio_device/capture/idle poll via spawn_blocking. (Their
+    // process-wide COM listener / ext-idle-notify helper is idempotent and
+    // harmless if it lingers while disabled - a later pass can tear those down.)
+    TaskDef {
+        name: "steam",
+        enabled: |c| c.features.steam_updates,
+        spawn: |s, c| tokio::spawn(cancelable(SteamSensor::new(s).run(), c)),
+    },
+    TaskDef {
+        name: "idle",
+        enabled: |c| c.features.idle_tracking,
+        spawn: |s, c| tokio::spawn(cancelable(IdleSensor::new(s).run(), c)),
+    },
+    TaskDef {
+        name: "volume",
+        enabled: |c| c.features.volume,
+        spawn: |s, c| tokio::spawn(cancelable(VolumeSensor::new(s).run(), c)),
+    },
+    TaskDef {
+        name: "audio_device",
+        enabled: |c| c.features.audio_device,
+        spawn: |s, c| tokio::spawn(cancelable(AudioDeviceSensor::new(s).run(), c)),
+    },
+    TaskDef {
+        name: "capture",
+        enabled: |c| c.features.mic || c.features.webcam,
+        spawn: |s, c| tokio::spawn(cancelable(CaptureSensor::new(s).run(), c)),
     },
 ];
 
