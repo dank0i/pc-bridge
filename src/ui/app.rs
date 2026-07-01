@@ -59,6 +59,11 @@ pub struct App {
     /// True after a successful Save, for a "Saved" acknowledgment (distinct from
     /// the broker "connected" status).
     saved: bool,
+    /// Feature ids that can't work on this session (X11-only on Wayland); their
+    /// toggles are greyed out and forced off.
+    unsupported: &'static [&'static str],
+    /// One-time alert shown when saved-on features were forced off as unsupported.
+    unsupported_alert: Option<String>,
 }
 
 impl App {
@@ -84,6 +89,25 @@ impl App {
                 f.enabled = on;
             }
         }
+
+        // Features that can't work on this session (X11-only features on a
+        // Wayland desktop) are forced off and greyed out; if any were enabled in
+        // the saved config, alert once so the user knows they were disabled.
+        let unsupported = unsupported_features();
+        let mut forced_off = Vec::new();
+        for f in &mut features {
+            if unsupported.contains(&f.id) && f.enabled {
+                f.enabled = false;
+                forced_off.push(f.name);
+            }
+        }
+        let unsupported_alert = (!forced_off.is_empty()).then(|| {
+            format!(
+                "Not supported on this session (these need an X11 desktop, not Wayland): {}. They've been turned off.",
+                forced_off.join(", ")
+            )
+        });
+
         Self {
             device: cfg.device_name.clone(),
             transport: Transport::Mqtt,
@@ -111,6 +135,8 @@ impl App {
             load_error,
             save_error: None,
             saved: false,
+            unsupported,
+            unsupported_alert,
         }
     }
 
@@ -235,6 +261,25 @@ fn in_view(f: &Feature, g: Group, ct: Kind) -> bool {
 /// Every UI feature that maps 1:1 onto a config flag is bound here. Ids that
 /// have no backing flag (e.g. custom entries) return None and keep their
 /// in-memory state.
+/// Feature ids that can't work on the current session and must be forced off /
+/// greyed out. Currently only the X11-only Linux features on a Wayland session
+/// (window title, monitor DPMS, monitor on/off). Empty everywhere else.
+fn unsupported_features() -> &'static [&'static str] {
+    #[cfg(target_os = "linux")]
+    {
+        if crate::linux_x11::is_available() {
+            &[]
+        } else {
+            // Wayland (or headless): the window/DPMS/monitor features need X11.
+            &["active_window", "display_state", "cmd_monitor"]
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        &[]
+    }
+}
+
 fn flag_get(f: &FeatureConfig, id: &str) -> Option<bool> {
     Some(match id {
         "gpu" => f.gpu_sensor,
@@ -331,6 +376,21 @@ impl eframe::App for App {
                     .inner_margin(egui::Margin::symmetric(18.0, 14.0)),
             )
             .show(ctx, |ui| {
+                if let Some(msg) = self.unsupported_alert.clone() {
+                    egui::Frame::none()
+                        .fill(ROW_OFF)
+                        .rounding(9.0)
+                        .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(msg).color(AMBER).size(13.0));
+                                if ui.small_button("Dismiss").clicked() {
+                                    self.unsupported_alert = None;
+                                }
+                            });
+                        });
+                    ui.add_space(BLOCK);
+                }
                 if self.selected == Group::General {
                     general_panel(self, ui);
                 } else {
@@ -646,7 +706,8 @@ fn feature_panel(app: &mut App, ui: &mut egui::Ui) {
         .auto_shrink(false)
         .show(ui, |ui| {
             for &i in &indices {
-                if feature_row(ui, &mut app.features[i], master_on, allow, false) {
+                let supported = !app.unsupported.contains(&app.features[i].id);
+                if feature_row(ui, &mut app.features[i], master_on, allow, false, supported) {
                     to_remove = Some(i);
                 }
                 ui.add_space(GAP);
@@ -938,15 +999,21 @@ fn search_row(app: &mut App, ui: &mut egui::Ui) {
         });
 }
 
+#[allow(clippy::fn_params_excessive_bools)]
 fn feature_row(
     ui: &mut egui::Ui,
     f: &mut Feature,
     master_on: bool,
     allow_privileged: bool,
     removable: bool,
+    supported: bool,
 ) -> bool {
+    if !supported {
+        // Can't run on this session (X11-only feature on Wayland): keep it off.
+        f.enabled = false;
+    }
     let blocked = f.privileged && !allow_privileged;
-    let effective = master_on && f.enabled && !blocked;
+    let effective = master_on && f.enabled && !blocked && supported;
     let fill = if effective { ROW } else { ROW_OFF };
     let mut remove_clicked = false;
     egui::Frame::none()
@@ -1006,11 +1073,22 @@ fn feature_row(
                         f.expanded = !f.expanded;
                     }
                     ui.add_space(GAP);
-                    ui.add_enabled_ui(master_on && !blocked, |ui| {
+                    ui.add_enabled_ui(master_on && !blocked && supported, |ui| {
                         toggle(ui, &mut f.enabled);
                     });
                 });
             });
+
+            if !supported {
+                ui.add_space(TIGHT);
+                kv(
+                    ui,
+                    "Unavailable",
+                    "not supported on this session (needs an X11 desktop, not Wayland)",
+                    AMBER,
+                    false,
+                );
+            }
 
             if blocked {
                 ui.add_space(TIGHT);

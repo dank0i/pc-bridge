@@ -21,6 +21,14 @@ pub fn idle_millis() -> Option<u64> {
     Some(u64::from(info.ms_since_user_input))
 }
 
+/// Whether an X11 display is reachable. Used to decide whether the window /
+/// DPMS / input features (which we currently only support on X11) can work on
+/// this session; on a Wayland session this is false.
+#[cfg(target_os = "linux")]
+pub fn is_available() -> bool {
+    x11rb::connect(None).is_ok()
+}
+
 /// Title of the currently-focused window (`_NET_ACTIVE_WINDOW` + `_NET_WM_NAME`,
 /// falling back to `WM_NAME`), or `None` if unavailable.
 pub fn active_window_title() -> Option<String> {
