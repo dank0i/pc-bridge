@@ -46,7 +46,7 @@ Update binaries are verified with a minisign signature before install, and a sig
 ### Security
 
 - Closed a scheme-parsing bypass where a Unicode look-alike character (U+212A KELVIN SIGN, which lowercases to `k`) could slip a `kill:` or `lnk:` payload past the command gates while still executing. The gates now normalize exactly like the resolver.
-- Closed an earlier Launch-gate bypass via letter case, whitespace, and environment-variable smuggling; arbitrary `exe:`/`lnk:`/`url:` launches are restricted to configured games unless raw commands are explicitly enabled.
+- Closed an earlier Launch-gate bypass via letter case, whitespace, and environment-variables. Arbitrary `exe:`/`lnk:`/`url:` launches are restricted to configured games unless raw commands are explicitly enabled.
 - `close:`/`kill:` payloads now require the Close feature to be enabled, so they can't be smuggled in through another command's topic while Close is off.
 - `DiscordJoin` payloads are guarded on both Windows and Linux so they can only carry a Discord deep link.
 
@@ -75,7 +75,7 @@ Update binaries are verified with a minisign signature before install, and a sig
 ### Interface
 
 - The version shown in the settings window is now read from the build instead of being hard-coded.
-- Native (HACS) integration is shown as unsupported and cannot be selected.
+- Native (HACS) integration is shown as unsupported and cannot be selected (in the works).
 
 ## Dependencies
 
