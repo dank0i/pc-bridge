@@ -510,6 +510,9 @@ impl ProcessWatcher {
         change_tx: broadcast::Sender<ProcessChangeNotification>,
     ) {
         let mut interval = tokio::time::interval(poll_interval);
+        // Skip missed ticks so a long reconcile (or resume from sleep) doesn't
+        // fire a burst of catch-up polls, consistent with the other sensors.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let state = Arc::clone(state);
 
         loop {

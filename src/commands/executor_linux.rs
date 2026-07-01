@@ -118,7 +118,9 @@ impl CommandExecutor {
                     .discord_keybind
                     .clone()
                     .unwrap_or_else(|| "ctrl+f6".to_string());
-                send_keybind_linux(&keybind);
+                // xdotool .status() blocks; keep it off the runtime (matches the
+                // Windows DiscordLeaveChannel path).
+                tokio::task::spawn_blocking(move || send_keybind_linux(&keybind));
                 return Ok(());
             }
             "Wake" => {
@@ -180,7 +182,13 @@ impl CommandExecutor {
             }
             "notification" => {
                 if !payload.is_empty() {
-                    notification::show_toast(payload)?;
+                    // notify-send/gdbus .status() block; keep them off the runtime.
+                    let p = payload.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        if let Err(e) = notification::show_toast(&p) {
+                            warn!("Failed to show notification: {e}");
+                        }
+                    });
                 }
                 return Ok(());
             }

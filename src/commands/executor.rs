@@ -136,7 +136,10 @@ impl CommandExecutor {
                 return Ok(());
             }
             "Wake" => {
-                wake_display();
+                // wake_display broadcasts SendMessageW, which blocks until every
+                // top-level window responds; keep it off the single-threaded
+                // runtime (same as MonitorOff/MonitorOn below).
+                tokio::task::spawn_blocking(wake_display);
                 return Ok(());
             }
             "notification" => {
