@@ -324,7 +324,8 @@ mod win {
     use anyhow::{Context, Result};
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::Memory::{
-        FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile,
+        FILE_MAP_READ, MEMORY_BASIC_INFORMATION, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
+        OpenFileMappingW, UnmapViewOfFile, VirtualQuery,
     };
     use windows::core::w;
 
@@ -339,6 +340,9 @@ mod win {
     pub struct HwInfoClient {
         handle: HANDLE,
         view: MEMORY_MAPPED_VIEW_ADDRESS,
+        /// Actual mapped region size (from VirtualQuery at open). The hard upper
+        /// bound on any slice we expose, so a corrupt header can't slice past it.
+        region_size: usize,
     }
 
     // SAFETY: HwInfoClient owns a kernel handle and a mapped view; both are
@@ -370,7 +374,30 @@ mod win {
                 return None;
             }
 
-            Some(Self { handle, view })
+            // Capture the real mapped region size so a corrupt/torn header can
+            // never make us slice past the actual mapping (access violation).
+            // SAFETY: view.Value is a valid mapped pointer; VirtualQuery only
+            // reads process memory-map metadata for that address.
+            let mut mbi = MEMORY_BASIC_INFORMATION::default();
+            let region_size = unsafe {
+                if VirtualQuery(
+                    Some(view.Value.cast_const()),
+                    &raw mut mbi,
+                    std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+                ) != 0
+                {
+                    mbi.RegionSize
+                } else {
+                    // Conservative fallback if the query fails.
+                    MAX_VIEW_SIZE
+                }
+            };
+
+            Some(Self {
+                handle,
+                view,
+                region_size,
+            })
         }
 
         /// Re-probe the header to compute the currently-required view size in
@@ -381,12 +408,13 @@ mod win {
         /// enumerated additional hardware), our slice grows to match instead
         /// of clipping the new region away.
         fn current_size(&self) -> usize {
-            // SAFETY: `self.view.Value` points to a kernel-owned mapping that
-            // is always at least HEADER_SIZE bytes (HWiNFO won't publish the
-            // section name until the header is written). We only read the
-            // first HEADER_SIZE bytes here.
+            // Hard cap: never exceed the actual mapped region, so a torn/corrupt
+            // header advertising a huge `needed` can't make us slice out of bounds.
+            let cap = MAX_VIEW_SIZE.min(self.region_size);
+            let head_len = HEADER_SIZE.min(self.region_size);
+            // SAFETY: `head_len <= region_size`, so this stays within the mapping.
             let head_slice =
-                unsafe { std::slice::from_raw_parts(self.view.Value.cast::<u8>(), HEADER_SIZE) };
+                unsafe { std::slice::from_raw_parts(self.view.Value.cast::<u8>(), head_len) };
             let reading_section = read_u32(head_slice, OFF_READING_SECTION)
                 .map(|v| v as usize)
                 .unwrap_or(0);
@@ -398,8 +426,8 @@ mod win {
                 .unwrap_or(0);
             let needed = reading_section
                 .checked_add(reading_elem_size.saturating_mul(num_readings))
-                .unwrap_or(MAX_VIEW_SIZE);
-            needed.clamp(HEADER_SIZE, MAX_VIEW_SIZE)
+                .unwrap_or(cap);
+            needed.clamp(HEADER_SIZE.min(self.region_size), cap)
         }
 
         /// Borrow the mapped view as a byte slice sized to the current header.
