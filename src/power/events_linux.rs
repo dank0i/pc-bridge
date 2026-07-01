@@ -5,8 +5,8 @@
 //! CPU cost when idle (blocks on pipe read, no polling).
 //!
 //! Also publishes a `display` sensor for real monitor DPMS power (polled via
-//! `xset q`), matching the Windows `GUID_CONSOLE_DISPLAY_STATE` behavior. X11
-//! only; on Wayland the sensor doesn't update.
+//! bundled x11rb), matching the Windows `GUID_CONSOLE_DISPLAY_STATE` behavior.
+//! X11 only; on Wayland the sensor doesn't update.
 
 use log::{debug, error, info, warn};
 use std::io::{BufRead, BufReader};
@@ -212,18 +212,9 @@ impl PowerEventListener {
         let mut prev_on: Option<bool> = None;
 
         loop {
-            // `xset q` prints a line like "Monitor is On" / "Monitor is Off" /
-            // "Monitor is in Standby" / "Monitor is in Suspend".
-            let on = match Command::new("xset").arg("q").output() {
-                Ok(output) if output.status.success() => {
-                    let text = String::from_utf8_lossy(&output.stdout);
-                    text.lines()
-                        .find(|l| l.trim_start().starts_with("Monitor is"))
-                        .map(|l| l.trim_end().ends_with("On"))
-                }
-                // xset unavailable (Wayland / no X11) or DPMS off: don't publish.
-                _ => None,
-            };
+            // Bundled X11 DPMS query (pure Rust, no `xset`). None on Wayland /
+            // no X11 - the sensor simply doesn't update there.
+            let on = crate::linux_x11::dpms_on();
 
             if let Some(on) = on
                 && prev_on != Some(on)

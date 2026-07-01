@@ -881,7 +881,11 @@ pub async fn get_active_window_title_async() -> String {
 
 #[cfg(unix)]
 fn get_active_window_title_blocking() -> String {
-    // Try xdotool for X11
+    // Bundled X11 (pure Rust, no xdotool).
+    if let Some(title) = crate::linux_x11::active_window_title() {
+        return truncate_title(title);
+    }
+    // Fallback: xdotool (X11).
     if let Ok(output) = std::process::Command::new("xdotool")
         .args(["getactivewindow", "getwindowname"])
         .output()
