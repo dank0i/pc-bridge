@@ -162,6 +162,20 @@ impl App {
         self.cfg.custom_command_privileges_allowed = self.allow_privileged;
         self.cfg.custom_commands_enabled = self.custom_actions_on;
         self.cfg.custom_sensors_enabled = self.custom_sensors_on;
+        // A game's process is its detection KEY; two rows sharing one would
+        // silently collapse (last-wins) in the map below, losing a row. Reject so
+        // the user doesn't lose data on Save.
+        {
+            let mut seen = std::collections::HashSet::new();
+            for g in &self.library {
+                let key = g.process.trim();
+                if !key.is_empty() && !seen.insert(key.to_ascii_lowercase()) {
+                    anyhow::bail!(
+                        "Two games share the process '{key}'. Each game needs a unique process."
+                    );
+                }
+            }
+        }
         // Fold the edited game library back into the config map, preserving the
         // Steam auto-discovered flag for games already known to discovery.
         self.cfg.games = library_to_games(&self.library, &self.cfg.games);
@@ -366,6 +380,21 @@ fn flag_set(f: &mut FeatureConfig, id: &str, v: bool) {
 
 /// Split an MQTT broker string into (host, port), defaulting the port to 1883.
 fn split_broker(broker: &str) -> (String, String) {
+    // Bracketed IPv6 with port: `[::1]:1883`.
+    if broker.starts_with('[')
+        && let Some((host, port)) = broker.rsplit_once(':')
+        && host.ends_with(']')
+        && !port.is_empty()
+        && port.bytes().all(|b| b.is_ascii_digit())
+    {
+        return (host.to_owned(), port.to_owned());
+    }
+    // A bare (unbracketed) IPv6 address has multiple ':' and no port - don't
+    // misparse its last group as a port (e.g. `fe80::1`).
+    if broker.matches(':').count() > 1 {
+        return (broker.to_owned(), "1883".to_owned());
+    }
+    // Plain `host:port`.
     if let Some((host, port)) = broker.rsplit_once(':')
         && !port.is_empty()
         && port.bytes().all(|b| b.is_ascii_digit())
@@ -1382,7 +1411,13 @@ fn general_panel(app: &mut App, ui: &mut egui::Ui) {
             });
             labeled(ui, "Integration", |ui| {
                 ui.selectable_value(&mut app.transport, Transport::Mqtt, "MQTT");
-                ui.selectable_value(&mut app.transport, Transport::Native, "Native (HACS)");
+                // Native (HACS) transport isn't implemented yet (Config has no
+                // transport/token field). Show it disabled rather than let a user
+                // pick it + paste a token that Save would silently throw away.
+                ui.add_enabled_ui(false, |ui| {
+                    ui.selectable_value(&mut app.transport, Transport::Native, "Native (HACS) soon")
+                        .on_disabled_hover_text("Native HACS integration is coming soon");
+                });
             });
             match app.transport {
                 Transport::Mqtt => {
