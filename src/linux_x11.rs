@@ -17,8 +17,3 @@ pub fn idle_millis() -> Option<u64> {
     let info = conn.screensaver_query_info(root).ok()?.reply().ok()?;
     Some(u64::from(info.ms_since_user_input))
 }
-
-/// Whether an X11 display is reachable at all (used for session detection).
-pub fn is_available() -> bool {
-    x11rb::connect(None).is_ok()
-}
