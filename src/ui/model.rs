@@ -178,7 +178,7 @@ fn a(
 }
 
 pub fn registry(device_id: &str) -> Vec<Feature> {
-    use Group::{Audio, Custom, Games, Hardware, Notifications, Power, Presence};
+    use Group::{Audio, Games, Hardware, Notifications, Power, Presence};
     use Status::{Error, Running};
     // interval 0 = event-driven; >0 = polled every N seconds.
     // The entity strings below use "dank0i_pc" as a placeholder device id; it is
@@ -584,44 +584,10 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             "",
             "Native notification API",
         ),
-        // Custom (Actions + Sensors)
-        a(
-            "custom_cmd",
-            "Custom Command",
-            "Run any command you define.",
-            Custom,
-            true,
-            false,
-            "",
-            "button.dank0i_pc_custom",
-            "",
-            "Shell exec, review carefully",
-        ),
-        a(
-            "launch_url",
-            "Launch URL",
-            "Open a link or app.",
-            Custom,
-            false,
-            false,
-            "",
-            "button.dank0i_pc_launch_url",
-            "",
-            "ShellExecute",
-        ),
-        s(
-            "custom_frametime",
-            "Frametime (example)",
-            "A custom sensor sourced from HWiNFO.",
-            Custom,
-            false,
-            Running,
-            "8.3 ms",
-            1,
-            "sensor.dank0i_pc_frametime",
-            "HWiNFO Bridge enabled",
-            "User-defined from a HWiNFO reading",
-        ),
+        // NOTE: Custom actions/sensors are NOT in this registry - they're
+        // user-defined and rendered from config.custom_commands / custom_sensors
+        // in the Custom tab. Placeholder entries here were never shown but still
+        // counted toward the "N active" total, so they were removed.
     ];
     if device_id != "dank0i_pc" {
         for f in &mut features {

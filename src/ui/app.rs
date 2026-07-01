@@ -64,6 +64,9 @@ pub struct App {
     unsupported: Vec<&'static str>,
     /// One-time alert shown when saved-on features were forced off as unsupported.
     unsupported_alert: Option<String>,
+    /// The interval groups as loaded, so Save writes back only the group whose
+    /// slider the user actually changed (siblings share the value).
+    orig_intervals: crate::config::IntervalConfig,
 }
 
 impl App {
@@ -88,7 +91,15 @@ impl App {
             if let Some(on) = flag_get(&cfg.features, f.id) {
                 f.enabled = on;
             }
+            // Show the real poll interval from the shared group the feature uses
+            // (the registry's per-feature default is just a placeholder).
+            if f.interval > 0
+                && let Some(field) = feature_interval_field(f.id)
+            {
+                f.interval = interval_field_get(&cfg.intervals, field);
+            }
         }
+        let orig_intervals = cfg.intervals.clone();
 
         // Features that can't work on this session (X11-only features on a
         // Wayland desktop) are forced off and greyed out; if any were enabled in
@@ -137,6 +148,7 @@ impl App {
             saved: false,
             unsupported,
             unsupported_alert,
+            orig_intervals,
         }
     }
 
@@ -150,6 +162,17 @@ impl App {
             // that already writes through to f.enabled (see the group header), so
             // there is no separate overlay to fold in here.
             flag_set(&mut self.cfg.features, f.id, f.enabled);
+        }
+        // Persist edited poll intervals back to their shared group. Only write the
+        // group whose slider actually changed (all group members loaded the same
+        // value, so an unedited sibling won't clobber the edit).
+        for f in &self.features {
+            if f.interval > 0
+                && let Some(field) = feature_interval_field(f.id)
+                && f.interval != interval_field_get(&self.orig_intervals, field)
+            {
+                interval_field_set(&mut self.cfg.intervals, field, f.interval);
+            }
         }
         self.cfg.device_name = self.device.clone();
         self.cfg.mqtt.broker = if self.mqtt_port.is_empty() {
@@ -304,6 +327,43 @@ fn unsupported_features() -> Vec<&'static str> {
     }
 }
 
+/// The shared IntervalConfig field a polled feature reads, if any. Several
+/// features map to one field because the backend groups their sensor tasks
+/// (e.g. gpu/cpu/memory/disk/network all share `system_sensors`), so editing one
+/// feature's poll interval changes that whole group. `None` = event-driven or a
+/// fixed interval with no configurable poll (e.g. uptime, hwinfo).
+fn feature_interval_field(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "gpu" | "cpu" | "memory" | "disk" | "network" | "active_window" => "system_sensors",
+        "idle" => "last_active",
+        "steam_updates" => "steam_check",
+        "running_game" | "game_catalog" => "game_sensor",
+        _ => return None,
+    })
+}
+
+fn interval_field_get(iv: &crate::config::IntervalConfig, field: &str) -> u32 {
+    let v = match field {
+        "system_sensors" => iv.system_sensors,
+        "last_active" => iv.last_active,
+        "steam_check" => iv.steam_check,
+        "game_sensor" => iv.game_sensor,
+        _ => 0,
+    };
+    v.min(u64::from(u32::MAX)) as u32
+}
+
+fn interval_field_set(iv: &mut crate::config::IntervalConfig, field: &str, v: u32) {
+    let v = u64::from(v);
+    match field {
+        "system_sensors" => iv.system_sensors = v,
+        "last_active" => iv.last_active = v,
+        "steam_check" => iv.steam_check = v,
+        "game_sensor" => iv.game_sensor = v,
+        _ => {}
+    }
+}
+
 fn flag_get(f: &FeatureConfig, id: &str) -> Option<bool> {
     Some(match id {
         "gpu" => f.gpu_sensor,
@@ -406,6 +466,23 @@ fn split_broker(broker: &str) -> (String, String) {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Clear the "Saved" acknowledgement the moment the user edits anything, so
+        // it never implies in-progress edits are already persisted. (Clicking Save
+        // itself is a pointer press too, but save() re-sets `saved` afterward.)
+        if self.saved
+            && ctx.input(|i| {
+                i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Text(_)
+                            | egui::Event::Key { pressed: true, .. }
+                            | egui::Event::PointerButton { pressed: true, .. }
+                    )
+                })
+            })
+        {
+            self.saved = false;
+        }
         top_bar(self, ctx);
         side_rail(self, ctx);
         egui::CentralPanel::default()
@@ -1205,16 +1282,19 @@ fn feature_row(
                         });
                     }
                     Kind::Action => {
+                        // Built-in action commands are hardcoded (resolved in the
+                        // executor), not config-driven, so this is display-only.
+                        // User-defined commands live in the Custom Actions tab.
                         ui.horizontal(|ui| {
                             ui.add_sized(
                                 [110.0, 18.0],
                                 egui::Label::new(RichText::new("Command").size(12.0).color(GREY)),
                             );
-                            ui.add(
-                                egui::TextEdit::singleline(&mut f.value)
-                                    .desired_width(300.0)
-                                    .hint_text("command to run"),
-                            );
+                            ui.label(RichText::new(&f.value).monospace().color(if effective {
+                                ACCENT
+                            } else {
+                                GREY
+                            }));
                         });
                     }
                 }
