@@ -290,7 +290,7 @@ impl CommandExecutor {
         // Wait with timeout in background
         tokio::spawn(async move {
             match tokio::time::timeout(
-                std::time::Duration::from_secs(300),
+                std::time::Duration::from_mins(5),
                 tokio::task::spawn_blocking(move || child.wait()),
             )
             .await
