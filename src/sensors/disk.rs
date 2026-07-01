@@ -25,7 +25,8 @@ impl DiskSensor {
             return;
         }
         let paths = config.disk_sensor_paths.clone();
-        let interval_secs = config.intervals.system_sensors.max(1);
+        // Disk has its own interval now (defaults to 60s; disk changes slowly).
+        let poll_secs = config.intervals.disk.max(1);
         drop(config);
 
         if paths.is_empty() {
@@ -33,8 +34,6 @@ impl DiskSensor {
             return;
         }
 
-        // Use a longer interval for disk (changes slowly)
-        let poll_secs = (interval_secs * 6).max(60);
         let mut tick = interval(Duration::from_secs(poll_secs));
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();

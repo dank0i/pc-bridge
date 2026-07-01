@@ -425,8 +425,17 @@ pub struct IntervalConfig {
     pub last_active: u64,
     #[serde(default = "default_steam_check")]
     pub steam_check: u64,
+    /// Shared poll interval for the grouped SystemSensor task (cpu + memory).
     #[serde(default = "default_system_sensors")]
     pub system_sensors: u64,
+    /// Per-sensor poll intervals. gpu/network/disk are their own tasks, so they
+    /// get independent rates (they used to all share `system_sensors`).
+    #[serde(default = "default_system_sensors")]
+    pub gpu: u64,
+    #[serde(default = "default_system_sensors")]
+    pub network: u64,
+    #[serde(default = "default_disk_sensor")]
+    pub disk: u64,
 }
 
 impl Default for IntervalConfig {
@@ -436,6 +445,9 @@ impl Default for IntervalConfig {
             last_active: default_last_active(),
             steam_check: default_steam_check(),
             system_sensors: default_system_sensors(),
+            gpu: default_system_sensors(),
+            network: default_system_sensors(),
+            disk: default_disk_sensor(),
         }
     }
 }
@@ -451,6 +463,9 @@ fn default_steam_check() -> u64 {
 }
 fn default_system_sensors() -> u64 {
     10
+}
+fn default_disk_sensor() -> u64 {
+    60
 }
 
 impl Config {
@@ -624,6 +639,23 @@ impl Config {
             if intervals.get("system_sensors").and_then(|v| v.as_u64()) == Some(0) {
                 intervals.insert("system_sensors".to_string(), serde_json::json!(10));
                 migrated = true;
+            }
+            // gpu/network/disk used to share system_sensors. On a config that
+            // predates their own fields, seed them from system_sensors so a
+            // user's customized rate is preserved (disk kept its 6x cadence).
+            if let Some(sys) = intervals.get("system_sensors").and_then(|v| v.as_u64()) {
+                if !intervals.contains_key("gpu") {
+                    intervals.insert("gpu".to_string(), serde_json::json!(sys));
+                    migrated = true;
+                }
+                if !intervals.contains_key("network") {
+                    intervals.insert("network".to_string(), serde_json::json!(sys));
+                    migrated = true;
+                }
+                if !intervals.contains_key("disk") {
+                    intervals.insert("disk".to_string(), serde_json::json!((sys * 6).max(60)));
+                    migrated = true;
+                }
             }
         }
 

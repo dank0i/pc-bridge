@@ -25,7 +25,7 @@ impl GpuSensor {
         if !config.features.gpu_sensor {
             return;
         }
-        let interval_secs = config.intervals.system_sensors.max(1);
+        let interval_secs = config.intervals.gpu.max(1);
         drop(config);
 
         let mut tick = interval(Duration::from_secs(interval_secs));
