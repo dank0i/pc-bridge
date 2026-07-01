@@ -92,7 +92,7 @@ async fn spawn_tray(shutdown_tx: broadcast::Sender<()>) -> Option<isize> {
 /// Ask the tray thread to remove its icon and exit (unblocks its GetMessage pump).
 fn stop_tray(hwnd: isize) {
     unsafe {
-        let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_USER, WPARAM(0), LPARAM(0));
+        let _ = PostMessageW(HWND(hwnd as *mut _), WM_USER, WPARAM(0), LPARAM(0));
     }
 }
 
@@ -230,11 +230,11 @@ unsafe fn show_menu(hwnd: HWND) {
             TPM_RETURNCMD | TPM_RIGHTBUTTON,
             pt.x,
             pt.y,
-            Some(0),
+            0,
             hwnd,
             None,
         );
-        let _ = PostMessageW(Some(hwnd), 0, WPARAM(0), LPARAM(0));
+        let _ = PostMessageW(hwnd, 0, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(menu);
 
         match cmd.0 as usize {

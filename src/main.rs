@@ -126,8 +126,10 @@ fn spawn_settings_window() -> std::io::Result<()> {
 #[cfg(windows)]
 fn instance_already_running() -> bool {
     use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZE};
+    use windows::Win32::System::Threading::OpenMutexW;
     use windows::core::w;
+    // SYNCHRONIZE access right (0x0010_0000); enough to probe the named mutex.
+    const SYNCHRONIZE: u32 = 0x0010_0000;
     unsafe {
         match OpenMutexW(SYNCHRONIZE, false, w!("Local\\pc-bridge-agent-singleton")) {
             Ok(h) => {
