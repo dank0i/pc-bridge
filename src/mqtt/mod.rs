@@ -248,71 +248,69 @@ impl MqttClient {
                     }
                     Ok(Event::Incoming(Packet::ConnAck(_))) => {
                         info!("MQTT connected - resubscribing then announcing online");
+                        // Reset backoff on successful connection.
+                        backoff_secs = 1;
 
-                        // Subscribe BEFORE publishing "online". HA listens on the
-                        // availability topic and may fire commands the moment we
-                        // appear available; if our SUBSCRIBE for those command
-                        // topics hasn't been processed yet, the broker has no
-                        // active subscriber and silently drops the message.
-                        // Packets travel in TCP order, so the broker processes
-                        // these subscribes before the availability publish below.
-                        for topic in &subscribe_topics {
-                            if let Err(e) = client_for_eventloop
-                                .subscribe(topic, QoS::AtLeastOnce)
+                        // Run the resubscribe + birth publishes in a SEPARATE task
+                        // so the event loop below keeps calling poll() and draining
+                        // the client's request channel. Doing them inline here would
+                        // .await into the bounded 128-slot request channel that only
+                        // poll() drains - which deadlocks the single-threaded runtime
+                        // once the topic count (many custom entities) fills the buffer,
+                        // since poll() can't run until this arm returns. The awaits in
+                        // the task stay sequential, so subscribes still hit the wire
+                        // before the availability publish (TCP order), which HA needs.
+                        let client = client_for_eventloop.clone();
+                        let topics = subscribe_topics.clone();
+                        let avail = availability_topic_for_eventloop.clone();
+                        let state_topic = birth_topic.clone();
+                        let state_body = birth_payload.clone();
+                        let attr_topic = birth_attrs_topic.clone();
+                        let attr_body = birth_attrs_payload.clone();
+                        let rtx = reconnect_tx_for_eventloop.clone();
+                        tokio::spawn(async move {
+                            // Subscribe BEFORE publishing "online": HA may fire
+                            // commands the instant we appear available, and the broker
+                            // silently drops them if our SUBSCRIBE hasn't landed yet.
+                            for topic in &topics {
+                                if let Err(e) = client.subscribe(topic, QoS::AtLeastOnce).await {
+                                    warn!("Failed to resubscribe to {}: {:?}", topic, e);
+                                }
+                            }
+                            info!("Resubscribed to {} command topics", topics.len());
+
+                            if let Err(e) = client
+                                .publish_bytes(
+                                    &avail,
+                                    QoS::AtLeastOnce,
+                                    true,
+                                    bytes::Bytes::from_static(b"online"),
+                                )
                                 .await
                             {
-                                warn!("Failed to resubscribe to {}: {:?}", topic, e);
+                                warn!("Failed to publish online availability after ConnAck: {:?}", e);
                             }
-                        }
-                        info!("Resubscribed to {} command topics", subscribe_topics.len());
 
-                        if let Err(e) = client_for_eventloop
-                            .publish_bytes(
-                                &availability_topic_for_eventloop,
-                                QoS::AtLeastOnce,
-                                true,
-                                bytes::Bytes::from_static(b"online"),
-                            )
-                            .await
-                        {
-                            warn!("Failed to publish online availability after ConnAck: {:?}", e);
-                        }
+                            // Birth message: state carries only the version (255-char
+                            // cap); the rest goes to the attributes topic.
+                            if let Err(e) = client
+                                .publish(&state_topic, QoS::AtLeastOnce, true, state_body.as_bytes())
+                                .await
+                            {
+                                warn!("Failed to publish bridge_info birth message: {:?}", e);
+                            }
+                            if let Err(e) = client
+                                .publish(&attr_topic, QoS::AtLeastOnce, true, attr_body.as_bytes())
+                                .await
+                            {
+                                warn!("Failed to publish bridge_info birth attributes: {:?}", e);
+                            }
 
-                        // Birth message with version/features/OS info - state
-                        // carries only the version (255-char cap) and the rest
-                        // goes to attributes.
-                        if let Err(e) = client_for_eventloop
-                            .publish(
-                                &birth_topic,
-                                QoS::AtLeastOnce,
-                                true,
-                                birth_payload.as_bytes(),
-                            )
-                            .await
-                        {
-                            warn!("Failed to publish bridge_info birth message: {:?}", e);
-                        }
-                        if let Err(e) = client_for_eventloop
-                            .publish(
-                                &birth_attrs_topic,
-                                QoS::AtLeastOnce,
-                                true,
-                                birth_attrs_payload.as_bytes(),
-                            )
-                            .await
-                        {
-                            warn!("Failed to publish bridge_info birth attributes: {:?}", e);
-                        }
-
-                        // Notify sensors to republish their retained state.
-                        // No active subscribers means we lagged or sensors aren't
-                        // yet wired in - log so we don't lose visibility.
-                        if let Err(e) = reconnect_tx_for_eventloop.send(()) {
-                            debug!("No reconnect subscribers yet ({}); first connect is fine, later is suspicious", e);
-                        }
-
-                        // Reset backoff on successful connection
-                        backoff_secs = 1;
+                            // Notify sensors to republish their retained state.
+                            if let Err(e) = rtx.send(()) {
+                                debug!("No reconnect subscribers yet ({}); first connect is fine, later is suspicious", e);
+                            }
+                        });
                     }
                     Ok(_) => {}
                     Err(e) => {
