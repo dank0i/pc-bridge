@@ -96,9 +96,11 @@ impl MqttClient {
         opts.set_keep_alive(Duration::from_secs(30));
         opts.set_clean_session(false); // Preserve subscriptions
 
-        // Cap incoming packet size - our MQTT payloads are small (commands, sensor values).
-        // Default is unbounded; 16 KB prevents bloated memory from unexpected large messages.
-        opts.set_max_packet_size(16_384, 16_384);
+        // Cap packet size to bound memory, but generously: an incoming payload
+        // over the cap makes the event loop error and the whole connection cycle
+        // (dropping the command). 256 KB comfortably covers notification bodies
+        // (which can carry a longer message / data URI) while still bounding memory.
+        opts.set_max_packet_size(256 * 1024, 256 * 1024);
 
         // Limit in-flight QoS 1 messages - local broker doesn't need aggressive pipelining
         opts.set_inflight(5);

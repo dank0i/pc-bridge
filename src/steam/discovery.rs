@@ -180,6 +180,12 @@ impl SteamGameDiscovery {
 
             if let Ok(content) = fs::read_to_string(&manifest_path)
                 && let Some((_, name, installdir)) = vdf::extract_appmanifest_fields(&content)
+                // installdir must be a single folder name: reject path separators
+                // and traversal so a crafted .acf can't redirect the exe scan
+                // outside steamapps/common.
+                && !installdir.is_empty()
+                && !installdir.contains(['/', '\\'])
+                && !installdir.contains("..")
             {
                 // Try to find executable in game folder
                 let game_path = library_path

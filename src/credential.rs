@@ -128,7 +128,11 @@ pub fn load_from_file() -> Result<String, DecryptError> {
     let stored = std::fs::read_to_string(&path).map_err(|e| DecryptError {
         message: format!("Failed to read credential file: {e}"),
     })?;
-    let stored = stored.trim();
+    // Strip only a trailing newline (tolerates a manual file edit) - NOT all
+    // whitespace: on non-Windows the stored value is the plaintext password, so
+    // trimming spaces would corrupt a password that legitimately has leading or
+    // trailing spaces. (On Windows it's "DPAPI:<base64>", unaffected either way.)
+    let stored = stored.trim_end_matches(['\n', '\r']);
     if stored.is_empty() {
         return Ok(String::new());
     }

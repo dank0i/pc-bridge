@@ -668,6 +668,29 @@ impl MqttClient {
             {
                 cleared += 1;
             }
+            // Also clear the retained state + attributes so they don't linger on
+            // the broker after the entity is removed. Only sensors publish state
+            // (buttons don't), so skip the empty-topic churn for those.
+            if component == "sensor" {
+                let _ = self
+                    .client
+                    .publish(
+                        self.sensor_topic(object_id),
+                        QoS::AtLeastOnce,
+                        true,
+                        Vec::<u8>::new(),
+                    )
+                    .await;
+                let _ = self
+                    .client
+                    .publish(
+                        self.sensor_attributes_topic(object_id),
+                        QoS::AtLeastOnce,
+                        true,
+                        Vec::<u8>::new(),
+                    )
+                    .await;
+            }
         }
         // The notify service uses a 3-segment device-level config topic, not the
         // per-entity shape, so clear it directly.
@@ -970,12 +993,36 @@ impl MqttClient {
         removed_commands: &[String],
     ) {
         for name in removed_sensors {
-            let topic = self.config_topic("sensor", &format!("custom_{name}"));
+            let key = format!("custom_{name}");
+            let topic = self.config_topic("sensor", &key);
             self.publish_discovery(&topic, Vec::<u8>::new()).await;
+            // Clear retained state + attributes so they don't outlive the entity.
+            let _ = self
+                .client
+                .publish(
+                    self.sensor_topic(&key),
+                    QoS::AtLeastOnce,
+                    true,
+                    Vec::<u8>::new(),
+                )
+                .await;
+            let _ = self
+                .client
+                .publish(
+                    self.sensor_attributes_topic(&key),
+                    QoS::AtLeastOnce,
+                    true,
+                    Vec::<u8>::new(),
+                )
+                .await;
         }
         for name in removed_commands {
             let topic = self.config_topic("button", name);
             self.publish_discovery(&topic, Vec::<u8>::new()).await;
+            // Unsubscribe the action topic: otherwise we stay subscribed to a
+            // removed command's topic and a later message there would still be
+            // routed as a Command with that name.
+            let _ = self.client.unsubscribe(self.command_topic(name)).await;
         }
         if !removed_sensors.is_empty() || !removed_commands.is_empty() {
             info!(

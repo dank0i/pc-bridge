@@ -238,38 +238,25 @@ impl CommandExecutor {
                 info!("Refreshing Steam game library...");
                 match SteamGameDiscovery::discover_async().await {
                     Some(discovery) => {
-                        // Merge in memory under the lock, then release it before
-                        // the (blocking) disk save so we don't stall the runtime
-                        // or block every other task's config read.
-                        let snapshot = {
-                            let mut config = state.config.write().await;
-                            let (added, removed) = config.merge_steam_games(&discovery);
-                            if added > 0 || removed > 0 {
-                                info!(
-                                    "Steam refresh: +{} added, -{} removed ({}ms{})",
-                                    added,
-                                    removed,
-                                    discovery.build_time_ms,
-                                    if discovery.from_cache { ", cached" } else { "" }
-                                );
-                                Some(config.clone())
-                            } else {
-                                info!(
-                                    "Steam refresh: no changes ({}ms{})",
-                                    discovery.build_time_ms,
-                                    if discovery.from_cache { ", cached" } else { "" }
-                                );
-                                None
-                            }
-                        };
-                        if let Some(cfg) = snapshot {
-                            match tokio::task::spawn_blocking(move || cfg.save()).await {
-                                Ok(Ok(())) => {
+                        // Re-load from disk, merge, and save off the runtime, so a
+                        // manual userConfig.json edit made since startup isn't
+                        // clobbered by saving our (possibly stale) in-memory clone.
+                        match tokio::task::spawn_blocking(move || {
+                            crate::config::Config::refresh_steam_games(&discovery)
+                        })
+                        .await
+                        {
+                            Ok(Ok((fresh, added, removed))) => {
+                                if added > 0 || removed > 0 {
+                                    info!("Steam refresh: +{added} added, -{removed} removed");
+                                    *state.config.write().await = fresh;
                                     let _ = state.config_generation.send(());
+                                } else {
+                                    info!("Steam refresh: no changes");
                                 }
-                                Ok(Err(e)) => warn!("Steam refresh: failed to save games: {e}"),
-                                Err(e) => warn!("Steam refresh: save task join error: {e}"),
                             }
+                            Ok(Err(e)) => warn!("Steam refresh: failed to save games: {e}"),
+                            Err(e) => warn!("Steam refresh: save task join error: {e}"),
                         }
                     }
                     None => {

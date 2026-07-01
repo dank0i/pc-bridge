@@ -891,6 +891,14 @@ impl Config {
                     }
                 })
                 .collect();
+            // A fully non-ASCII name (e.g. a CJK-only title) filters to "", which
+            // would make a blank entity id. Fall back to the app id, which is
+            // stable and unique.
+            let game_id = if game_id.is_empty() {
+                format!("game_{}", game.app_id)
+            } else {
+                game_id
+            };
 
             self.games.insert(
                 exe_key.clone(),
@@ -912,6 +920,23 @@ impl Config {
         });
 
         (added, removed)
+    }
+
+    /// Re-load the on-disk config, merge the discovered Steam games into THAT, and
+    /// persist. Loading fresh (instead of saving the caller's in-memory clone)
+    /// means a manual edit made to userConfig.json since startup - e.g. a game
+    /// added by hand - is not clobbered by the refresh. Returns the fresh config
+    /// (for the caller to swap into memory) and the (added, removed) counts.
+    /// Blocking: call via `spawn_blocking`.
+    pub fn refresh_steam_games(
+        steam_games: &crate::steam::SteamGameDiscovery,
+    ) -> Result<(Config, usize, usize)> {
+        let mut fresh = Config::load()?;
+        let (added, removed) = fresh.merge_steam_games(steam_games);
+        if added > 0 || removed > 0 {
+            fresh.save()?;
+        }
+        Ok((fresh, added, removed))
     }
 
     /// Save current config to userConfig.json.

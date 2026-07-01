@@ -157,7 +157,15 @@ impl App {
         if let Some(e) = &self.load_error {
             anyhow::bail!("refusing to overwrite a config that failed to load: {e}");
         }
+        // Features unsupported on THIS session (X11-only under Wayland) are forced
+        // off in the UI; don't persist that forced-off state, or a user who opens
+        // the settings once under Wayland would permanently lose those features
+        // even back on X11. Leave their saved flag untouched.
+        let unsupported = unsupported_features();
         for f in &self.features {
+            if unsupported.contains(&f.id) {
+                continue;
+            }
             // Persist each feature's own state. The group master is a bulk switch
             // that already writes through to f.enabled (see the group header), so
             // there is no separate overlay to fold in here.
@@ -340,7 +348,8 @@ fn feature_interval_field(id: &str) -> Option<&'static str> {
         "cpu" => "cpu",
         "memory" => "memory",
         "idle" => "last_active",
-        "steam_updates" => "steam_check",
+        // (steam downloads is event-driven, interval == 0, so it never reaches
+        // this mapping - there's deliberately no arm for it.)
         "running_game" | "game_catalog" => "game_sensor",
         _ => return None,
     })

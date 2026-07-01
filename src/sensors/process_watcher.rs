@@ -272,9 +272,11 @@ impl ProcessWatcher {
                     }
                 };
 
+                let mut consecutive_errors = 0u32;
                 for event_result in events {
                     match event_result {
                         Ok(event) => {
+                            consecutive_errors = 0;
                             let pid = event.target_instance.process_id;
                             match event.class.as_deref() {
                                 Some(c) if c.contains("Creation") => {
@@ -299,8 +301,17 @@ impl ProcessWatcher {
                             }
                         }
                         Err(e) => {
-                            error!("WMI process event error: {}", e);
-                            break;
+                            // Tolerate transient per-event errors (a single bad
+                            // deserialize/COM hiccup): skip the event rather than
+                            // tear down the whole subscription and force a full
+                            // resubscribe + snapshot reconcile. Bail only if errors
+                            // pile up, which means the stream is actually dead.
+                            consecutive_errors += 1;
+                            if consecutive_errors >= 10 {
+                                error!("WMI event stream failing repeatedly ({e}); resubscribing");
+                                break;
+                            }
+                            warn!("WMI process event error (skipping): {e}");
                         }
                     }
                 }
