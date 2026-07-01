@@ -66,10 +66,10 @@ impl GpuSensor {
 
 #[cfg(windows)]
 fn get_gpu_usage() -> String {
-    // Use PDH to query GPU engine utilization
-    // The counter path for GPU is: \GPU Engine(*engtype_3D)\Utilization Percentage
-    // This is complex to set up, so we use a simpler WMI approach via PowerShell-less method
-    // For now, query the D3D adapter memory usage as a proxy via Win32_VideoController
+    // Query GPU 3D-engine utilization via PDH performance counters:
+    //   \GPU Engine(*engtype_3D)\Utilization Percentage
+    // The query handle is persisted across calls (PDH needs two samples to
+    // compute a rate).
     use windows::Win32::System::Performance::{
         PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PdhAddEnglishCounterW,
         PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterValue, PdhOpenQueryW,

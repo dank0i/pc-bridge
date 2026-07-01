@@ -9,10 +9,10 @@ pub fn wake_display() {
     info!("WakeDisplay: Initiating display wake sequence (Linux)");
 
     // Try xdotool to simulate key press (works on X11)
-    let _ = Command::new("xdotool").args(["key", "shift"]).spawn();
+    let _ = Command::new("xdotool").args(["key", "shift"]).status();
 
     // Try xset to turn on display
-    let _ = Command::new("xset").args(["dpms", "force", "on"]).spawn();
+    let _ = Command::new("xset").args(["dpms", "force", "on"]).status();
 
     // Try dbus for GNOME/KDE
     let _ = Command::new("dbus-send")
@@ -24,7 +24,7 @@ pub fn wake_display() {
             "org.gnome.ScreenSaver.SetActive",
             "boolean:false",
         ])
-        .spawn();
+        .status();
 
     info!("WakeDisplay: Wake sequence completed");
 }
@@ -32,5 +32,5 @@ pub fn wake_display() {
 /// Turn the display off (X11 DPMS).
 pub fn monitor_off() {
     info!("MonitorOff: turning display off (Linux)");
-    let _ = Command::new("xset").args(["dpms", "force", "off"]).spawn();
+    let _ = Command::new("xset").args(["dpms", "force", "off"]).status();
 }

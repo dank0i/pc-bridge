@@ -122,7 +122,9 @@ impl CommandExecutor {
                 return Ok(());
             }
             "Wake" => {
-                wake_display();
+                // wake_display spawns and waits on xdotool/xset/dbus-send; keep
+                // it off the single-threaded runtime.
+                tokio::task::spawn_blocking(wake_display);
                 return Ok(());
             }
             "Sleep" | "Hibernate" => {
@@ -165,11 +167,11 @@ impl CommandExecutor {
                 return Ok(());
             }
             "MonitorOff" => {
-                monitor_off();
+                tokio::task::spawn_blocking(monitor_off);
                 return Ok(());
             }
             "MonitorOn" => {
-                wake_display();
+                tokio::task::spawn_blocking(wake_display);
                 return Ok(());
             }
             "CloseGame" => {

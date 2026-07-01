@@ -8,7 +8,7 @@ use std::process::Command;
 use std::sync::Arc;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use tokio::time::{Duration, interval};
+use tokio::time::{Duration, MissedTickBehavior, interval};
 
 use crate::AppState;
 
@@ -32,6 +32,9 @@ impl IdleSensor {
         drop(config);
 
         let mut tick = interval(Duration::from_secs(interval_secs));
+        // Skip missed ticks so a stall (e.g. after resume) doesn't fire a burst
+        // of catch-up xprintidle subprocesses.
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
         let mut config_rx = self.state.config_generation.subscribe();
         let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
@@ -72,6 +75,7 @@ impl IdleSensor {
                     if new_interval != interval_secs {
                         interval_secs = new_interval;
                         tick = interval(Duration::from_secs(interval_secs));
+                        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
                         info!("Idle sensor: interval changed to {}s", interval_secs);
                     }
                 }
