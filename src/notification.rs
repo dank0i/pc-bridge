@@ -114,47 +114,45 @@ pub fn show_toast(payload: &str) -> anyhow::Result<()> {
         ])
         .status();
 
-    match result {
-        Ok(_) => {
-            log::debug!("Notification sent via notify-send: {} - {}", title, message);
-            Ok(())
-        }
-        Err(e) => {
-            // Fallback: try gdbus for GNOME
-            let gdbus_result = Command::new("gdbus")
-                .args([
-                    "call",
-                    "--session",
-                    "--dest=org.freedesktop.Notifications",
-                    "--object-path=/org/freedesktop/Notifications",
-                    "--method=org.freedesktop.Notifications.Notify",
-                    "PC Bridge",          // app_name
-                    "0",                  // replaces_id
-                    "dialog-information", // icon
-                    title,
-                    message,
-                    "[]", // actions
-                    "{}", // hints
-                    "-1", // timeout (-1 = default)
-                ])
-                .status();
-
-            match gdbus_result {
-                Ok(_) => {
-                    log::debug!("Notification sent via gdbus: {} - {}", title, message);
-                    Ok(())
-                }
-                Err(_) => {
-                    log::warn!(
-                        "Could not send notification (install notify-send): {} - {}",
-                        title,
-                        message
-                    );
-                    Err(anyhow::anyhow!("notify-send not available: {}", e))
-                }
-            }
-        }
+    // A non-zero exit is a failure too, not just a missing binary, so fall
+    // through to gdbus on `!success()` rather than only on `Err`.
+    if matches!(&result, Ok(s) if s.success()) {
+        log::debug!("Notification sent via notify-send: {} - {}", title, message);
+        return Ok(());
     }
+
+    // Fallback: gdbus for GNOME.
+    let gdbus_result = Command::new("gdbus")
+        .args([
+            "call",
+            "--session",
+            "--dest=org.freedesktop.Notifications",
+            "--object-path=/org/freedesktop/Notifications",
+            "--method=org.freedesktop.Notifications.Notify",
+            "PC Bridge",          // app_name
+            "0",                  // replaces_id
+            "dialog-information", // icon
+            title,
+            message,
+            "[]", // actions
+            "{}", // hints
+            "-1", // timeout (-1 = default)
+        ])
+        .status();
+
+    if matches!(&gdbus_result, Ok(s) if s.success()) {
+        log::debug!("Notification sent via gdbus: {} - {}", title, message);
+        return Ok(());
+    }
+
+    log::warn!(
+        "Could not send notification (install notify-send): {} - {}",
+        title,
+        message
+    );
+    Err(anyhow::anyhow!(
+        "notification failed (notify-send: {result:?}, gdbus: {gdbus_result:?})"
+    ))
 }
 
 /// Escape XML special characters and strip control chars

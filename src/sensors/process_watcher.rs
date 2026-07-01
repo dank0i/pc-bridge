@@ -75,6 +75,19 @@ impl ProcessState {
     }
 
     fn add_process(&mut self, name: String, pid: u32) {
+        // Idempotent per PID: a delayed WMI __InstanceCreationEvent can re-add a
+        // PID that reconcile() already tracked. Without this, name_counts would
+        // double-increment (only decremented once on removal), leaving a stale
+        // process reported "running" forever + a slow leak.
+        let existing_differs = match self.pid_to_name.get(&pid) {
+            Some(existing) if existing.as_ref() == name.as_str() => return,
+            Some(_) => true,
+            None => false,
+        };
+        if existing_differs {
+            self.remove_process(pid);
+        }
+
         if name.len() >= 4 && name.as_bytes()[name.len() - 4..].eq_ignore_ascii_case(b".scr") {
             self.scr_count += 1;
         }

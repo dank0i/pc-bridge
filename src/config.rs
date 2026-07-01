@@ -902,6 +902,15 @@ impl Config {
         if self.device_name.contains(char::is_whitespace) {
             bail!("device_name cannot contain whitespace");
         }
+        // device_name flows into MQTT topics; reject characters that would break
+        // or wildcard a subscription (# + /) or otherwise malform a topic.
+        if !self
+            .device_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        {
+            bail!("device_name may only contain letters, digits, '.', '_', and '-'");
+        }
         if self.mqtt.broker.is_empty() {
             bail!("mqtt.broker is required");
         }
