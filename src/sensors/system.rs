@@ -823,8 +823,11 @@ fn get_battery_status() -> Option<(u8, bool)> {
                         .ok()
                         .unwrap_or_default();
 
-                    let charging = status.trim() == "Charging";
-                    return Some((cap, charging));
+                    // "On AC power" semantics to match Windows (ACLineStatus):
+                    // anything but actively discharging means the charger is
+                    // connected (Charging / Full / Not charging).
+                    let on_ac = !status.trim().eq_ignore_ascii_case("Discharging");
+                    return Some((cap, on_ac));
                 }
             }
         }
