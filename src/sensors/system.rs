@@ -925,15 +925,23 @@ fn start_window_focus_monitor_linux(
     std::thread::Builder::new()
         .name("window-focus-linux".into())
         .spawn(move || {
-            // Try xprop -spy for event-driven detection
-            let child = std::process::Command::new("xprop")
-                .args(["-spy", "-root", "_NET_ACTIVE_WINDOW"])
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
-                .spawn();
+            // Try xprop -spy for event-driven detection - but ONLY on X11. On
+            // Wayland, xprop connects to XWayland and only reports X-client focus
+            // changes, missing native Wayland windows; poll the session-aware
+            // reader instead.
+            let child = if crate::linux_wayland::is_wayland_session() {
+                None
+            } else {
+                std::process::Command::new("xprop")
+                    .args(["-spy", "-root", "_NET_ACTIVE_WINDOW"])
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .ok()
+            };
 
             match child {
-                Ok(mut child) => {
+                Some(mut child) => {
                     let stdout = child.stdout.take().expect("piped stdout");
                     let reader = std::io::BufReader::new(stdout);
 
@@ -950,9 +958,9 @@ fn start_window_focus_monitor_linux(
                     }
                     let _ = child.wait();
                 }
-                Err(_) => {
-                    // Fallback: poll every 2 seconds
-                    debug!("xprop not available, falling back to polling for window changes");
+                None => {
+                    // Poll (Wayland session, or xprop unavailable).
+                    debug!("Polling for window changes (Wayland or no xprop)");
                     let mut prev_title = get_active_window_title_blocking();
                     loop {
                         std::thread::sleep(std::time::Duration::from_secs(2));

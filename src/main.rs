@@ -271,18 +271,30 @@ async fn run_agent() -> anyhow::Result<()> {
     {
         let state = Arc::clone(&state);
         let mut reconnect_rx = state.mqtt.subscribe_reconnect();
+        let mut shutdown_rx = state.shutdown_tx.subscribe();
         handles.push(tokio::spawn(async move {
-            // A reconnect (Ok), or we fell behind the reconnect signals (Lagged)
-            // - either way re-register (idempotent). Lagged must NOT end the loop
-            // (a burst of broker flaps would otherwise silently stop discovery
-            // re-registration and orphan HA entities); only Closed (sender dropped
-            // on shutdown) fails the pattern and exits.
-            while let Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) =
-                reconnect_rx.recv().await
-            {
-                let config = state.config.read().await;
-                state.mqtt.register_discovery(&config).await;
-                state.mqtt.clear_disabled_entities(&config).await;
+            loop {
+                tokio::select! {
+                    biased;
+                    // Observe shutdown so this task exits promptly instead of
+                    // blocking the join window (the reconnect sender lives in
+                    // AppState and never drops, so recv() alone never returns).
+                    _ = shutdown_rx.recv() => break,
+                    r = reconnect_rx.recv() => match r {
+                        // A reconnect (Ok), or we fell behind the reconnect signals
+                        // (Lagged) - either way re-register (idempotent). Lagged
+                        // must NOT end the loop, or a burst of broker flaps would
+                        // silently stop discovery re-registration and orphan HA
+                        // entities.
+                        Ok(())
+                        | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            let config = state.config.read().await;
+                            state.mqtt.register_discovery(&config).await;
+                            state.mqtt.clear_disabled_entities(&config).await;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    },
+                }
             }
         }));
     }

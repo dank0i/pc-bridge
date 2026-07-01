@@ -249,6 +249,10 @@ impl AppInfoReader {
         indexed_keys: bool,
     ) -> Option<(String, String)> {
         let mut reader = BinaryVdfReader::new(data, string_table, indexed_keys);
+        // Each app's blob is wrapped in a single root block (key "appinfo").
+        // Step into it first, otherwise find_block would skip_block the entire
+        // tree on the wrapper and never reach common/config/launch.
+        reader.enter_root_block();
 
         // Get name from "common" block
         let mut name = None;
@@ -266,11 +270,11 @@ impl AppInfoReader {
         }
 
         // Navigate to "launch" block for executable
-        reader.reset();
+        reader.reset_to_root();
         let exe = if reader.find_block("launch") {
             Self::find_windows_executable(&mut reader)
         } else {
-            reader.reset();
+            reader.reset_to_root();
             if reader.find_nested_block(&["config", "launch"]) {
                 Self::find_windows_executable(&mut reader)
             } else {
@@ -363,6 +367,22 @@ impl<'a> BinaryVdfReader<'a> {
         self.pos = 0;
     }
 
+    /// Step into the single root block (key "appinfo") that wraps each app's
+    /// blob, so sibling searches see its children. No-op if the first token
+    /// isn't a block (position is left unchanged).
+    fn enter_root_block(&mut self) {
+        let save = self.pos;
+        if !matches!(self.next_kv(), Some((_, BinaryVdfValue::BlockStart))) {
+            self.pos = save;
+        }
+    }
+
+    /// Reset to the start and re-enter the root block.
+    fn reset_to_root(&mut self) {
+        self.pos = 0;
+        self.enter_root_block();
+    }
+
     fn next_kv(&mut self) -> Option<(&'a str, BinaryVdfValue)> {
         // Iterative (not recursive): an unknown type byte skips to the next entry
         // via `continue`. A malformed run of unknown markers would otherwise
@@ -420,7 +440,26 @@ impl<'a> BinaryVdfReader<'a> {
                     self.pos += 4;
                     BinaryVdfValue::Int32(val)
                 }
-                _ => continue,
+                // Value types we don't use but MUST consume so the stream stays
+                // aligned (the key was already read): Float32/Pointer/Color are 4
+                // bytes, UInt64/Int64 are 8. Skipping them without consuming would
+                // desync the reader and corrupt skip_block's depth tracking.
+                0x03 | 0x04 | 0x06 => {
+                    if self.pos + 4 > self.data.len() {
+                        return None;
+                    }
+                    self.pos += 4;
+                    continue;
+                }
+                0x07 | 0x0a => {
+                    if self.pos + 8 > self.data.len() {
+                        return None;
+                    }
+                    self.pos += 8;
+                    continue;
+                }
+                // Unknown type of unknown width: stop rather than desync.
+                _ => return None,
             };
 
             return Some((key, value));
@@ -514,5 +553,57 @@ mod tests {
             BinaryVdfValue::String(s) => assert_eq!(s, "Portal"),
             _ => panic!("expected string value"),
         }
+    }
+
+    #[test]
+    fn test_parse_game_info_descends_root_block() {
+        // Real blobs wrap everything in a root "appinfo" block; parse_game_info
+        // must descend into it to reach common/config/launch. Without the root
+        // descent this returns None (the bug the whole appinfo path had).
+        let table: Vec<String> = [
+            "appinfo",
+            "common",
+            "name",
+            "config",
+            "launch",
+            "0",
+            "executable",
+            "oslist",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+
+        let bs = |d: &mut Vec<u8>, idx: u32| {
+            d.push(TYPE_BLOCK_START);
+            d.extend_from_slice(&idx.to_le_bytes());
+        };
+        let be = |d: &mut Vec<u8>| d.push(TYPE_BLOCK_END);
+        let st = |d: &mut Vec<u8>, idx: u32, val: &str| {
+            d.push(TYPE_STRING);
+            d.extend_from_slice(&idx.to_le_bytes());
+            d.extend_from_slice(val.as_bytes());
+            d.push(0);
+        };
+
+        let mut d = Vec::new();
+        bs(&mut d, 0); // appinfo (root wrapper)
+        bs(&mut d, 1); // common
+        st(&mut d, 2, "TestGame"); // name
+        be(&mut d);
+        bs(&mut d, 3); // config
+        bs(&mut d, 4); // launch
+        bs(&mut d, 5); // "0"
+        st(&mut d, 6, "game.exe"); // executable
+        st(&mut d, 7, "windows"); // oslist
+        be(&mut d);
+        be(&mut d);
+        be(&mut d);
+        be(&mut d); // end appinfo
+
+        let (name, exe) =
+            AppInfoReader::parse_game_info(&d, &table, true).expect("should parse wrapped blob");
+        assert_eq!(name, "TestGame");
+        assert_eq!(exe, "game.exe");
     }
 }

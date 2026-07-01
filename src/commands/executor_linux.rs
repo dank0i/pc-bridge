@@ -169,10 +169,14 @@ impl CommandExecutor {
                 } else {
                     "systemctl hibernate"
                 };
-                // .status() blocks until systemctl returns (which is fast -
-                // the suspend itself is async via systemd) and reaps the
-                // process so we don't leak a zombie.
-                let _ = Command::new("bash").args(["-c", cmd]).status();
+                // .status() reaps the process (no zombie) and normally returns
+                // fast (systemd suspends asynchronously), but a polkit prompt or
+                // hung systemd could block, so run it off the single-threaded
+                // runtime.
+                let _ = tokio::task::spawn_blocking(move || {
+                    Command::new("bash").args(["-c", cmd]).status()
+                })
+                .await;
                 return Ok(());
             }
             "MonitorOff" => {
