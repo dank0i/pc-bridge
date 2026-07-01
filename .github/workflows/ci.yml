@@ -119,6 +119,13 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
+      # The Linux job above runs the cross-platform tests; run the Windows-only
+      # #[cfg(windows)] tests (executor, audio, gpu, process watcher) here, since
+      # they never compile on Linux and would otherwise never execute in CI.
+      - name: Run Windows-only tests
+        if: matrix.os == 'windows-latest'
+        run: cargo test --target ${{ matrix.target }}
+
       - name: Check binary size
         if: matrix.os == 'windows-latest'
         shell: pwsh
