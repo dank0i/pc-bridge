@@ -45,21 +45,32 @@ impl Default for SetupConfig {
 }
 
 /// Get default device name from hostname
+/// A character allowed in a device name (must match `Config::validate`).
+fn is_valid_device_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')
+}
+
+/// Replace any character the config validator would reject with '-', so a
+/// hostname-derived default (e.g. macOS "John's-MacBook") is always valid.
+fn sanitize_device_name(s: &str) -> String {
+    s.chars()
+        .map(|c| if is_valid_device_char(c) { c } else { '-' })
+        .collect()
+}
+
 fn get_default_device_name() -> String {
     #[cfg(windows)]
-    {
-        std::env::var("COMPUTERNAME")
-            .unwrap_or_else(|_| "my-pc".to_string())
-            .to_lowercase()
-            .replace(' ', "-")
-    }
+    let raw = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "my-pc".to_string());
     #[cfg(not(windows))]
-    {
-        std::env::var("HOSTNAME")
-            .or_else(|_| std::env::var("NAME"))
-            .unwrap_or_else(|_| "my-pc".to_string())
-            .to_lowercase()
-            .replace(' ', "-")
+    let raw = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("NAME"))
+        .unwrap_or_else(|_| "my-pc".to_string());
+
+    let name = sanitize_device_name(&raw.to_lowercase().replace(' ', "-"));
+    if name.is_empty() {
+        "my-pc".to_string()
+    } else {
+        name
     }
 }
 
@@ -183,15 +194,17 @@ fn run_wizard_flow(existing_config: bool) -> Option<SetupConfig> {
         println!("  Enter a unique name for this PC.");
         println!("  Used as the MQTT client ID and entity prefix.");
         println!();
-        println!("  • No spaces allowed");
+        println!("  • Letters, digits, '.', '_', '-' only (no spaces)");
         println!("  • Lowercase recommended");
         println!();
         let input = read_input(&format!("  Name [{}]: ", config.device_name));
 
         if input.is_empty() {
             break; // Use default
-        } else if input.contains(' ') {
-            println!("\n  Name cannot contain spaces!");
+        } else if !input.chars().all(is_valid_device_char) {
+            // Match Config::validate so the wizard can't produce a name that
+            // then fails at save time (losing everything the user entered).
+            println!("\n  Name may only contain letters, digits, '.', '_', and '-'!");
             read_input("  Press Enter to try again...");
         } else {
             config.device_name = input;

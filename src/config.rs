@@ -718,9 +718,10 @@ impl Config {
         }
 
         if migrated {
-            // Write back the migrated config
+            // Write back the migrated config atomically (same guarantee as save()):
+            // a crash mid-write must not truncate the user's config.
             let new_content = serde_json::to_string_pretty(&json)?;
-            std::fs::write(config_path, &new_content)
+            crate::fsutil::write_atomic(config_path, new_content.as_bytes(), None)
                 .with_context(|| format!("Failed to write migrated config to {:?}", config_path))?;
             info!("Migrated userConfig.json - moved feature toggles into features section");
             Ok(new_content)
