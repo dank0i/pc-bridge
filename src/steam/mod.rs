@@ -5,7 +5,7 @@
 
 mod appinfo;
 mod discovery;
-mod vdf;
+pub(crate) mod vdf;
 
 use std::path::PathBuf;
 

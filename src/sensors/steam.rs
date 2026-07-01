@@ -214,8 +214,8 @@ impl SteamSensor {
                 // Extract the path value
                 let parts: Vec<&str> = trimmed.split('"').collect();
                 if parts.len() >= 4 {
-                    let path_str = parts[3];
-                    let library_path = PathBuf::from(path_str).join("steamapps");
+                    let path_str = crate::steam::vdf::unescape_vdf(parts[3]);
+                    let library_path = PathBuf::from(&path_str).join("steamapps");
                     if library_path.exists() && !self.library_folders.contains(&library_path) {
                         self.library_folders.push(library_path);
                     }

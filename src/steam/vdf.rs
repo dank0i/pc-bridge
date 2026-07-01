@@ -150,7 +150,36 @@ fn extract_quoted_value(line: &str) -> Option<&str> {
 
 #[inline]
 fn extract_quoted_string(line: &str) -> Option<String> {
-    extract_quoted_value(line).map(|s| s.to_string())
+    extract_quoted_value(line).map(unescape_vdf)
+}
+
+/// Unescape VDF string escapes (`\\` -> `\`, `\"` -> `"`, `\n`, `\t`). Steam
+/// stores library paths as e.g. `"D:\\SteamLibrary"`; without this the doubled
+/// backslashes leak through (tolerated on Windows, wrong elsewhere).
+pub(crate) fn unescape_vdf(s: &str) -> String {
+    if !s.contains('\\') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -245,8 +274,9 @@ mod tests {
 "#;
         let paths = extract_library_paths(content);
         assert_eq!(paths.len(), 2);
-        assert_eq!(paths[0], r"C:\\Program Files (x86)\\Steam");
-        assert_eq!(paths[1], r"D:\\SteamLibrary");
+        // Unescaped: VDF stores "C:\\..." (escaped), we return the real path.
+        assert_eq!(paths[0], r"C:\Program Files (x86)\Steam");
+        assert_eq!(paths[1], r"D:\SteamLibrary");
     }
 
     #[test]
@@ -267,7 +297,7 @@ mod tests {
 "#;
         let info = extract_library_info(content);
         assert_eq!(info.len(), 1);
-        assert_eq!(info[0].0, r"C:\\Steam");
+        assert_eq!(info[0].0, r"C:\Steam");
         assert_eq!(info[0].1, vec![730, 1091500]);
     }
 
