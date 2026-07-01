@@ -26,9 +26,9 @@ use crate::AppState;
 use crate::config::Config;
 use crate::power::PowerEventListener;
 use crate::sensors::{
-    AudioDeviceSensor, CaptureSensor, CustomSensorManager, DiskSensor, GameSensor, GpuSensor,
-    IdleSensor, NetworkSensor, NowPlayingSensor, SessionSensor, SteamSensor, SystemSensor,
-    UptimeSensor, VolumeSensor,
+    ActiveWindowSensor, AudioDeviceSensor, CaptureSensor, CustomSensorManager, DiskSensor,
+    GameSensor, GpuSensor, IdleSensor, NetworkSensor, NowPlayingSensor, SessionSensor, SteamSensor,
+    SystemSensor, UptimeSensor, VolumeSensor,
 };
 
 /// Run `fut` until it finishes on its own (global shutdown, handled inside the
@@ -120,6 +120,11 @@ const TASKS: &[TaskDef] = &[
         name: "system",
         enabled: |c| c.features.cpu_sensor || c.features.memory_sensor || c.features.active_window,
         spawn: |s, c| tokio::spawn(SystemSensor::new(s).run(c)),
+    },
+    TaskDef {
+        name: "active_window",
+        enabled: |c| c.features.active_window,
+        spawn: |s, c| tokio::spawn(ActiveWindowSensor::new(s).run(c)),
     },
     TaskDef {
         name: "session",

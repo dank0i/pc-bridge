@@ -37,7 +37,7 @@ pub use disk::DiskSensor;
 pub use gpu::GpuSensor;
 pub use network::NetworkSensor;
 pub use now_playing::NowPlayingSensor;
-pub use system::SystemSensor;
+pub use system::{ActiveWindowSensor, SystemSensor};
 pub use uptime::UptimeSensor;
 pub use volume::VolumeSensor;
 

@@ -24,7 +24,6 @@ struct PrevSystemValues {
     mem: String,
     battery_level: String,
     battery_charging: String,
-    active_window: String,
     health_uptime: u64,
 }
 
@@ -35,7 +34,6 @@ impl PrevSystemValues {
             mem: String::new(),
             battery_level: String::new(),
             battery_charging: String::new(),
-            active_window: String::new(),
             health_uptime: 0,
         }
     }
@@ -57,14 +55,13 @@ impl SystemSensor {
     pub async fn run(self, shutdown: tokio::sync::broadcast::Sender<()>) {
         // cpu and memory are independently polled + gated (they used to share one
         // timer/interval). active_window/battery are event-driven (below).
-        let (cpu_secs, mem_secs, mut cpu_on, mut mem_on, mut aw_on) = {
+        let (cpu_secs, mem_secs, mut cpu_on, mut mem_on) = {
             let config = self.state.config.read().await;
             (
                 config.intervals.cpu.max(1),
                 config.intervals.memory.max(1),
                 config.features.cpu_sensor,
                 config.features.memory_sensor,
-                config.features.active_window,
             )
         };
 
@@ -87,15 +84,9 @@ impl SystemSensor {
         // tear-down before they get a chance to PostMessage the OS thread.
         let mut shutdown_waiters: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
-        // Start event-driven active window monitor
-        #[cfg(windows)]
-        {
-            let tx = event_tx.clone();
-            let shutdown = shutdown.subscribe();
-            if let Some(h) = start_window_focus_monitor(tx, shutdown) {
-                shutdown_waiters.push(h);
-            }
-        }
+        // active_window is now its own supervised task (ActiveWindowSensor) so it
+        // can be enabled/disabled independently without leaving this task's hook
+        // thread running. SystemSensor keeps cpu/memory (polled) + battery (event).
 
         // Start event-driven battery monitor
         #[cfg(windows)]
@@ -107,16 +98,8 @@ impl SystemSensor {
             }
         }
 
-        // Linux: poll-based event monitors via background threads (no async
-        // waiters; they observe shutdown via try_recv inside the OS thread).
-        #[cfg(unix)]
-        {
-            let tx = event_tx.clone();
-            let shutdown = shutdown.subscribe();
-            if let Some(h) = start_window_focus_monitor_linux(tx, shutdown) {
-                shutdown_waiters.push(h);
-            }
-        }
+        // Linux: poll-based battery monitor via a background thread (observes
+        // shutdown via try_recv inside the OS thread).
         #[cfg(unix)]
         {
             let tx = event_tx.clone();
@@ -169,7 +152,6 @@ impl SystemSensor {
                     let m = config.intervals.memory.max(1);
                     cpu_on = config.features.cpu_sensor;
                     mem_on = config.features.memory_sensor;
-                    aw_on = config.features.active_window;
                     drop(config);
                     cpu_tick = interval(Duration::from_secs(c));
                     mem_tick = interval(Duration::from_secs(m));
@@ -198,22 +180,8 @@ impl SystemSensor {
                 }
                 Some(event) = event_rx.recv() => {
                     match event {
-                        SystemEvent::WindowFocusChanged => {
-                            // Gate on the flag: the task also runs for cpu/memory,
-                            // so without this the focus monitor would keep publishing
-                            // window titles after active_window is disabled (its HA
-                            // entity is torn down, but the data would still flow).
-                            if aw_on {
-                                #[cfg(windows)]
-                                let title = get_active_window_title();
-                                #[cfg(unix)]
-                                let title = get_active_window_title_async().await;
-                                if title != prev_vals.active_window {
-                                    self.state.mqtt.publish_sensor("active_window", &title).await;
-                                    prev_vals.active_window = title;
-                                }
-                            }
-                        }
+                        // active_window is handled by ActiveWindowSensor now.
+                        SystemEvent::WindowFocusChanged => {}
                         SystemEvent::BatteryChanged => {
                             if let Some((percent, charging)) = get_battery_status() {
                                 let level_str = percent.to_string();
@@ -286,19 +254,7 @@ impl SystemSensor {
                 prev.battery_charging = charging_str.to_string();
             }
         }
-
-        // Active window title (event-driven, but publish initial state)
-        #[cfg(windows)]
-        let title = get_active_window_title();
-        #[cfg(unix)]
-        let title = get_active_window_title_async().await;
-        if title != prev.active_window {
-            self.state
-                .mqtt
-                .publish_sensor("active_window", &title)
-                .await;
-            prev.active_window = title;
-        }
+        // active_window's initial publish now lives in ActiveWindowSensor.
     }
 
     /// Publish bridge health diagnostics (uptime, version)
@@ -318,6 +274,78 @@ impl SystemSensor {
                 .publish_sensor_attributes("bridge_health", &attrs)
                 .await;
             prev.health_uptime = uptime_secs;
+        }
+    }
+}
+
+/// Active window sensor. Split out of SystemSensor into its own supervised task so
+/// enabling/disabling it at runtime starts/stops its focus-hook thread directly,
+/// instead of leaving the thread running while SystemSensor stays up for cpu/memory.
+pub struct ActiveWindowSensor {
+    state: Arc<AppState>,
+}
+
+impl ActiveWindowSensor {
+    pub fn new(state: Arc<AppState>) -> Self {
+        Self { state }
+    }
+
+    pub async fn run(self, shutdown: tokio::sync::broadcast::Sender<()>) {
+        let mut shutdown_rx = shutdown.subscribe();
+        let (event_tx, mut event_rx) = mpsc::channel::<SystemEvent>(8);
+        let mut shutdown_waiters: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
+        #[cfg(windows)]
+        if let Some(h) = start_window_focus_monitor(event_tx.clone(), shutdown.subscribe()) {
+            shutdown_waiters.push(h);
+        }
+        #[cfg(unix)]
+        if let Some(h) = start_window_focus_monitor_linux(event_tx.clone(), shutdown.subscribe()) {
+            shutdown_waiters.push(h);
+        }
+        drop(event_tx);
+
+        info!("Active window sensor started (event-driven)");
+
+        // Publish the current title once at startup (the monitor only fires on
+        // change, so without this the sensor would read empty until the first switch).
+        #[cfg(windows)]
+        let mut prev = get_active_window_title();
+        #[cfg(unix)]
+        let mut prev = get_active_window_title_async().await;
+        self.state.mqtt.publish_sensor("active_window", &prev).await;
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown_rx.recv() => {
+                    debug!("Active window sensor shutting down");
+                    // Await the focus-monitor waiter(s) so the OS thread exits cleanly
+                    // before teardown, bounded so it can't blow the shutdown budget.
+                    let pending = std::mem::take(&mut shutdown_waiters);
+                    if !pending.is_empty() {
+                        let _ = tokio::time::timeout(Duration::from_secs(2), async move {
+                            for handle in pending {
+                                let _ = handle.await;
+                            }
+                        })
+                        .await;
+                    }
+                    break;
+                }
+                Some(event) = event_rx.recv() => {
+                    if matches!(event, SystemEvent::WindowFocusChanged) {
+                        #[cfg(windows)]
+                        let title = get_active_window_title();
+                        #[cfg(unix)]
+                        let title = get_active_window_title_async().await;
+                        if title != prev {
+                            self.state.mqtt.publish_sensor("active_window", &title).await;
+                            prev = title;
+                        }
+                    }
+                }
+            }
         }
     }
 }

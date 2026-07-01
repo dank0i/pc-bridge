@@ -290,8 +290,13 @@ async fn run_agent() -> anyhow::Result<()> {
                         Ok(())
                         | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             let config = state.config.read().await;
+                            // Re-register only. We do NOT re-run clear_disabled_entities
+                            // here: re-registration alone restores any config a broker
+                            // restart dropped, and the disabled entities were already
+                            // cleared at startup (and on hot-reload when toggled off), so
+                            // repeating the ~3x-per-entity teardown on every reconnect is
+                            // pure churn on a flapping broker.
                             state.mqtt.register_discovery(&config).await;
-                            state.mqtt.clear_disabled_entities(&config).await;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },

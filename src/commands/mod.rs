@@ -127,8 +127,14 @@ pub(crate) fn global_scheme_blocked(config: &crate::config::Config, payload: &st
             !config.allow_global_launch && !is_configured_launch(config, payload)
         }
         "close" | "kill" => {
+            // Require the close_game feature at all: command auth otherwise keys off
+            // the command NAME, so a close:/kill: payload sent to the Launch topic
+            // would bypass a disabled close_game. Then require the target to be a
+            // configured game unless allow_global_close is on.
             let target = target.trim().trim_end_matches(".exe");
-            !config.allow_global_close && config.matching_game_processes([target]).is_empty()
+            !config.features.close_game
+                || (!config.allow_global_close
+                    && config.matching_game_processes([target]).is_empty())
         }
         _ => false,
     }
@@ -157,7 +163,11 @@ mod tests {
         // Flip the permissions.
         cfg.allow_global_launch = false;
         assert!(global_scheme_blocked(&cfg, "steam:730")); // now blocked
+        // close/kill also require the close_game feature (not just the global flag),
+        // so a close: payload on the Launch topic can't bypass a disabled close_game.
         cfg.allow_global_close = true;
+        assert!(global_scheme_blocked(&cfg, "kill:notepad")); // still blocked: close_game off
+        cfg.features.close_game = true;
         assert!(!global_scheme_blocked(&cfg, "kill:notepad")); // now allowed
     }
 
