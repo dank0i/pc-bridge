@@ -71,11 +71,11 @@ impl GameSensor {
         let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
 
         // Publish initial state
-        let (game_id, display_name) = self.detect_game(&cached).await;
-        self.publish_game(&game_id, &display_name).await;
+        let running = self.detect_game(&cached).await;
+        self.publish_game(&running).await;
 
-        // Track last published state to avoid duplicate MQTT messages
-        let mut last_game_id = game_id;
+        // Track last published state (joined ids) to avoid duplicate messages
+        let mut last_game_id = running_state(&running).0;
 
         loop {
             tokio::select! {
@@ -90,10 +90,11 @@ impl GameSensor {
                     cached = CachedGamePatterns::build(&games);
                     self.publish_game_catalog(&games).await;
                     debug!("Game sensor: rebuilt cached patterns");
-                    let (game_id, display_name) = self.detect_game(&cached).await;
-                    if game_id != last_game_id {
-                        self.publish_game(&game_id, &display_name).await;
-                        last_game_id = game_id;
+                    let running = self.detect_game(&cached).await;
+                    let key = running_state(&running).0;
+                    if key != last_game_id {
+                        self.publish_game(&running).await;
+                        last_game_id = key;
                     }
                 }
                 // MQTT reconnected - force republish retained state
@@ -101,37 +102,34 @@ impl GameSensor {
                     info!("Game sensor: MQTT reconnected, republishing current state");
                     let games = self.state.config.read().await.games.clone();
                     self.publish_game_catalog(&games).await;
-                    let (game_id, display_name) = self.detect_game(&cached).await;
-                    self.publish_game(&game_id, &display_name).await;
-                    last_game_id = game_id;
+                    let running = self.detect_game(&cached).await;
+                    self.publish_game(&running).await;
+                    last_game_id = running_state(&running).0;
                 }
                 _ = tick.tick() => {
-                    let (game_id, display_name) = self.detect_game(&cached).await;
-                    if game_id != last_game_id {
-                        self.publish_game(&game_id, &display_name).await;
-                        last_game_id = game_id;
+                    let running = self.detect_game(&cached).await;
+                    let key = running_state(&running).0;
+                    if key != last_game_id {
+                        self.publish_game(&running).await;
+                        last_game_id = key;
                     }
                 }
             }
         }
     }
 
-    async fn publish_game(&self, game_ids: &str, display_names: &str) {
+    async fn publish_game(&self, games: &[(String, String)]) {
+        let (state, display_names) = running_state(games);
         self.state
             .mqtt
-            .publish_sensor_retained("runninggames", game_ids)
+            .publish_sensor_retained("runninggames", &state)
             .await;
 
-        // Build structured game list for attributes (Feature D)
-        let games_array: Vec<serde_json::Value> = if game_ids == "none" {
-            Vec::new()
-        } else {
-            game_ids
-                .split(',')
-                .zip(display_names.split(", "))
-                .map(|(id, name)| serde_json::json!({ "id": id, "name": name }))
-                .collect()
-        };
+        // Structured game list, built directly from the pairs (no re-split).
+        let games_array: Vec<serde_json::Value> = games
+            .iter()
+            .map(|(id, name)| serde_json::json!({ "id": id, "name": name }))
+            .collect();
 
         let attrs = serde_json::json!({
             "display_name": display_names,
@@ -179,13 +177,13 @@ impl GameSensor {
         debug!("Published game catalog with {} exposed games", count);
     }
 
-    async fn detect_game(&self, cached: &CachedGamePatterns) -> (String, String) {
+    async fn detect_game(&self, cached: &CachedGamePatterns) -> Vec<(String, String)> {
         // Enumerate processes via /proc
         let processes = match self.get_process_names().await {
             Ok(p) => p,
             Err(e) => {
                 error!("Failed to enumerate processes: {}", e);
-                return ("none".to_string(), "None".to_string());
+                return Vec::new();
             }
         };
 
@@ -204,13 +202,7 @@ impl GameSensor {
             }
         }
 
-        if found_games.is_empty() {
-            ("none".to_string(), "None".to_string())
-        } else {
-            let ids: Vec<&str> = found_games.iter().map(|(id, _)| id.as_str()).collect();
-            let names: Vec<&str> = found_games.iter().map(|(_, name)| name.as_str()).collect();
-            (ids.join(","), names.join(", "))
-        }
+        found_games
     }
 
     async fn get_process_names(&self) -> anyhow::Result<Vec<String>> {
@@ -253,6 +245,17 @@ impl GameSensor {
 fn starts_with_ignore_ascii_case(haystack: &str, prefix: &str) -> bool {
     haystack.len() >= prefix.len()
         && haystack.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+}
+
+/// Retained sensor value (comma-joined ids) and display string (", "-joined
+/// names) for the running games. "none"/"None" when empty.
+fn running_state(games: &[(String, String)]) -> (String, String) {
+    if games.is_empty() {
+        return ("none".to_string(), "None".to_string());
+    }
+    let ids: Vec<&str> = games.iter().map(|(id, _)| id.as_str()).collect();
+    let names: Vec<&str> = games.iter().map(|(_, name)| name.as_str()).collect();
+    (ids.join(","), names.join(", "))
 }
 
 /// Read currently-running process names from `/proc` (blocking). Exposed for the

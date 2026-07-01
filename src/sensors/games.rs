@@ -73,11 +73,11 @@ impl GameSensor {
         self.publish_game_catalog(&games).await;
 
         // Publish initial state
-        let (game_id, display_name) = self.detect_game(&cached).await;
-        self.publish_game(&game_id, &display_name).await;
+        let games = self.detect_game(&cached).await;
+        self.publish_game(&games).await;
 
-        // Track last published state to avoid duplicate MQTT messages
-        let mut last_game_id = game_id;
+        // Track last published state (joined ids) to avoid duplicate messages
+        let mut last_game_id = running_state(&games).0;
 
         info!("Game sensor started (push-based)");
 
@@ -95,10 +95,11 @@ impl GameSensor {
                     self.publish_game_catalog(&games).await;
                     debug!("Game sensor: rebuilt cached patterns");
                     // Re-detect with new patterns
-                    let (game_id, display_name) = self.detect_game(&cached).await;
-                    if game_id != last_game_id {
-                        self.publish_game(&game_id, &display_name).await;
-                        last_game_id = game_id;
+                    let games = self.detect_game(&cached).await;
+                    let key = running_state(&games).0;
+                    if key != last_game_id {
+                        self.publish_game(&games).await;
+                        last_game_id = key;
                     }
                 }
                 // MQTT reconnected - force republish retained state
@@ -106,27 +107,29 @@ impl GameSensor {
                     info!("Game sensor: MQTT reconnected, republishing current state");
                     let games = self.state.config.read().await.games.clone();
                     self.publish_game_catalog(&games).await;
-                    let (game_id, display_name) = self.detect_game(&cached).await;
-                    self.publish_game(&game_id, &display_name).await;
-                    last_game_id = game_id;
+                    let games = self.detect_game(&cached).await;
+                    self.publish_game(&games).await;
+                    last_game_id = running_state(&games).0;
                 }
                 result = process_rx.recv() => {
                     match result {
                         Ok(_notification) => {
                             // Process list changed - re-detect and publish if different
-                            let (game_id, display_name) = self.detect_game(&cached).await;
-                            if game_id != last_game_id {
-                                self.publish_game(&game_id, &display_name).await;
-                                last_game_id = game_id;
+                            let games = self.detect_game(&cached).await;
+                            let key = running_state(&games).0;
+                            if key != last_game_id {
+                                self.publish_game(&games).await;
+                                last_game_id = key;
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             // Missed some notifications, just re-detect
                             debug!("Game sensor lagged {} notifications, re-detecting", n);
-                            let (game_id, display_name) = self.detect_game(&cached).await;
-                            if game_id != last_game_id {
-                                self.publish_game(&game_id, &display_name).await;
-                                last_game_id = game_id;
+                            let games = self.detect_game(&cached).await;
+                            let key = running_state(&games).0;
+                            if key != last_game_id {
+                                self.publish_game(&games).await;
+                                last_game_id = key;
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -139,22 +142,18 @@ impl GameSensor {
         }
     }
 
-    async fn publish_game(&self, game_ids: &str, display_names: &str) {
+    async fn publish_game(&self, games: &[(String, String)]) {
+        let (state, display_names) = running_state(games);
         self.state
             .mqtt
-            .publish_sensor_retained("runninggames", game_ids)
+            .publish_sensor_retained("runninggames", &state)
             .await;
 
-        // Build structured game list for attributes (Feature D)
-        let games_array: Vec<serde_json::Value> = if game_ids == "none" {
-            Vec::new()
-        } else {
-            game_ids
-                .split(',')
-                .zip(display_names.split(", "))
-                .map(|(id, name)| serde_json::json!({ "id": id, "name": name }))
-                .collect()
-        };
+        // Structured game list, built directly from the pairs (no re-split).
+        let games_array: Vec<serde_json::Value> = games
+            .iter()
+            .map(|(id, name)| serde_json::json!({ "id": id, "name": name }))
+            .collect();
 
         let attrs = serde_json::json!({
             "display_name": display_names,
@@ -203,21 +202,22 @@ impl GameSensor {
         debug!("Published game catalog with {} exposed games", count);
     }
 
-    async fn detect_game(&self, cached: &CachedGamePatterns) -> (String, String) {
+    async fn detect_game(&self, cached: &CachedGamePatterns) -> Vec<(String, String)> {
         // Access process list by reference - no HashSet clone
         let proc_state = self.state.process_watcher.state();
         let proc_guard = proc_state.read().await;
-        match_games_in_processes(proc_guard.names(), cached)
+        match_games_pairs(proc_guard.names(), cached)
     }
 }
 
-/// Pure matching function - testable without AppState.
-/// Given a set of running process names and cached game patterns,
-/// returns (game_ids, display_names) as comma-separated strings.
-fn match_games_in_processes(
+/// Pure matching function - testable without AppState. Returns the running
+/// games as structured `(game_id, display_name)` pairs (empty = none). Kept
+/// structured all the way to `publish_game` so a display name containing ", "
+/// can't misalign the id/name pairing (the old join-then-resplit bug).
+fn match_games_pairs(
     process_names: &HashSet<Arc<str>>,
     cached: &CachedGamePatterns,
-) -> (String, String) {
+) -> Vec<(String, String)> {
     let mut found_games: Vec<(String, String)> = Vec::with_capacity(2);
     let mut seen_ids: HashSet<&str> = HashSet::with_capacity(cached.patterns.len());
 
@@ -242,13 +242,28 @@ fn match_games_in_processes(
         }
     }
 
-    if found_games.is_empty() {
-        ("none".to_string(), "None".to_string())
-    } else {
-        let ids: Vec<&str> = found_games.iter().map(|(id, _)| id.as_str()).collect();
-        let names: Vec<&str> = found_games.iter().map(|(_, name)| name.as_str()).collect();
-        (ids.join(","), names.join(", "))
+    found_games
+}
+
+/// The retained sensor value (comma-joined ids) and display string (", "-joined
+/// names) for a set of running games. "none"/"None" when empty.
+fn running_state(games: &[(String, String)]) -> (String, String) {
+    if games.is_empty() {
+        return ("none".to_string(), "None".to_string());
     }
+    let ids: Vec<&str> = games.iter().map(|(id, _)| id.as_str()).collect();
+    let names: Vec<&str> = games.iter().map(|(_, name)| name.as_str()).collect();
+    (ids.join(","), names.join(", "))
+}
+
+/// Joined `(ids, names)` for a process set. Test-only: production carries the
+/// structured pairs from [`match_games_pairs`] through to `publish_game`.
+#[cfg(test)]
+fn match_games_in_processes(
+    process_names: &HashSet<Arc<str>>,
+    cached: &CachedGamePatterns,
+) -> (String, String) {
+    running_state(&match_games_pairs(process_names, cached))
 }
 
 /// Case-insensitive ASCII prefix check without allocation
@@ -444,6 +459,29 @@ mod tests {
         let (ids, _names) = match_games_in_processes(&processes, &cached);
         assert_eq!(ids, "battlefield_6"); // no duplicate
         assert!(!ids.contains(','));
+    }
+
+    #[test]
+    fn test_pairs_survive_comma_in_display_name() {
+        // A display name containing ", " used to misalign id/name pairing when
+        // the joined strings were re-split. Structured pairs keep it correct.
+        let cached = make_patterns(&[
+            (
+                "gta5",
+                GameConfig::Full {
+                    game_id: "gta_v".into(),
+                    app_id: None,
+                    name: Some("Grand Theft Auto V, Ultimate".into()),
+                    launch_command: None,
+                    auto_discovered: false,
+                    exposed: true,
+                },
+            ),
+            ("cod_mw", GameConfig::Simple("call_of_duty_mw".into())),
+        ]);
+        let games = match_games_pairs(&procs(&["gta5.exe", "cod_mw.exe"]), &cached);
+        let gta = games.iter().find(|(id, _)| id == "gta_v").unwrap();
+        assert_eq!(gta.1, "Grand Theft Auto V, Ultimate");
     }
 
     // ===== Process without .exe suffix =====
