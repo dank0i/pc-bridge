@@ -29,7 +29,7 @@ const USER_AGENT: &str = concat!("pc-bridge/", env!("CARGO_PKG_VERSION"));
 ///
 /// While this is empty, updates use checksum-only verification and log a
 /// warning. Once set, a missing or invalid signature aborts the update.
-const UPDATE_PUBLIC_KEY: &str = "";
+const UPDATE_PUBLIC_KEY: &str = "RWSE5vU+bgt+LQ0szYtrcZL3qLst9oXVEdB/fptCnHUivRlWn1rgcw/E";
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -670,6 +670,27 @@ mod tests {
     fn test_is_newer_version_shorter_not_newer() {
         // [2,7] vs [2,7,0] - equal prefix but shorter, so not newer
         assert!(!is_newer_version("2.7", "2.7.0"));
+    }
+
+    #[test]
+    fn test_embedded_public_key_verifies_known_signature() {
+        use minisign_verify::{PublicKey, Signature};
+        // A minisign signature over b"hello pc-bridge\n" produced by the matching
+        // secret key. Guards that UPDATE_PUBLIC_KEY, the .minisig format, and the
+        // verify path all agree - a mismatch would fail-closed and break real
+        // updates. No-op if signing is disabled (empty key).
+        #[allow(clippy::const_is_empty)]
+        if UPDATE_PUBLIC_KEY.is_empty() {
+            return;
+        }
+        let sig = "untrusted comment: signature from minisign secret key\n\
+RUSE5vU+bgt+LV0n2mFj1Ju2MB8aM1pfZKkeVSL2vns/PAgF/zDxnyXkM07gHaiIOHZtV+XiOx3Fii6B7h7jXDksFFmNM29gYA4=\n\
+trusted comment: timestamp:1782914726\tfile:sigtest.bin\thashed\n\
+cS8yVMu/941m9iEXeSa/T6K+kerWtz+h/yjhdVGQMs4MccQmzxW1km/6/aOXbo4G0D5dvSk0AgzfVD8jlJc/AQ==\n";
+        let pk = PublicKey::from_base64(UPDATE_PUBLIC_KEY).expect("valid embedded pubkey");
+        let signature = Signature::decode(sig).expect("valid signature");
+        pk.verify(b"hello pc-bridge\n", &signature, false)
+            .expect("embedded key must verify a real minisign signature");
     }
 
     #[test]
