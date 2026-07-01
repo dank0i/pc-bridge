@@ -1,6 +1,7 @@
 //! Command executor for Linux - feature-parity with Windows executor
 
 use log::{debug, error, info, warn};
+use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -278,13 +279,18 @@ impl CommandExecutor {
 
         info!("Running: {}", cmd_str);
 
-        // Execute via bash
-        let mut child = Command::new("bash").args(["-c", &cmd_str]).spawn()?;
+        // Execute via bash in its own process group so a timeout can kill the
+        // whole tree (equivalent to taskkill /T on Windows), not just bash.
+        let mut child = Command::new("bash")
+            .args(["-c", &cmd_str])
+            .process_group(0)
+            .spawn()?;
+        let pid = child.id();
 
         // Wait with timeout in background
         tokio::spawn(async move {
             match tokio::time::timeout(
-                std::time::Duration::from_mins(5),
+                std::time::Duration::from_secs(300),
                 tokio::task::spawn_blocking(move || child.wait()),
             )
             .await
@@ -296,7 +302,16 @@ impl CommandExecutor {
                 }
                 Ok(Ok(Err(e))) => error!("Command wait error: {}", e),
                 Ok(Err(e)) => error!("Task join error: {}", e),
-                Err(_) => warn!("Command timed out after 5 minutes"),
+                Err(_) => {
+                    warn!(
+                        "Command timed out after 5 minutes, killing process group (PID {})",
+                        pid
+                    );
+                    // Negative PID targets the whole process group.
+                    let _ = Command::new("kill")
+                        .args(["-KILL", &format!("-{pid}")])
+                        .status();
+                }
             }
         });
 

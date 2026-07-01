@@ -232,12 +232,18 @@ impl MqttClient {
                                 Ok(s) => s.to_string(),
                                 Err(_) => String::from_utf8_lossy(&publish.payload).into_owned(),
                             };
-                            let _ = command_tx
-                                .send(Command {
+                            // try_send (not .await): blocking here would stop the
+                            // poll loop from sending keepalives and the broker
+                            // would drop us. Dropping a button press is safer.
+                            if command_tx
+                                .try_send(Command {
                                     name: cmd_name,
                                     payload,
                                 })
-                                .await;
+                                .is_err()
+                            {
+                                warn!("Command channel full or closed - dropping command");
+                            }
                         }
                     }
                     Ok(Event::Incoming(Packet::ConnAck(_))) => {
@@ -311,7 +317,16 @@ impl MqttClient {
                     Ok(_) => {}
                     Err(e) => {
                         warn!("MQTT error (retrying in {}s): {:?}", backoff_secs, e);
-                        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                        // Race the backoff against shutdown so Ctrl+C isn't stuck
+                        // for up to 30s waiting on a reconnect delay.
+                        tokio::select! {
+                            biased;
+                            _ = shutdown_rx.recv() => {
+                                debug!("MQTT event loop shutting down during backoff");
+                                break;
+                            }
+                            () = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
+                        }
                         backoff_secs = (backoff_secs * 2).min(30);
                     }
                 }
