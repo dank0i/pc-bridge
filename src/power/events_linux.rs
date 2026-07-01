@@ -292,6 +292,7 @@ impl PowerEventListener {
                     // Receiver dropped (shutdown)
                     if let Some(mut c) = child_slot.lock().unwrap().take() {
                         let _ = c.kill();
+                        let _ = c.wait();
                     }
                     return;
                 }

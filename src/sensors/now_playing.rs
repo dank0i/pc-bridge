@@ -50,6 +50,17 @@ impl NowPlayingSensor {
 
         info!("Now playing sensor started (Windows GSMTC, dedicated thread)");
 
+        // Independent shutdown waiter: set the stop flag so the media thread exits
+        // even if the supervisor aborts run() (which would skip the inline arm).
+        {
+            let mut wait_rx = shutdown.subscribe();
+            let waiter_stop = Arc::clone(&stop);
+            tokio::spawn(async move {
+                let _ = wait_rx.recv().await;
+                waiter_stop.store(true, Ordering::Relaxed);
+            });
+        }
+
         loop {
             tokio::select! {
                 biased;

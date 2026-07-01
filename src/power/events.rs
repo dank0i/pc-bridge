@@ -140,6 +140,20 @@ impl PowerEventListener {
         // Wait for hwnd from the message pump thread
         let pump_hwnd = hwnd_rx.await.ok();
 
+        // Independent shutdown waiter: PostMessage the pump so it exits even if the
+        // supervisor aborts run() (which would skip the inline arm below). hwnd is
+        // passed as isize (Send) and rebuilt inside.
+        if let Some(hwnd_val) = pump_hwnd {
+            let mut wait_rx = shutdown.subscribe();
+            tokio::spawn(async move {
+                let _ = wait_rx.recv().await;
+                unsafe {
+                    let hwnd = HWND(hwnd_val as *mut _);
+                    let _ = PostMessageW(hwnd, WM_USER, WPARAM(0), LPARAM(0));
+                }
+            });
+        }
+
         // Handle events (no debouncing needed - state machine handles deduplication)
         loop {
             tokio::select! {

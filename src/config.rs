@@ -606,8 +606,10 @@ impl Config {
             })?;
 
             // Clean up stale inline password from JSON if present
-            if !inline_pass.is_empty() {
-                Self::clear_inline_password(config_path).ok();
+            if !inline_pass.is_empty()
+                && let Err(e) = Self::clear_inline_password(config_path)
+            {
+                warn!("Failed to strip inline password from config (will retry on next save): {e}");
             }
         } else if !inline_pass.is_empty() {
             // Migration: password was stored inline in JSON - move to credential file
@@ -616,7 +618,9 @@ impl Config {
             })?;
             config.mqtt.pass = plaintext;
             crate::credential::save_to_file(&config.mqtt.pass)?;
-            Self::clear_inline_password(config_path).ok();
+            if let Err(e) = Self::clear_inline_password(config_path) {
+                warn!("Failed to strip inline password from config (will retry on next save): {e}");
+            }
             info!("Migrated MQTT password to credential file");
         }
         // else: no password configured (anonymous MQTT)

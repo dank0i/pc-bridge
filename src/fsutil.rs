@@ -62,7 +62,19 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> io::
     // Atomic replace (same directory => same filesystem). Clean up our temp on
     // failure so a rename error doesn't strand it.
     match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            // fsync the parent directory so the rename entry itself is durable:
+            // without this, a crash/power-loss right after the rename can revert to
+            // the prior file on some filesystems (never a torn file, just the older
+            // complete one). Best-effort, Unix only (Windows has no dir-fsync).
+            #[cfg(unix)]
+            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty())
+                && let Ok(d) = std::fs::File::open(dir)
+            {
+                let _ = d.sync_all();
+            }
+            Ok(())
+        }
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
             Err(e)

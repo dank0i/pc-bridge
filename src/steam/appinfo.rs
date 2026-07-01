@@ -323,6 +323,11 @@ impl AppInfoReader {
                                 return Some(exe);
                             }
                         }
+                    } else if depth < 0 {
+                        // Consumed the enclosing `launch` block's own closing marker;
+                        // stop so we don't read a stray `executable` from a sibling
+                        // block that follows.
+                        break;
                     }
                 }
                 BinaryVdfValue::String(s) => match key {

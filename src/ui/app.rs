@@ -1291,8 +1291,10 @@ fn feature_row(
                                     ),
                                 );
                                 ui.add(
+                                    // Wide range so editing one slider can't clamp a
+                                    // legitimately large configured interval (up to 1h).
                                     egui::DragValue::new(&mut f.interval)
-                                        .range(1..=120)
+                                        .range(1..=3600)
                                         .suffix(" s"),
                                 );
                             }

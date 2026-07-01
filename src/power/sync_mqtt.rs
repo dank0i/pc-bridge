@@ -9,7 +9,7 @@
 //! that the full test suite runs on macOS/Linux CI as well as Windows.
 
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 /// MQTT broker config for synchronous publish from the power-events thread.
@@ -78,13 +78,11 @@ pub fn sync_mqtt_publish_sleep(cfg: &SyncMqttConfig) -> std::io::Result<()> {
     let addr = format!("{}:{}", cfg.host, cfg.port);
     let timeout = Duration::from_secs(2);
 
-    // Resolve hostname to IP - ToSocketAddrs handles both hostnames and IPs.
-    let socket_addr = addr.to_socket_addrs()?.next().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("DNS resolution failed for {addr}"),
-        )
-    })?;
+    // Resolve hostname to IP, hard-bounded. This runs inside the Windows suspend
+    // handler (wnd_proc during PBT_APMSUSPEND), so an unbounded DNS lookup against a
+    // slow resolver could push suspend past the OS grace window and get the process
+    // force-killed before the publish lands. An IP host resolves instantly.
+    let socket_addr = resolve_timeout(&addr, timeout)?;
 
     let stream = TcpStream::connect_timeout(&socket_addr, timeout)?;
     stream.set_write_timeout(Some(timeout))?;
@@ -104,6 +102,30 @@ pub fn sync_mqtt_publish_sleep(cfg: &SyncMqttConfig) -> std::io::Result<()> {
     } else {
         let mut stream = stream;
         do_mqtt_exchange(&mut stream, cfg)
+    }
+}
+
+/// Resolve `addr` to a `SocketAddr` but never block longer than `timeout`.
+/// `to_socket_addrs` has no timeout of its own, so we run it on a worker thread
+/// and give up if it doesn't answer in time (a detached slow lookup will finish
+/// and drop harmlessly). An IP literal returns immediately.
+fn resolve_timeout(addr: &str, timeout: Duration) -> std::io::Result<SocketAddr> {
+    let owned = addr.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(owned.to_socket_addrs().map(|mut it| it.next()));
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(Some(sa))) => Ok(sa),
+        Ok(Ok(None)) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("DNS resolution returned no addresses for {addr}"),
+        )),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("DNS resolution timed out for {addr}"),
+        )),
     }
 }
 
