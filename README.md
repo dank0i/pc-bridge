@@ -92,12 +92,23 @@ Edit `userConfig.json` next to the executable:
     "pass": "mqtt_pass"
   },
   "features": {
-    "game_detection": true,
+    "running_game": true,
+    "game_catalog": true,
+    "launch_game": true,
+    "steam_library": true,
     "idle_tracking": true,
-    "power_events": true,
+    "sleep_wake": true,
+    "display_state": true,
+    "cmd_shutdown": true,
+    "cmd_restart": true,
+    "cmd_sleep": true,
+    "cmd_lock": true,
     "notifications": true,
-    "system_sensors": true,
-    "audio_control": true,
+    "cpu_sensor": true,
+    "memory_sensor": true,
+    "active_window": true,
+    "volume": true,
+    "media_controls": true,
     "steam_updates": false,
     "discord": false,
     "gpu_sensor": false,
@@ -128,23 +139,23 @@ Edit `userConfig.json` next to the executable:
 
 ### Feature Flags
 
-All features are opt-in via the `features` object (except `power_events` which defaults to `true`):
+Every feature is an opt-in boolean in the `features` object of `userConfig.json`.
 
-| Feature | Default | Description |
-|---------|---------|-------------|
-| `game_detection` | `false` | Monitor running games, register Launch/RefreshSteamGames buttons |
-| `idle_tracking` | `false` | Report last user input time, Screensaver/Wake buttons |
-| `power_events` | **`true`** | Detect sleep/wake/display state, Shutdown/Restart/Sleep/Lock/Hibernate buttons |
-| `notifications` | `false` | Receive toast notifications from HA |
-| `system_sensors` | `false` | CPU, memory, battery, active window |
-| `audio_control` | `false` | Volume, mute, media key commands |
-| `steam_updates` | `false` | Detect when Steam games are updating |
-| `discord` | `false` | Discord voice channel join/leave buttons |
-| `gpu_sensor` | `false` | GPU utilization percentage |
-| `hwinfo_sensor` | `false` | Read hardware sensors from HWiNFO64 shared memory (Windows only, requires HWiNFO running). See below for setup. |
-| `network_sensor` | `false` | Network throughput (rx/tx bytes/sec) |
-| `disk_sensor` | `false` | Disk usage for configured `disk_sensor_paths` |
-| `uptime_sensor` | `false` | System uptime in seconds |
+The easiest way to manage them is the **pc-bridge settings app** (the tray/window
+UI): it lists every feature with its exact config key, the Home Assistant entity
+it reports as, its prerequisites, and a short "how it works" note, and writes the
+config for you. That in-app catalog is the source of truth for the full flag list.
+
+Defaults: the power and display controls (sleep/wake, shutdown, restart, sleep,
+lock, logoff, monitor on/off) are on; everything else (game detection, hardware
+and system sensors, audio, Discord, notifications, HWiNFO, etc.) is off until you
+enable it.
+
+Flags are granular, e.g. game detection is `running_game` / `game_catalog` /
+`steam_library` / `launch_game` / `close_game`, and audio is `volume` /
+`media_controls`. The older coarse keys (`game_detection`, `power_events`,
+`system_sensors`, `audio_control`) are still accepted and are migrated to the
+granular flags automatically on first load.
 
 ### Other Settings
 
