@@ -18,7 +18,7 @@ use super::{DISCOVERY_PREFIX, MqttClient};
 use crate::config::{Config, CustomCommand, CustomSensor};
 
 impl MqttClient {
-    pub(super) async fn register_discovery(&self, config: &Config) {
+    pub(crate) async fn register_discovery(&self, config: &Config) {
         // Fix #5: Use shared device reference instead of creating new one
         let device = &self.device;
 
@@ -646,7 +646,7 @@ impl MqttClient {
     /// unavailable). Idempotent: clearing an entity that was never registered
     /// is a harmless no-op (empty payload to an absent retained topic). Runs
     /// once at startup, right after `register_discovery`.
-    pub(super) async fn clear_disabled_entities(&self, config: &Config) {
+    pub(crate) async fn clear_disabled_entities(&self, config: &Config) {
         let mut cleared = 0usize;
         for (component, object_id, enabled) in feature_entities(config) {
             if enabled {

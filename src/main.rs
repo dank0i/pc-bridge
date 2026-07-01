@@ -249,6 +249,21 @@ async fn run_agent() -> anyhow::Result<()> {
     let command_executor = CommandExecutor::new(Arc::clone(&state), command_rx);
     handles.push(tokio::spawn(command_executor.run()));
 
+    // Re-publish HA discovery on every MQTT reconnect. A broker that restarts
+    // without persistence loses the retained config topics, which would orphan
+    // all entities until the agent restarts; re-registering restores them.
+    {
+        let state = Arc::clone(&state);
+        let mut reconnect_rx = state.mqtt.subscribe_reconnect();
+        handles.push(tokio::spawn(async move {
+            while reconnect_rx.recv().await.is_ok() {
+                let config = state.config.read().await;
+                state.mqtt.register_discovery(&config).await;
+                state.mqtt.clear_disabled_entities(&config).await;
+            }
+        }));
+    }
+
     // Conditionally start sensors based on features
     if config.features.running_game || config.features.game_catalog {
         let sensor = GameSensor::new(Arc::clone(&state));
