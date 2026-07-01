@@ -151,17 +151,26 @@ async fn run_agent() -> anyhow::Result<()> {
     // Check for first run or --setup flag
     let first_run = Config::is_first_run()?;
     if force_setup || first_run {
-        let existing_config = !first_run;
-
         if first_run {
-            info!("First run detected - launching setup wizard");
+            info!("First run detected - opening the settings window for setup");
         }
 
-        if let Some(setup_config) = setup::run_setup_wizard(existing_config) {
-            setup::save_setup_config(&setup_config)?;
-            info!("Setup complete! Configuration saved.");
-        } else {
-            error!("Setup cancelled by user");
+        // Prefer the GUI settings window (the same one used for ongoing edits):
+        // setup is a native form, not a console wizard. On a headless host where
+        // no window can be created, run_native fails, so fall back to the
+        // terminal wizard.
+        let gui_shown = ui::run().is_ok();
+        if !gui_shown {
+            info!("No display available - falling back to the terminal setup wizard");
+            if let Some(setup_config) = setup::run_setup_wizard(!first_run) {
+                setup::save_setup_config(&setup_config)?;
+            }
+        }
+
+        // The user must have saved a valid config in the window/wizard to
+        // continue; if none exists, setup was closed without finishing.
+        if Config::is_first_run()? {
+            error!("Setup was not completed - exiting");
             #[cfg(windows)]
             {
                 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONWARNING, MB_OK, MessageBoxW};
@@ -169,7 +178,7 @@ async fn run_agent() -> anyhow::Result<()> {
                 unsafe {
                     MessageBoxW(
                         None,
-                        w!("Setup was cancelled.\n\nPC Bridge will now exit."),
+                        w!("Setup was not completed.\n\nPC Bridge will now exit."),
                         w!("PC Bridge"),
                         MB_OK | MB_ICONWARNING,
                     );
@@ -177,6 +186,7 @@ async fn run_agent() -> anyhow::Result<()> {
             }
             return Ok(());
         }
+        info!("Setup complete! Configuration saved.");
     }
 
     // Load configuration (prompt interactively if credential can't be decrypted)

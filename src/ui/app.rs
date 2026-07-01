@@ -56,6 +56,9 @@ pub struct App {
     /// credential can't decrypt). While set, Save is disabled so we never
     /// overwrite the user's real config with blank defaults.
     load_error: Option<String>,
+    /// Set to the reason when the last Save failed (e.g. validation rejected the
+    /// device name), so the user sees why instead of a silent no-op.
+    save_error: Option<String>,
 }
 
 impl App {
@@ -109,6 +112,7 @@ impl App {
             library: games_to_library(&cfg.games),
             cfg,
             load_error,
+            save_error: None,
         }
     }
 
@@ -1326,11 +1330,24 @@ fn general_panel(app: &mut App, ui: &mut egui::Ui) {
                 );
                 ui.add_space(GAP);
             }
+            if let Some(err) = &app.save_error {
+                ui.label(RichText::new(format!("Could not save: {err}")).color(RED).size(13.0));
+                ui.add_space(GAP);
+            }
             let can_save = app.load_error.is_none();
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(can_save, |ui| {
                     if ui.button("Save").clicked() {
-                        app.connected = app.save().is_ok();
+                        match app.save() {
+                            Ok(()) => {
+                                app.connected = true;
+                                app.save_error = None;
+                            }
+                            Err(e) => {
+                                app.connected = false;
+                                app.save_error = Some(format!("{e:#}"));
+                            }
+                        }
                     }
                 });
                 if ui.button("Test connection").clicked() {
