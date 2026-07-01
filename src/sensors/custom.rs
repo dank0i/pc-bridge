@@ -128,11 +128,11 @@ impl CustomSensorManager {
                                 }
                             }
 
-                            // Schedule next poll at exact interval from due time
-                            next_due.insert(
-                                sensor.name.clone(),
-                                due + Duration::from_secs(sensor.interval_seconds.max(1)),
-                            );
+                            // Schedule next poll one interval out, but never in the
+                            // past: after a long suspend/resume, clamp forward to now
+                            // so we don't burst one poll per missed interval.
+                            let interval = Duration::from_secs(sensor.interval_seconds.max(1));
+                            next_due.insert(sensor.name.clone(), (due + interval).max(poll_now));
                         }
                     }
                 }
