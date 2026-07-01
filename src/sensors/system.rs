@@ -158,7 +158,12 @@ impl SystemSensor {
                     break;
                 }
                 // Hot-reload: pick up new cpu/memory intervals + enable flags.
-                Ok(()) = config_rx.recv() => {
+                r = config_rx.recv() => {
+                    // Reconcile on any generation, incl. Lagged (a burst of >channel
+                    // capacity generations must not leave us on a stale interval/flag).
+                    if !matches!(r, Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) {
+                        continue;
+                    }
                     let config = self.state.config.read().await;
                     let c = config.intervals.cpu.max(1);
                     let m = config.intervals.memory.max(1);
@@ -954,8 +959,19 @@ fn start_window_focus_monitor_linux(
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     use std::io::BufRead;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    std::thread::Builder::new()
+    // The xprop `-spy` reader blocks in `reader.lines()`; on an idle desktop no
+    // line arrives, so we can't poll a flag to stop it - we have to kill the
+    // child to unblock the pipe. Share a stop flag (for the poll fallback) and
+    // the child handle (so the async waiter below can kill it on shutdown).
+    let stop = Arc::new(AtomicBool::new(false));
+    let child_slot: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
+
+    let thread_stop = Arc::clone(&stop);
+    let thread_child = Arc::clone(&child_slot);
+    let spawned = std::thread::Builder::new()
         .name("window-focus-linux".into())
         .spawn(move || {
             // Try xprop -spy for event-driven detection - but ONLY on X11. On
@@ -975,30 +991,35 @@ fn start_window_focus_monitor_linux(
 
             match child {
                 Some(mut child) => {
+                    // Take stdout, then publish the child so the waiter can kill it.
                     let stdout = child.stdout.take().expect("piped stdout");
+                    *thread_child.lock().unwrap() = Some(child);
                     let reader = std::io::BufReader::new(stdout);
 
                     for line in reader.lines() {
-                        // Check for shutdown
-                        if shutdown_rx.try_recv().is_ok() {
-                            let _ = child.kill();
+                        if thread_stop.load(Ordering::Relaxed) {
                             break;
                         }
-
                         if line.is_ok() {
                             let _ = event_tx.blocking_send(SystemEvent::WindowFocusChanged);
                         }
                     }
-                    let _ = child.wait();
+                    // Reap whichever side didn't already take the child.
+                    if let Some(mut c) = thread_child.lock().unwrap().take() {
+                        let _ = c.wait();
+                    }
                 }
                 None => {
                     // Poll (Wayland session, or xprop unavailable).
                     debug!("Polling for window changes (Wayland or no xprop)");
                     let mut prev_title = get_active_window_title_blocking();
                     loop {
-                        std::thread::sleep(std::time::Duration::from_secs(2));
-                        if shutdown_rx.try_recv().is_ok() {
-                            break;
+                        // Sleep ~2s in slices so disable/shutdown is prompt.
+                        for _ in 0..20 {
+                            if thread_stop.load(Ordering::Relaxed) {
+                                return;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(100));
                         }
                         let title = get_active_window_title_blocking();
                         if title != prev_title {
@@ -1010,9 +1031,20 @@ fn start_window_focus_monitor_linux(
             }
         })
         .ok();
-    // Linux variants use polling against shutdown_rx.try_recv() inside the OS
-    // thread, so there's no separate async shutdown waiter to track.
-    None
+
+    // If the monitor thread didn't even spawn, there's nothing to wait on.
+    spawned?;
+
+    // Async waiter: on shutdown (feature-disable or global), set the stop flag
+    // and kill the xprop child so its blocking reader unblocks immediately.
+    Some(tokio::spawn(async move {
+        let _ = shutdown_rx.recv().await;
+        stop.store(true, Ordering::Relaxed);
+        if let Some(mut c) = child_slot.lock().unwrap().take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }))
 }
 
 /// Monitor battery changes on Linux by polling /sys/class/power_supply.
@@ -1030,11 +1062,13 @@ fn start_battery_monitor_linux(
             let mut prev_status = get_battery_status();
 
             loop {
-                // Poll every 30 seconds
-                std::thread::sleep(std::time::Duration::from_secs(30));
-
-                if shutdown_rx.try_recv().is_ok() {
-                    break;
+                // Poll every ~30s, but wake in slices so disable/shutdown is seen
+                // within ~1s instead of up to 30s.
+                for _ in 0..300 {
+                    if shutdown_rx.try_recv().is_ok() {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 }
 
                 let current = get_battery_status();

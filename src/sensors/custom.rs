@@ -91,8 +91,12 @@ impl CustomSensorManager {
                     debug!("Custom sensor manager shutting down");
                     break;
                 }
-                Ok(()) = config_rx.recv() => {
-                    // Hot-reload: re-snapshot config
+                r = config_rx.recv() => {
+                    // Hot-reload: re-snapshot config. Handle Lagged too, else a
+                    // burst of generations leaves us running stale custom sensors.
+                    if !matches!(r, Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) {
+                        continue;
+                    }
                     let config = self.state.config.read().await;
                     sensors.clone_from(&config.custom_sensors);
                     enabled = config.custom_sensors_enabled;

@@ -89,7 +89,12 @@ impl GameSensor {
                     break;
                 }
                 // Rebuild cached patterns when config changes
-                Ok(()) = config_rx.recv() => {
+                r = config_rx.recv() => {
+                    // Handle Lagged too so a burst of generations can't leave the
+                    // detector on a stale game pattern set.
+                    if !matches!(r, Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) {
+                        continue;
+                    }
                     let games = self.state.config.read().await.games.clone();
                     cached = CachedGamePatterns::build(&games);
                     self.publish_game_catalog(&games).await;

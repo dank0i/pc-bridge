@@ -116,7 +116,12 @@ fn listen() {
     // restart or a startup race (service started before the Wayland socket is
     // ready). Give up only if the compositor genuinely lacks the protocol.
     loop {
-        let retry = run_once();
+        // Catch a panic from inside wayland-rs dispatch: without this, a panic
+        // would kill the thread with `available`/`idle_since` latched (idle would
+        // then report an ever-climbing stale value) and the spawn-once guard would
+        // block a respawn. Catching it lets us reset state and reconnect instead.
+        let retry =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_once)).unwrap_or(true);
         set_available(false);
         if !retry {
             return; // ext-idle-notify not offered here; it won't appear later
@@ -130,7 +135,11 @@ fn listen() {
 /// compositor has no ext-idle-notify support (don't bother retrying).
 fn run_once() -> bool {
     let Ok(conn) = Connection::connect_to_env() else {
-        return true; // socket not ready yet - retry
+        // Retry only on an actual Wayland session (the socket may not be ready
+        // yet); on X11/headless it will never appear, so give up rather than spin
+        // every 5s forever. (The sole caller already gates on is_wayland_session,
+        // so this is belt-and-suspenders.)
+        return crate::linux_wayland::is_wayland_session();
     };
     let mut queue = conn.new_event_queue::<Listener>();
     let qh = queue.handle();
