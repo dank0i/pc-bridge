@@ -118,13 +118,16 @@ impl MqttClient {
 
         // Buffer must hold ALL messages queued before the event loop starts draining.
         // MQTT spec forbids sending packets before CONNACK, so nothing drains until
-        // after ConnAck. At that point, the buffer holds:
-        //   register_discovery()  → up to ~28 publishes (all features)
-        //   subscribe_commands()  → up to ~17 subscribes
-        //   ConnAck handler       → 1 availability publish + ~17 resubscribes
-        // Total worst case: ~63 messages. 128 gives headroom for custom entities
-        // registered shortly after new() returns. Too small = deadlock on current_thread.
-        let (client, mut eventloop) = AsyncClient::new(opts, 128);
+        // after ConnAck. At that point, the buffer holds register_discovery() +
+        // subscribe_commands() + clear_disabled_entities(). The teardown dominates:
+        // it emits 3 publishes per disabled sensor (config + state + attributes), and
+        // on Windows the disabled set includes the ~21 HWiNFO sensors, so an all-off
+        // Windows config reaches ~155-160 requests. If the broker isn't up at startup
+        // the event loop can't drain, so new() blocks on a full channel until it
+        // connects; too small a buffer would wedge that path uninterruptibly. 512
+        // leaves comfortable headroom over the worst case plus custom entities.
+        // (This path is Windows-heavy and not exercised by the non-Windows CI tests.)
+        let (client, mut eventloop) = AsyncClient::new(opts, 512);
 
         let device_name = config.device_name.clone();
         let device_id = config.device_id();

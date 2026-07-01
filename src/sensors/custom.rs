@@ -9,11 +9,6 @@ use crate::AppState;
 use crate::config::{CustomSensor, CustomSensorType};
 
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
-#[cfg(windows)]
-use std::process::Command;
-
-#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Case-insensitive ASCII substring search without allocation.
@@ -171,23 +166,25 @@ impl CustomSensorManager {
             .clone()
             .ok_or_else(|| "no script".to_string())?;
 
-        let result = tokio::task::spawn_blocking(move || {
-            let output = Command::new("powershell")
-                .args(["-NoProfile", "-Command", &script])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
+        // tokio::process with kill_on_drop: if this sensor is disabled mid-poll the
+        // supervisor drops this future, and the child is killed - a std::process
+        // child inside spawn_blocking would instead detach and leak a powershell.exe
+        // + a blocking-pool thread (stacking on every disable/enable of a hanging
+        // script). The timeout bounds a hanging script too: on timeout the future is
+        // dropped and kill_on_drop terminates the child.
+        let mut cmd = tokio::process::Command::new("powershell");
+        cmd.args(["-NoProfile", "-Command", &script])
+            .creation_flags(CREATE_NO_WINDOW)
+            .kill_on_drop(true);
 
-            match output {
-                Ok(out) if out.status.success() => {
-                    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-                }
-                Ok(out) => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
-                Err(e) => Err(e.to_string()),
+        match tokio::time::timeout(Duration::from_secs(15), cmd.output()).await {
+            Ok(Ok(out)) if out.status.success() => {
+                Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
             }
-        })
-        .await;
-
-        result.unwrap_or_else(|e| Err(e.to_string()))
+            Ok(Ok(out)) => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(_) => Err("custom command timed out".to_string()),
+        }
     }
 
     #[cfg(unix)]

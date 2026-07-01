@@ -613,7 +613,7 @@ fn side_rail(app: &mut App, ctx: &egui::Context) {
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                 ui.add_space(TIGHT);
                 ui.label(
-                    RichText::new("v2.3.1  ·  prototype")
+                    RichText::new(concat!("v", env!("CARGO_PKG_VERSION"), "  ·  prototype"))
                         .size(11.0)
                         .color(Color32::from_gray(0x44)),
                 );
@@ -1521,11 +1521,15 @@ fn general_panel(app: &mut App, ui: &mut egui::Ui) {
             labeled(ui, "Integration", |ui| {
                 ui.selectable_value(&mut app.transport, Transport::Mqtt, "MQTT");
                 // Native (HACS) transport isn't implemented yet (Config has no
-                // transport/token field). Show it disabled rather than let a user
-                // pick it + paste a token that Save would silently throw away.
+                // transport/token field). Show it disabled + labelled unsupported
+                // rather than let a user pick it + paste a token Save would discard.
                 ui.add_enabled_ui(false, |ui| {
-                    ui.selectable_value(&mut app.transport, Transport::Native, "Native (HACS) soon")
-                        .on_disabled_hover_text("Native HACS integration is coming soon");
+                    ui.selectable_value(
+                        &mut app.transport,
+                        Transport::Native,
+                        "Native (HACS) (unsupported)",
+                    )
+                    .on_disabled_hover_text("Native HACS integration is not supported yet");
                 });
             });
             match app.transport {
@@ -1647,7 +1651,11 @@ fn general_panel(app: &mut App, ui: &mut egui::Ui) {
                 let _ = ui.button("Open config folder");
                 let _ = ui.button("Check for updates");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new("pc-bridge v2.3.1").size(12.0).color(GREY));
+                    ui.label(
+                        RichText::new(concat!("pc-bridge v", env!("CARGO_PKG_VERSION")))
+                            .size(12.0)
+                            .color(GREY),
+                    );
                 });
             });
         });

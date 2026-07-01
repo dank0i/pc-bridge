@@ -1,6 +1,6 @@
 [package]
 name = "pc-bridge"
-version = "2.3.1"
+version = "3.0.0"
 edition = "2024"
 authors = ["dank0i"]
 description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
@@ -17,7 +17,7 @@ default = []
 
 [dependencies]
 # Async runtime
-tokio = { version = "1", features = ["rt", "macros", "sync", "time", "signal"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "signal", "process"] }
 
 # MQTT (native TLS via OS certificate store - same backend as ureq, zero extra binary cost)
 rumqttc = { version = "0.25", default-features = false, features = ["use-native-tls"] }

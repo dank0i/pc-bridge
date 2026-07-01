@@ -117,6 +117,25 @@ impl PowerEventListener {
             }
         }
 
+        // Independent shutdown waiter: sets the stop flag and kills+reaps the gdbus
+        // child on shutdown. It's a SEPARATE task (not the run() shutdown arm) so it
+        // still fires if the supervisor aborts run() while it's parked in the Sleep
+        // arm's sync-publish await - otherwise that abort would skip cleanup and leak
+        // the two threads + the gdbus child (and re-enable would stack a second set).
+        {
+            let mut wait_rx = shutdown.subscribe();
+            let waiter_stop = Arc::clone(&stop);
+            let waiter_child = Arc::clone(&gdbus_child);
+            tokio::spawn(async move {
+                let _ = wait_rx.recv().await;
+                waiter_stop.store(true, Ordering::Relaxed);
+                if let Some(mut c) = waiter_child.lock().unwrap().take() {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
+            });
+        }
+
         info!("Power event listener started (D-Bus monitor mode)");
 
         loop {
@@ -124,16 +143,9 @@ impl PowerEventListener {
                 biased;
                 _ = shutdown_rx.recv() => {
                     debug!("Power listener shutting down");
-                    // Stop the blocking threads: set the flag and kill the in-flight
-                    // gdbus child so its reader unblocks and the thread exits. Wait()
-                    // to reap it: we took it out of the slot, so the monitor thread's
-                    // own reaper will see None - without this the killed gdbus lingers
-                    // as a zombie on every runtime disable.
+                    // The independent waiter above sets stop + reaps the child; just
+                    // exit the loop here (idempotent if the waiter already ran).
                     stop.store(true, Ordering::Relaxed);
-                    if let Some(mut c) = gdbus_child.lock().unwrap().take() {
-                        let _ = c.kill();
-                        let _ = c.wait();
-                    }
                     break;
                 }
                 Some(event) = event_rx.recv() => {
