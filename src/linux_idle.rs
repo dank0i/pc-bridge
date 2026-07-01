@@ -116,10 +116,13 @@ fn listen() {
     // restart or a startup race (service started before the Wayland socket is
     // ready). Give up only if the compositor genuinely lacks the protocol.
     loop {
-        // Catch a panic from inside wayland-rs dispatch: without this, a panic
-        // would kill the thread with `available`/`idle_since` latched (idle would
-        // then report an ever-climbing stale value) and the spawn-once guard would
-        // block a respawn. Catching it lets us reset state and reconnect instead.
+        // Catch a panic from inside wayland-rs dispatch so it doesn't kill this
+        // thread with `available`/`idle_since` latched (which would make idle report
+        // an ever-climbing stale value with no respawn). NOTE: release builds set
+        // panic = "abort", so there this can't catch - a dispatch panic aborts the
+        // whole process instead (which also avoids the latch, just less gracefully).
+        // The Dispatch impls here are trivial and protocol errors come back as Err
+        // (handled by the reconnect loop, not a panic), so a panic is very unlikely.
         let retry =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_once)).unwrap_or(true);
         set_available(false);

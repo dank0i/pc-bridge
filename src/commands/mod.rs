@@ -74,16 +74,18 @@ pub(crate) fn is_native_command(name: &str) -> bool {
 /// resolver consumes (on Windows that is the env-expanded payload).
 pub(crate) fn is_arbitrary_launch(payload: &str) -> bool {
     match payload.split_once(':') {
-        Some((scheme, rest)) => match scheme.trim().to_ascii_lowercase().as_str() {
+        // MUST use Unicode to_lowercase (NOT to_ascii_lowercase): the resolver
+        // (expand_launcher_shortcut) lowercases with to_lowercase, and e.g. U+212A
+        // KELVIN SIGN lowercases to ASCII 'k' under Unicode but not ASCII. If the
+        // gate used ascii-only, "ln\u{212A}:..." would evade this check yet resolve
+        // to "lnk:" and launch, bypassing allow_raw_commands. Match the resolver.
+        Some((scheme, rest)) => match scheme.trim().to_lowercase().as_str() {
             "exe" | "lnk" => true,
             // url:discord://... is the DiscordJoin channel deep-link (a feature
             // gated by f.discord), not an arbitrary program/URL launch. Any other
             // url: target is arbitrary. Metacharacters are still validated by
             // is_safe_url downstream regardless.
-            "url" => !rest
-                .trim_start()
-                .to_ascii_lowercase()
-                .starts_with("discord://"),
+            "url" => !rest.trim_start().to_lowercase().starts_with("discord://"),
             _ => false,
         },
         None => false,
@@ -117,7 +119,10 @@ pub(crate) fn global_scheme_blocked(config: &crate::config::Config, payload: &st
     let Some((scheme, target)) = payload.split_once(':') else {
         return false;
     };
-    match scheme.trim().to_ascii_lowercase().as_str() {
+    // Unicode to_lowercase to match the resolver exactly (see is_arbitrary_launch):
+    // ascii-only would let "\u{212A}ill:proc" (Kelvin K) evade the close gate while
+    // still resolving to "kill:".
+    match scheme.trim().to_lowercase().as_str() {
         "steam" | "epic" | "update" | "validate" => {
             !config.allow_global_launch && !is_configured_launch(config, payload)
         }
@@ -154,6 +159,25 @@ mod tests {
         assert!(global_scheme_blocked(&cfg, "steam:730")); // now blocked
         cfg.allow_global_close = true;
         assert!(!global_scheme_blocked(&cfg, "kill:notepad")); // now allowed
+    }
+
+    #[test]
+    fn test_unicode_scheme_cannot_evade_gates() {
+        // U+212A KELVIN SIGN lowercases to ASCII 'k' under Unicode to_lowercase
+        // (what the resolver uses) but not to_ascii_lowercase. The gates must catch
+        // it, or "\u{212A}ill:" / "ln\u{212A}:" would slip past and still execute.
+        let cfg = crate::config::Config::default(); // global_close = false
+        assert!(
+            global_scheme_blocked(&cfg, "\u{212A}ill:notepad"),
+            "Kelvin-K kill: must be gated like kill:"
+        );
+        assert!(
+            is_arbitrary_launch("ln\u{212A}:C:/x.lnk"),
+            "Kelvin-K lnk: must be treated as an arbitrary launch"
+        );
+        // Sanity: the plain ASCII forms behave identically.
+        assert!(global_scheme_blocked(&cfg, "kill:notepad"));
+        assert!(is_arbitrary_launch("lnk:C:/x.lnk"));
     }
 
     #[test]

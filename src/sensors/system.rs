@@ -1001,6 +1001,16 @@ fn start_window_focus_monitor_linux(
                     // Take stdout, then publish the child so the waiter can kill it.
                     let stdout = child.stdout.take().expect("piped stdout");
                     *thread_child.lock().unwrap() = Some(child);
+                    // Close the race where disable fired between spawn and store:
+                    // the waiter would have taken None, and the reader could block
+                    // forever on an idle desktop. Re-check and self-reap.
+                    if thread_stop.load(Ordering::Relaxed) {
+                        if let Some(mut c) = thread_child.lock().unwrap().take() {
+                            let _ = c.kill();
+                            let _ = c.wait();
+                        }
+                        return;
+                    }
                     let reader = std::io::BufReader::new(stdout);
 
                     for line in reader.lines() {

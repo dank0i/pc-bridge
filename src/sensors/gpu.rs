@@ -71,8 +71,9 @@ fn get_gpu_usage() -> String {
     // The query handle is persisted across calls (PDH needs two samples to
     // compute a rate).
     use windows::Win32::System::Performance::{
-        PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PdhAddEnglishCounterW,
-        PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW, PdhOpenQueryW,
+        PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE,
+        PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
+        PdhOpenQueryW,
     };
 
     // PDH "more data" - returned by the array getter's first (sizing) call.
@@ -189,20 +190,57 @@ fn get_gpu_usage() -> String {
         }
 
         let items = std::slice::from_raw_parts(buffer.as_ptr(), item_count as usize);
-        let mut sum = 0.0_f64;
-        let mut any_valid = false;
+
+        // Group instances by engine node/adapter (the szName minus its per-process
+        // "pid_<n>_" prefix), SUM the per-process utilizations within a node (they
+        // are non-overlapping time slices on one serialized engine), then take the
+        // MAX across nodes/adapters. Plain SUM-of-everything would double-count when
+        // the wildcard matches more than one 3D engine node OR more than one adapter
+        // - e.g. a Parsec virtual display (distinct LUID) summed with the real GPU -
+        // and could pin the reading at 100 under moderate load.
+        //
+        // Accept NEW_DATA as well as VALID_DATA: PDH returns NEW_DATA on the first
+        // computed data point (and, for some counters, on every point), so treating
+        // only VALID_DATA as usable could zero the sensor out.
+        let mut per_node: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
         for item in items {
-            if item.FmtValue.CStatus == PDH_CSTATUS_VALID_DATA {
-                any_valid = true;
-                sum += item.FmtValue.Anonymous.doubleValue;
+            if !matches!(
+                item.FmtValue.CStatus,
+                PDH_CSTATUS_VALID_DATA | PDH_CSTATUS_NEW_DATA
+            ) {
+                continue;
             }
+            let v = item.FmtValue.Anonymous.doubleValue;
+            if !v.is_finite() {
+                continue; // guard against a NaN slipping through to HA as "NaN"
+            }
+            let key = engine_node_key(&item.szName.to_string().unwrap_or_default());
+            *per_node.entry(key).or_insert(0.0) += v;
         }
-        if any_valid {
-            format!("{:.1}", sum.clamp(0.0, 100.0))
+
+        // Empty (all invalid) -> NaN from the fold -> "unavailable".
+        let usage = per_node.values().copied().fold(f64::NAN, f64::max);
+        if usage.is_finite() {
+            format!("{:.1}", usage.clamp(0.0, 100.0))
         } else {
             "unavailable".to_string()
         }
     }
+}
+
+/// Collapse a `\GPU Engine(...)` instance name to its node/adapter identity by
+/// stripping the leading `pid_<n>_` so per-process instances on the same engine
+/// group together. Robust to unexpected formats: falls back to the whole name (so
+/// each instance becomes its own group and the caller MAXes them, never summing).
+#[cfg(windows)]
+fn engine_node_key(name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix("pid_")
+        && let Some(us) = rest.find('_')
+    {
+        return rest[us + 1..].to_string();
+    }
+    lower
 }
 
 #[cfg(unix)]

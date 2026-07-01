@@ -125,10 +125,14 @@ impl PowerEventListener {
                 _ = shutdown_rx.recv() => {
                     debug!("Power listener shutting down");
                     // Stop the blocking threads: set the flag and kill the in-flight
-                    // gdbus child so its reader unblocks and the thread exits.
+                    // gdbus child so its reader unblocks and the thread exits. Wait()
+                    // to reap it: we took it out of the slot, so the monitor thread's
+                    // own reaper will see None - without this the killed gdbus lingers
+                    // as a zombie on every runtime disable.
                     stop.store(true, Ordering::Relaxed);
                     if let Some(mut c) = gdbus_child.lock().unwrap().take() {
                         let _ = c.kill();
+                        let _ = c.wait();
                     }
                     break;
                 }
@@ -242,6 +246,17 @@ impl PowerEventListener {
             // Publish the child so run() can kill it on shutdown (unblocks the
             // reader below). We keep ownership via the shared slot.
             *child_slot.lock().unwrap() = Some(child);
+
+            // Close the race where disable fired between spawn and store: run()
+            // would have taken None and set stop, and the reader below could block
+            // forever. Re-check and self-reap.
+            if stop.load(Ordering::Relaxed) {
+                if let Some(mut c) = child_slot.lock().unwrap().take() {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
+                return;
+            }
 
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
