@@ -40,13 +40,26 @@ Debt concentrates in three seams:
 
 ## Progress log (fix pass)
 
-- ☑ **Tier 0 complete** (0.1–0.7): UI Save load-guard; group masters persist; native commands gated on feature flags; `pkill -x` + `.exe`-exact CloseGame matcher; iterative appinfo parse; atomic config/credential writes; fatal-on-DPAPI-failure.
-- ☑ **Tier 1**: 1.1 (idempotent process add), 1.2 (try_send dispatch), 1.3 (Linux timeout kills the tree), 1.10 (credential 0600-atomic), 1.13 (preemptible backoff).
-- ☑ **Tier 2**: 2.8 (device_name topic sanitize), 2.12 (checked notify exit codes).
-- ⏸ **Deferred with reason** (see notes inline): 1.5 (env-expansion, local-only, per-variant), 1.6 (hwinfo slice, blind UB), 1.7 (permit restructure), 1.8/1.12 (fold into Tier 3), 1.9 (updater signing — needs keypair + CI step), 1.11 (blind binary-offset arithmetic, drops last game only).
-- ⏳ **Remaining**: most of Tier 2, all of Tier 3, README→UI + `model.rs` mockup, phantom UI toggles (2.14 / 0.2 tail).
+- ☑ **Tier 0 complete** (0.1–0.7).
+- ☑ **Tier 1**: 1.1 (idempotent process add), 1.2 (try_send dispatch), 1.3 (Linux timeout kills the tree), 1.5 (env-expand before validation, Windows), 1.10 (credential 0600-atomic), 1.13 (preemptible backoff).
+- ☑ **Tier 2**: 2.1 (Wayland media keys via playerctl), 2.3 (reap Linux display subprocs + offload), 2.4 (per-thread audio cache generation), 2.6a/2.6c (updater cleanup name + arg forwarding), 2.7 (setup validates before save), 2.8 (device_name sanitize), 2.12 (checked notify exits), 2.13 (network elapsed-rate, idle_linux Skip, idle Windows reconnect, gpu stale comment), 2.14 (real Test-connection, safe header).
 
-Note: 0.2's non-dangerous phantom toggles (tray/autostart/confirm/ha_token) are parked for the UI pass (wire or remove, with visual verification).
+### ⏸ Deferred with reason
+- **1.6** hwinfo slice length — blind UB territory (untrusted header vs real mapping); needs `VirtualQuery` + a Windows box to verify.
+- **1.7** Steam-launch permit starvation — needs a permit-handling restructure (wait outside the rate-limit).
+- **1.8 / 1.12** — fold into the Tier 3 registry/dedup (games join-split; re-publish discovery on reconnect).
+- **1.9** updater signing — verification is code, but it needs a signing keypair + a CI signing step (your infra).
+- **1.11** appinfo over-read — blind binary-offset arithmetic (both reviewers hedged); only drops the last game.
+- **2.5** ws/wss — decision: wire the WebSocket transport (rumqttc feature) or reject the scheme.
+- **2.6b** beta channel prerelease ordering — needs real semver precedence (niche: only affects beta→beta).
+- **2.9** README stale keys + `deny_unknown_fields` — README part folds into the UI migration; `deny_unknown_fields` risks rejecting valid legacy configs, needs care.
+- **2.10** steam `is_updating` bitmask — needs the real Steam StateFlags verified against a live install.
+- **2.11** custom-sensor errors in value string — needs a per-sensor availability topic (moderate refactor).
+
+### ⏳ Remaining big-ticket
+- **Tier 3** — the structural registry refactor (root cause of the drift bugs). Large, touches everything, mostly Windows so CI-compile-verified only.
+- **README→UI migration + `model.rs` mockup fix + phantom toggles (0.2 tail / 2.14)** — needs your eyes on the visuals.
+- **hwinfo offload / flag-macro** (original deferrals).
 
 ---
 
