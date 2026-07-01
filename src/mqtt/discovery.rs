@@ -112,8 +112,7 @@ impl MqttClient {
                 .await;
         }
 
-        // Session lock/unlock sensor (Windows-only producer via WTS).
-        #[cfg(windows)]
+        // Session lock/unlock sensor (WTS on Windows, logind on Linux).
         if config.features.session_state {
             self.register_sensor(
                 device,
@@ -126,8 +125,7 @@ impl MqttClient {
             .await;
         }
 
-        // Default audio output device sensor (Windows-only producer via WASAPI).
-        #[cfg(windows)]
+        // Default audio output device sensor (WASAPI on Windows, pactl on Linux).
         if config.features.audio_device {
             self.register_sensor(
                 device,
@@ -140,8 +138,7 @@ impl MqttClient {
             .await;
         }
 
-        // Mic / webcam in-use sensors (Windows-only producer via consent store).
-        #[cfg(windows)]
+        // Mic / webcam in-use sensors (consent store on Windows, /proc on Linux).
         if config.features.mic {
             self.register_sensor(
                 device,
@@ -153,14 +150,12 @@ impl MqttClient {
             )
             .await;
         }
-        #[cfg(windows)]
         if config.features.webcam {
             self.register_sensor(device, "webcam", "Webcam In Use", "mdi:webcam", None, None)
                 .await;
         }
 
-        // Now playing (media session) sensor (Windows-only producer via GSMTC).
-        #[cfg(windows)]
+        // Now playing (media session) sensor (GSMTC on Windows, playerctl on Linux).
         if config.features.now_playing {
             self.register_sensor(
                 device,
@@ -1042,6 +1037,12 @@ fn feature_entities(config: &Config) -> Vec<(&'static str, &'static str, bool)> 
         ("sensor", "disk_usage", f.disk_sensor),
         ("sensor", "system_uptime", f.uptime_sensor),
         ("sensor", "volume_level", f.volume),
+        // Cross-platform sensors with per-OS producers.
+        ("sensor", "session", f.session_state),
+        ("sensor", "audio_device", f.audio_device),
+        ("sensor", "mic", f.mic),
+        ("sensor", "webcam", f.webcam),
+        ("sensor", "now_playing", f.now_playing),
         // Buttons
         ("button", "Launch", f.launch_game),
         ("button", "CloseGame", f.close_game),
@@ -1064,17 +1065,10 @@ fn feature_entities(config: &Config) -> Vec<(&'static str, &'static str, bool)> 
         ("button", "MediaStop", f.media_controls),
         ("button", "VolumeMute", f.media_controls),
     ];
+    // HWiNFO sensors have a Windows-only producer, so they only exist here.
     #[cfg(windows)]
-    {
-        // These sensors have Windows-only producers, so they only exist here.
-        entities.push(("sensor", "session", f.session_state));
-        entities.push(("sensor", "audio_device", f.audio_device));
-        entities.push(("sensor", "mic", f.mic));
-        entities.push(("sensor", "webcam", f.webcam));
-        entities.push(("sensor", "now_playing", f.now_playing));
-        for oid in HWINFO_ENTITY_IDS {
-            entities.push(("sensor", oid, f.hwinfo_sensor));
-        }
+    for oid in HWINFO_ENTITY_IDS {
+        entities.push(("sensor", oid, f.hwinfo_sensor));
     }
     entities
 }

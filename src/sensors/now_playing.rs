@@ -1,8 +1,9 @@
-//! Now Playing (media session) sensor (Windows).
+//! Now Playing (media session) sensor.
 //!
-//! Reads the active System Media Transport Controls session (the same source
-//! that drives the Windows media flyout) and publishes "playing: Artist -
-//! Title" / "paused: ..." / "idle" to the `now_playing` sensor.
+//! Publishes "playing: Artist - Title" / "paused: ..." / "idle" to the
+//! `now_playing` sensor.
+//! - Windows: System Media Transport Controls (GSMTC).
+//! - Linux: MPRIS via `playerctl`.
 
 use log::{debug, info};
 use std::sync::Arc;
@@ -39,9 +40,9 @@ impl NowPlayingSensor {
                     prev.clear();
                 }
                 _ = tick.tick() => {
-                    // The WinRT calls block on async .get(), so run them off the
-                    // async runtime on a blocking thread.
-                    let now = tokio::task::spawn_blocking(current_now_playing)
+                    // WinRT .get() and the Linux subprocess both block, so run
+                    // them off the single-threaded async runtime.
+                    let now = tokio::task::spawn_blocking(read_now_playing)
                         .await
                         .unwrap_or_else(|_| "idle".to_string());
                     if now != prev {
@@ -59,7 +60,8 @@ impl NowPlayingSensor {
 
 /// Query the current media session. Returns "idle" when nothing is playing or
 /// the media APIs are unavailable.
-fn current_now_playing() -> String {
+#[cfg(windows)]
+fn read_now_playing() -> String {
     use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager as Manager;
     use windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status;
     use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
@@ -95,4 +97,30 @@ fn current_now_playing() -> String {
     };
 
     inner().unwrap_or_else(|_| "idle".to_string())
+}
+
+/// MPRIS via `playerctl`. Returns "idle" when no player is active.
+#[cfg(unix)]
+fn read_now_playing() -> String {
+    use std::process::Command;
+    let out = Command::new("playerctl")
+        .args([
+            "metadata",
+            "--format",
+            "{{lc(status)}}: {{artist}} - {{title}}",
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            // A player with no metadata yields e.g. "playing:  - "; treat blank
+            // artist+title as idle.
+            if s.is_empty() || s.ends_with(':') || s.ends_with(": - ") {
+                "idle".to_string()
+            } else {
+                s
+            }
+        }
+        _ => "idle".to_string(),
+    }
 }

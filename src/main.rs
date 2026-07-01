@@ -277,7 +277,6 @@ async fn run_agent() -> anyhow::Result<()> {
         info!("  System sensors enabled (CPU/memory polled, battery/active_window event-driven)");
     }
 
-    #[cfg(windows)]
     if config.features.session_state {
         use crate::sensors::SessionSensor;
         let sensor = SessionSensor::new(Arc::clone(&state));
@@ -285,7 +284,6 @@ async fn run_agent() -> anyhow::Result<()> {
         info!("  Session lock/unlock sensor enabled");
     }
 
-    #[cfg(windows)]
     if config.features.audio_device {
         use crate::sensors::AudioDeviceSensor;
         let sensor = AudioDeviceSensor::new(Arc::clone(&state));
@@ -293,7 +291,6 @@ async fn run_agent() -> anyhow::Result<()> {
         info!("  Default audio device sensor enabled");
     }
 
-    #[cfg(windows)]
     if config.features.mic || config.features.webcam {
         use crate::sensors::CaptureSensor;
         let sensor = CaptureSensor::new(Arc::clone(&state));
@@ -301,7 +298,6 @@ async fn run_agent() -> anyhow::Result<()> {
         info!("  Mic/webcam in-use sensor enabled");
     }
 
-    #[cfg(windows)]
     if config.features.now_playing {
         use crate::sensors::NowPlayingSensor;
         let sensor = NowPlayingSensor::new(Arc::clone(&state));
@@ -405,7 +401,6 @@ async fn run_agent() -> anyhow::Result<()> {
     if config.features.display_state {
         state.mqtt.publish_sensor_retained("display", "on").await;
     }
-    #[cfg(windows)]
     if config.features.session_state {
         state
             .mqtt

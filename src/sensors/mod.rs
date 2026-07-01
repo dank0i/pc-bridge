@@ -1,14 +1,11 @@
 //! Sensor modules for game detection, idle tracking, and system monitoring
 
-#[cfg(windows)]
 mod audio_device;
-#[cfg(windows)]
 mod capture;
 mod custom;
 mod disk;
 mod gpu;
 mod network;
-#[cfg(windows)]
 mod now_playing;
 mod system;
 mod uptime;
@@ -29,16 +26,15 @@ mod steam;
 mod games_linux;
 #[cfg(unix)]
 mod idle_linux;
+#[cfg(unix)]
+mod session_linux;
 
-#[cfg(windows)]
 pub use audio_device::AudioDeviceSensor;
-#[cfg(windows)]
 pub use capture::CaptureSensor;
 pub use custom::CustomSensorManager;
 pub use disk::DiskSensor;
 pub use gpu::GpuSensor;
 pub use network::NetworkSensor;
-#[cfg(windows)]
 pub use now_playing::NowPlayingSensor;
 pub use system::SystemSensor;
 pub use uptime::UptimeSensor;
@@ -59,3 +55,5 @@ pub use games_linux::GameSensor;
 pub(crate) use games_linux::current_process_names;
 #[cfg(unix)]
 pub use idle_linux::IdleSensor;
+#[cfg(unix)]
+pub use session_linux::SessionSensor;

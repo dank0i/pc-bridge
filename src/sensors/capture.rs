@@ -1,15 +1,15 @@
-//! Microphone / webcam in-use sensors (Windows).
+//! Microphone / webcam in-use sensors.
 //!
-//! Polls the Windows CapabilityAccessManager consent store. Each app that has
-//! used the mic/camera has a `LastUsedTimeStop` value; when it is 0 the app is
-//! using the device right now. Publishes "on"/"off" to the `mic` and `webcam`
-//! sensors when the aggregate in-use state changes.
+//! Publishes "on"/"off" to the `mic` and `webcam` sensors when the aggregate
+//! in-use state changes.
+//! - Windows: CapabilityAccessManager consent store (`LastUsedTimeStop == 0`).
+//! - Linux: best-effort - a process holding `/dev/video*` (webcam) or an ALSA
+//!   capture substream in the RUNNING state (mic). PipeWire setups that keep the
+//!   device open may over-report the mic; treat Linux mic as approximate.
 
 use log::{debug, info};
 use std::sync::Arc;
 use tokio::time::{Duration, MissedTickBehavior, interval};
-use winreg::RegKey;
-use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
 
 use crate::AppState;
 
@@ -49,19 +49,25 @@ impl CaptureSensor {
                     prev_cam = None;
                 }
                 _ = tick.tick() => {
-                    if mic {
-                        let on = capability_in_use("microphone");
-                        if prev_mic != Some(on) {
-                            self.state.mqtt.publish_sensor_retained("mic", bool_state(on)).await;
-                            prev_mic = Some(on);
-                        }
+                    // Scans block (registry on Windows, /proc on Linux), so run
+                    // them off the single-threaded async runtime.
+                    let (m, w) = tokio::task::spawn_blocking(move || {
+                        (mic.then(mic_in_use), webcam.then(webcam_in_use))
+                    })
+                    .await
+                    .unwrap_or((None, None));
+
+                    if let Some(on) = m
+                        && prev_mic != Some(on)
+                    {
+                        self.state.mqtt.publish_sensor_retained("mic", bool_state(on)).await;
+                        prev_mic = Some(on);
                     }
-                    if webcam {
-                        let on = capability_in_use("webcam");
-                        if prev_cam != Some(on) {
-                            self.state.mqtt.publish_sensor_retained("webcam", bool_state(on)).await;
-                            prev_cam = Some(on);
-                        }
+                    if let Some(on) = w
+                        && prev_cam != Some(on)
+                    {
+                        self.state.mqtt.publish_sensor_retained("webcam", bool_state(on)).await;
+                        prev_cam = Some(on);
                     }
                 }
             }
@@ -73,8 +79,24 @@ fn bool_state(on: bool) -> &'static str {
     if on { "on" } else { "off" }
 }
 
+// ── Windows: consent store ─────────────────────────────────────────────────
+
+#[cfg(windows)]
+fn mic_in_use() -> bool {
+    capability_in_use("microphone")
+}
+
+#[cfg(windows)]
+fn webcam_in_use() -> bool {
+    capability_in_use("webcam")
+}
+
 /// True if any app currently holds the given capability ("microphone"/"webcam").
+#[cfg(windows)]
 fn capability_in_use(capability: &str) -> bool {
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
+
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let path = format!(
         r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\{capability}"
@@ -103,8 +125,73 @@ fn capability_in_use(capability: &str) -> bool {
 }
 
 /// `LastUsedTimeStop == 0` means the capability is in use at this moment.
-fn key_in_use(key: &RegKey) -> bool {
+#[cfg(windows)]
+fn key_in_use(key: &winreg::RegKey) -> bool {
     key.get_value::<u64, _>("LastUsedTimeStop")
         .map(|v| v == 0)
         .unwrap_or(false)
+}
+
+// ── Linux: /proc heuristics ────────────────────────────────────────────────
+
+#[cfg(unix)]
+fn webcam_in_use() -> bool {
+    // A webcam is in use if any process has a /dev/video* device open.
+    proc_has_open_path("/dev/video")
+}
+
+#[cfg(unix)]
+fn mic_in_use() -> bool {
+    // ALSA capture substreams report "RUNNING" in their status file while
+    // recording. Approximate on PipeWire, which may keep the device open.
+    use std::fs;
+    let Ok(cards) = fs::read_dir("/proc/asound") else {
+        return false;
+    };
+    for card in cards.flatten() {
+        let Ok(pcms) = fs::read_dir(card.path()) else {
+            continue;
+        };
+        for pcm in pcms.flatten() {
+            let name = pcm.file_name();
+            let name = name.to_string_lossy();
+            // Capture PCM directories end in 'c' (e.g. "pcm0c").
+            if !(name.starts_with("pcm") && name.ends_with('c')) {
+                continue;
+            }
+            let Ok(subs) = fs::read_dir(pcm.path()) else {
+                continue;
+            };
+            for sub in subs.flatten() {
+                if let Ok(content) = fs::read_to_string(sub.path().join("status"))
+                    && content.contains("RUNNING")
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// True if any process has an open file descriptor whose target starts with
+/// `prefix` (e.g. "/dev/video").
+#[cfg(unix)]
+fn proc_has_open_path(prefix: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            if let Ok(target) = std::fs::read_link(fd.path())
+                && target.to_string_lossy().starts_with(prefix)
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
