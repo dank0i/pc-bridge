@@ -75,7 +75,7 @@ impl App {
             }
         };
         let (mqtt_host, mqtt_port) = split_broker(&cfg.mqtt.broker);
-        let mut features = registry();
+        let mut features = registry(&cfg.device_id());
         for f in &mut features {
             if let Some(on) = flag_get(&cfg.features, f.id) {
                 f.enabled = on;
@@ -1017,7 +1017,7 @@ fn feature_row(
                 ui.add_space(GAP);
                 ui.separator();
                 ui.add_space(TIGHT);
-                kv(ui, "Reports as", f.entity, ACCENT, true);
+                kv(ui, "Reports as", &f.entity, ACCENT, true);
                 if !f.requires.is_empty() {
                     kv(ui, "Requires", f.requires, AMBER, false);
                 }
@@ -1063,9 +1063,7 @@ fn feature_row(
                         ui.horizontal(|ui| {
                             ui.add_sized(
                                 [110.0, 18.0],
-                                egui::Label::new(
-                                    RichText::new("Now reporting").size(12.0).color(GREY),
-                                ),
+                                egui::Label::new(RichText::new("Example").size(12.0).color(GREY)),
                             );
                             ui.label(RichText::new(&f.value).monospace().color(if effective {
                                 ACCENT

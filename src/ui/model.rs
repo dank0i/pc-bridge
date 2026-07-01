@@ -106,7 +106,7 @@ pub struct Feature {
     /// Poll interval in seconds. 0 means the sensor is event-driven (no polling).
     pub interval: u32,
     /// HA entity id / MQTT object it publishes as.
-    pub entity: &'static str,
+    pub entity: String,
     /// A real, non-obvious prerequisite ("" = none). Drives the SETUP badge.
     pub requires: &'static str,
     /// One-line "how it works" ("" = obvious).
@@ -139,7 +139,7 @@ fn s(
         status,
         value: value.to_owned(),
         interval,
-        entity,
+        entity: entity.to_owned(),
         requires,
         method,
         expanded: false,
@@ -170,18 +170,21 @@ fn a(
         status: Status::Running,
         value: value.to_owned(),
         interval: 0,
-        entity,
+        entity: entity.to_owned(),
         requires,
         method,
         expanded: false,
     }
 }
 
-pub fn registry() -> Vec<Feature> {
+pub fn registry(device_id: &str) -> Vec<Feature> {
     use Group::{Audio, Custom, Games, Hardware, Notifications, Power, Presence};
     use Status::{Error, Running};
     // interval 0 = event-driven; >0 = polled every N seconds.
-    vec![
+    // The entity strings below use "dank0i_pc" as a placeholder device id; it is
+    // rewritten to the configured device below so the UI shows the user's real
+    // HA entity ids (unique_id = "{device_id}_{name}" in discovery).
+    let mut features = vec![
         // Games
         s(
             "running_game",
@@ -619,7 +622,13 @@ pub fn registry() -> Vec<Feature> {
             "HWiNFO Bridge enabled",
             "User-defined from a HWiNFO reading",
         ),
-    ]
+    ];
+    if device_id != "dank0i_pc" {
+        for f in &mut features {
+            f.entity = f.entity.replace("dank0i_pc", device_id);
+        }
+    }
+    features
 }
 
 // ---- game library ----
