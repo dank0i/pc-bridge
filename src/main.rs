@@ -13,6 +13,7 @@ mod audio;
 mod commands;
 mod config;
 mod credential;
+mod fsutil;
 mod hwinfo;
 mod logging;
 mod mqtt;

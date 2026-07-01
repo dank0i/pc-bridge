@@ -455,32 +455,35 @@ fn default_system_sensors() -> u64 {
 
 impl Config {
     /// Given a live list of running process names, return those that match a
-    /// configured game, using the same rule as the running-game sensor (prefix
-    /// or `.exe`-stripped exact match, case-insensitive). Powers the
-    /// `CloseGame` command so it closes exactly what the sensor reports.
+    /// configured game by exact name (`.exe`-insensitive, case-insensitive).
+    ///
+    /// Powers the `CloseGame` command. Deliberately stricter than the
+    /// running-game *sensor*, which also does a loose prefix match: CloseGame
+    /// kills processes, so `cs` must not select `csrss.exe`. Real configs (and
+    /// Steam auto-discovery) use full base names, which match exactly here.
     pub fn matching_game_processes<'a>(
         &self,
         process_names: impl IntoIterator<Item = &'a str>,
     ) -> Vec<String> {
-        let patterns: Vec<String> = self.games.keys().map(|p| p.to_lowercase()).collect();
+        fn strip_exe(s: &str) -> &str {
+            if s.len() >= 4 && s.as_bytes()[s.len() - 4..].eq_ignore_ascii_case(b".exe") {
+                &s[..s.len() - 4]
+            } else {
+                s
+            }
+        }
+        let patterns: Vec<String> = self
+            .games
+            .keys()
+            .map(|p| strip_exe(p).to_lowercase())
+            .collect();
         if patterns.is_empty() {
             return Vec::new();
         }
         let mut matched = Vec::new();
         for name in process_names {
-            let base = if name.len() >= 4
-                && name.as_bytes()[name.len() - 4..].eq_ignore_ascii_case(b".exe")
-            {
-                &name[..name.len() - 4]
-            } else {
-                name
-            };
-            let hit = patterns.iter().any(|p| {
-                (name.len() >= p.len()
-                    && name.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes()))
-                    || base.eq_ignore_ascii_case(p)
-            });
-            if hit {
+            let base = strip_exe(name);
+            if patterns.iter().any(|p| base.eq_ignore_ascii_case(p)) {
                 matched.push(name.to_string());
             }
         }
@@ -883,7 +886,7 @@ impl Config {
         to_save.mqtt.pass = String::new();
 
         let content = serde_json::to_string_pretty(&to_save)?;
-        std::fs::write(&config_path, content)
+        crate::fsutil::write_atomic(&config_path, content.as_bytes(), None)
             .with_context(|| format!("Failed to write config to {:?}", config_path))?;
         Ok(())
     }
@@ -1283,6 +1286,15 @@ mod tests {
             Config::default()
                 .matching_game_processes(["bf2042.exe"].iter().copied())
                 .is_empty()
+        );
+
+        // A short pattern must NOT prefix-match an unrelated system process.
+        let mut cfg = Config::default();
+        cfg.games
+            .insert("cs".to_string(), GameConfig::Simple("cs".into()));
+        assert!(
+            cfg.matching_game_processes(["csrss.exe", "cs.exe"].iter().copied())
+                == vec!["cs.exe".to_string()]
         );
     }
 

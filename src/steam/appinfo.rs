@@ -284,53 +284,56 @@ impl<'a> BinaryVdfReader<'a> {
     }
 
     fn next_kv(&mut self) -> Option<(&'a str, BinaryVdfValue)> {
-        if self.pos >= self.data.len() {
-            return None;
-        }
+        // Iterative (not recursive): an unknown type byte skips to the next entry
+        // via `continue`. A malformed run of unknown markers would otherwise
+        // recurse per byte and overflow the stack (crash on a corrupt file).
+        loop {
+            if self.pos >= self.data.len() {
+                return None;
+            }
 
-        let type_byte = self.data[self.pos];
-        self.pos += 1;
-
-        if type_byte == TYPE_BLOCK_END {
-            return Some(("", BinaryVdfValue::BlockEnd));
-        }
-
-        // Read key (null-terminated string)
-        let key_start = self.pos;
-        while self.pos < self.data.len() && self.data[self.pos] != 0 {
+            let type_byte = self.data[self.pos];
             self.pos += 1;
-        }
-        let key = std::str::from_utf8(&self.data[key_start..self.pos]).ok()?;
-        self.pos += 1; // Skip null terminator
 
-        let value = match type_byte {
-            TYPE_BLOCK_START => BinaryVdfValue::BlockStart,
-            TYPE_STRING => {
-                let str_start = self.pos;
-                while self.pos < self.data.len() && self.data[self.pos] != 0 {
-                    self.pos += 1;
-                }
-                let s = std::str::from_utf8(&self.data[str_start..self.pos])
-                    .ok()?
-                    .to_string();
+            if type_byte == TYPE_BLOCK_END {
+                return Some(("", BinaryVdfValue::BlockEnd));
+            }
+
+            // Read key (null-terminated string)
+            let key_start = self.pos;
+            while self.pos < self.data.len() && self.data[self.pos] != 0 {
                 self.pos += 1;
-                BinaryVdfValue::String(s)
             }
-            TYPE_INT32 => {
-                if self.pos + 4 > self.data.len() {
-                    return None;
-                }
-                let val = i32::from_le_bytes(self.data[self.pos..self.pos + 4].try_into().ok()?);
-                self.pos += 4;
-                BinaryVdfValue::Int32(val)
-            }
-            _ => {
-                // Unknown type - skip
-                return self.next_kv();
-            }
-        };
+            let key = std::str::from_utf8(&self.data[key_start..self.pos]).ok()?;
+            self.pos += 1; // Skip null terminator
 
-        Some((key, value))
+            let value = match type_byte {
+                TYPE_BLOCK_START => BinaryVdfValue::BlockStart,
+                TYPE_STRING => {
+                    let str_start = self.pos;
+                    while self.pos < self.data.len() && self.data[self.pos] != 0 {
+                        self.pos += 1;
+                    }
+                    let s = std::str::from_utf8(&self.data[str_start..self.pos])
+                        .ok()?
+                        .to_string();
+                    self.pos += 1;
+                    BinaryVdfValue::String(s)
+                }
+                TYPE_INT32 => {
+                    if self.pos + 4 > self.data.len() {
+                        return None;
+                    }
+                    let val =
+                        i32::from_le_bytes(self.data[self.pos..self.pos + 4].try_into().ok()?);
+                    self.pos += 4;
+                    BinaryVdfValue::Int32(val)
+                }
+                _ => continue,
+            };
+
+            return Some((key, value));
+        }
     }
 
     fn find_block(&mut self, name: &str) -> bool {

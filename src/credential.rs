@@ -16,24 +16,24 @@
 const DPAPI_PREFIX: &str = "DPAPI:";
 
 /// Encrypt a plaintext credential for storage.
-/// On Windows, uses DPAPI.  On other platforms, returns the value as-is.
-pub fn encrypt(plaintext: &str) -> String {
+/// On Windows, uses DPAPI. On other platforms, returns the value as-is.
+///
+/// On Windows a DPAPI failure is fatal (returns `Err`) rather than silently
+/// downgrading the password to plaintext on disk.
+pub fn encrypt(plaintext: &str) -> anyhow::Result<String> {
     if plaintext.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
     #[cfg(windows)]
     {
-        match dpapi_encrypt(plaintext) {
-            Ok(encoded) => format!("{DPAPI_PREFIX}{encoded}"),
-            Err(e) => {
-                log::warn!("DPAPI encrypt failed, storing plaintext: {e}");
-                plaintext.to_string()
-            }
-        }
+        let encoded = dpapi_encrypt(plaintext).map_err(|e| {
+            anyhow::anyhow!("DPAPI encrypt failed (refusing to store plaintext): {e}")
+        })?;
+        Ok(format!("{DPAPI_PREFIX}{encoded}"))
     }
     #[cfg(not(windows))]
     {
-        plaintext.to_string()
+        Ok(plaintext.to_string())
     }
 }
 
@@ -110,16 +110,10 @@ pub fn save_to_file(plaintext: &str) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let encrypted = encrypt(plaintext);
-    std::fs::write(&path, &encrypted)?;
-
-    // Restrict permissions to owner-only on Unix (file may contain plaintext on non-Windows)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    }
-
+    let encrypted = encrypt(plaintext)?;
+    // Atomic write with owner-only perms set before any bytes hit disk (the file
+    // may hold plaintext on non-Windows).
+    crate::fsutil::write_atomic(&path, encrypted.as_bytes(), Some(0o600))?;
     Ok(())
 }
 
@@ -265,7 +259,7 @@ mod tests {
 
     #[test]
     fn test_empty_roundtrip() {
-        assert_eq!(encrypt(""), "");
+        assert_eq!(encrypt("").unwrap(), "");
         assert_eq!(decrypt("").unwrap(), "");
     }
 
@@ -279,7 +273,7 @@ mod tests {
     #[test]
     fn test_dpapi_roundtrip() {
         let secret = "test-value-for-dpapi";
-        let encrypted = encrypt(secret);
+        let encrypted = encrypt(secret).unwrap();
         assert!(encrypted.starts_with("DPAPI:"));
         assert_ne!(encrypted, secret);
 
@@ -290,7 +284,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn test_dpapi_tampered_fails() {
-        let encrypted = encrypt("test_password");
+        let encrypted = encrypt("test_password").unwrap();
         let tampered = format!("DPAPI:{}x", encrypted.strip_prefix("DPAPI:").unwrap());
         assert!(decrypt(&tampered).is_err());
     }

@@ -88,8 +88,10 @@ pub fn expand_launcher_shortcut(cmd: &str) -> Option<String> {
                 return None;
             }
             info!("Closing process: {}", arg);
-            // SIGTERM for graceful shutdown, matching Windows CloseMainWindow behavior
-            Some(format!("pkill -f '{}'", process_name))
+            // -x matches the exact process name (not the full command line, which
+            // `-f` does): `-f 'steam'` would also SIGTERM a log tailer, an editor
+            // with that path open, or pc-bridge itself.
+            Some(format!("pkill -x '{}'", process_name))
         }
 
         // lnk: is Windows-only (.lnk shortcuts), skip on Linux
@@ -238,13 +240,13 @@ mod tests {
     #[test]
     fn test_close_shortcut() {
         let result = expand_launcher_shortcut("close:firefox");
-        assert_eq!(result, Some("pkill -f 'firefox'".to_string()));
+        assert_eq!(result, Some("pkill -x 'firefox'".to_string()));
     }
 
     #[test]
     fn test_close_strips_exe_extension() {
         let result = expand_launcher_shortcut("close:notepad.exe");
-        assert_eq!(result, Some("pkill -f 'notepad'".to_string()));
+        assert_eq!(result, Some("pkill -x 'notepad'".to_string()));
     }
 
     #[test]
