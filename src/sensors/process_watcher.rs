@@ -366,6 +366,10 @@ impl ProcessWatcher {
                         }
                         None => {
                             // WMI event channel closed - thread died due to error.
+                            // Throttle first so a persistent fault (setup succeeds
+                            // but the stream dies immediately) can't become a tight
+                            // restart+snapshot+fan-out loop that pegs a core.
+                            tokio::time::sleep(Duration::from_secs(2)).await;
                             // Attempt to restart the WMI thread before falling back.
                             warn!("WMI event stream lost, attempting restart...");
                             let (new_tx, new_rx) = mpsc::channel::<ProcessEvent>(64);

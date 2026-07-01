@@ -52,7 +52,7 @@ impl PowerEventListener {
             }
         }
 
-        // Spawn blocking thread for monitor DPMS power (xset poll)
+        // Spawn blocking thread for monitor DPMS power (x11rb/wlr poll)
         let display_tx = event_tx;
         match std::thread::Builder::new()
             .name("display-dpms".into())
@@ -201,14 +201,14 @@ impl PowerEventListener {
         }
     }
 
-    /// Blocking thread: polls monitor DPMS power via `xset q` and emits
-    /// DisplayOn/DisplayOff on change, so the `display` sensor means real monitor
-    /// power (matching the Windows GUID_CONSOLE_DISPLAY_STATE behavior) rather
-    /// than screensaver state - so an idle DPMS-off, and the MonitorOff command
-    /// (`xset dpms force off`), both flip it. X11-only: on Wayland `xset` fails
-    /// and the sensor simply doesn't update.
+    /// Blocking thread: polls monitor DPMS power via bundled x11rb (X11) or wlr
+    /// (wlroots Wayland) and emits DisplayOn/DisplayOff on change, so the
+    /// `display` sensor means real monitor power (matching the Windows
+    /// GUID_CONSOLE_DISPLAY_STATE behavior) rather than screensaver state - so an
+    /// idle DPMS-off, and the MonitorOff command, both flip it. On GNOME/KDE
+    /// Wayland there's no query path, so the sensor simply doesn't update.
     fn dpms_poll_thread(tx: tokio::sync::mpsc::Sender<PowerEvent>) {
-        info!("Display state monitor started (xset DPMS poll)");
+        info!("Display state monitor started (x11rb/wlr DPMS poll)");
         let mut prev_on: Option<bool> = None;
 
         loop {

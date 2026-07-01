@@ -92,37 +92,41 @@ fn get_gpu_usage() -> String {
 
     static PDH_INIT: OnceLock<Mutex<Option<PdhState>>> = OnceLock::new();
 
-    let cell = PDH_INIT.get_or_init(|| {
-        unsafe {
+    let cell = PDH_INIT.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Lazily (re)initialize. A boot-race where the "GPU Engine" perf-counter
+    // provider isn't ready yet used to be cached as dead forever; retry on later
+    // ticks instead (bounded by the poll interval).
+    if guard.is_none() {
+        *guard = unsafe {
             let mut query: isize = 0;
             let status = PdhOpenQueryW(None, 0, &raw mut query);
             if status != 0 {
                 warn!("PdhOpenQueryW failed: 0x{:08x}", status);
-                return Mutex::new(None);
+                None
+            } else {
+                let counter_path =
+                    windows::core::w!("\\GPU Engine(*engtype_3D)\\Utilization Percentage");
+                let mut counter: isize = 0;
+                let status = PdhAddEnglishCounterW(query, counter_path, 0, &raw mut counter);
+                if status != 0 {
+                    warn!("PdhAddEnglishCounterW failed: 0x{:08x}", status);
+                    let _ = PdhCloseQuery(query);
+                    None
+                } else {
+                    // Collect first sample (needed for rate counters).
+                    let _ = PdhCollectQueryData(query);
+                    Some(PdhState {
+                        query,
+                        counter,
+                        has_first_sample: true,
+                    })
+                }
             }
+        };
+    }
 
-            let counter_path =
-                windows::core::w!("\\GPU Engine(*engtype_3D)\\Utilization Percentage");
-            let mut counter: isize = 0;
-            let status = PdhAddEnglishCounterW(query, counter_path, 0, &raw mut counter);
-            if status != 0 {
-                warn!("PdhAddEnglishCounterW failed: 0x{:08x}", status);
-                let _ = PdhCloseQuery(query);
-                return Mutex::new(None);
-            }
-
-            // Collect first sample (needed for rate counters)
-            let _ = PdhCollectQueryData(query);
-
-            Mutex::new(Some(PdhState {
-                query,
-                counter,
-                has_first_sample: true,
-            }))
-        }
-    });
-
-    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
     let Some(pdh) = guard.as_mut() else {
         return "unavailable".to_string();
     };
@@ -152,6 +156,10 @@ fn get_gpu_usage() -> String {
 
 #[cfg(unix)]
 fn get_gpu_usage() -> String {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    // Once we learn nvidia-smi isn't installed, stop forking it every tick.
+    static NVIDIA_ABSENT: AtomicBool = AtomicBool::new(false);
+
     // Try AMD first: /sys/class/drm/card0/device/gpu_busy_percent
     if let Ok(val) = std::fs::read_to_string("/sys/class/drm/card0/device/gpu_busy_percent")
         && let Some(result) = parse_gpu_sysfs(&val)
@@ -159,18 +167,25 @@ fn get_gpu_usage() -> String {
         return result;
     }
 
-    // Try NVIDIA via nvidia-smi
-    if let Ok(output) = std::process::Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=utilization.gpu",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
-        && output.status.success()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if let Some(result) = parse_nvidia_smi_output(&stdout) {
-            return result;
+    // Try NVIDIA via nvidia-smi (unless we've already found it's absent).
+    if !NVIDIA_ABSENT.load(Ordering::Relaxed) {
+        match std::process::Command::new("nvidia-smi")
+            .args([
+                "--query-gpu=utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Some(result) = parse_nvidia_smi_output(&stdout) {
+                    return result;
+                }
+            }
+            // Present but failed this tick (e.g. driver busy): keep trying.
+            Ok(_) => {}
+            // Can't spawn it (not installed): don't fork it again.
+            Err(_) => NVIDIA_ABSENT.store(true, Ordering::Relaxed),
         }
     }
 
