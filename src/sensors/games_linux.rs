@@ -260,9 +260,11 @@ impl GameSensor {
     }
 }
 
-/// Case-insensitive ASCII prefix check without allocation
+/// Case-insensitive ASCII prefix check without allocation. An empty prefix never
+/// matches - otherwise a blank/misconfigured game pattern reports every process.
 fn starts_with_ignore_ascii_case(haystack: &str, prefix: &str) -> bool {
-    haystack.len() >= prefix.len()
+    !prefix.is_empty()
+        && haystack.len() >= prefix.len()
         && haystack.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
 }
 

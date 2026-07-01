@@ -286,6 +286,21 @@ impl CommandExecutor {
             return Ok(());
         }
 
+        // DiscordJoin is subscribed whenever the discord feature is on but has no
+        // inline arm, so its payload falls through to the launcher resolver. It
+        // must ONLY carry a discord deep-link; otherwise a steam:/epic:/close:/
+        // kill: payload (which is_arbitrary_launch doesn't gate) would run here,
+        // bypassing the launch_game/close_game feature gates. Mirrors Windows.
+        if name == "DiscordJoin"
+            && !payload
+                .trim()
+                .to_ascii_lowercase()
+                .starts_with("url:discord://")
+        {
+            warn!("Blocked non-discord DiscordJoin payload");
+            return Ok(());
+        }
+
         // Authorization: exe:/lnk:/url: payloads run an arbitrary program or URL,
         // which would defeat the allow_raw_commands=false guarantee (the launcher
         // shortcut path is otherwise "always allowed"). Only run them if they

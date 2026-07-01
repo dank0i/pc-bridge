@@ -161,7 +161,17 @@ impl Supervisor {
         };
 
         for (def, want) in TASKS.iter().zip(wants) {
-            let have = self.running.contains_key(def.name);
+            // "In the map" is not "alive": a task that returned on its own (e.g.
+            // an init failure early-return) leaves a finished handle. Treat that
+            // as not-running so it can be respawned while still wanted.
+            let have = match self.running.get(def.name) {
+                Some((h, _)) if h.is_finished() => {
+                    self.running.remove(def.name);
+                    false
+                }
+                Some(_) => true,
+                None => false,
+            };
             match (want, have) {
                 (true, false) => {
                     let (tx, _) = broadcast::channel(1);
@@ -171,8 +181,17 @@ impl Supervisor {
                 }
                 (false, true) => {
                     if let Some((handle, tx)) = self.running.remove(def.name) {
-                        let _ = tx.send(()); // cancel -> drops the sensor future
-                        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+                        let _ = tx.send(()); // cancel -> stops the sensor
+                        // Abort on timeout: dropping the handle would DETACH (leak)
+                        // the task, not stop it, so a slow/stuck sensor would keep
+                        // running and re-enable would spawn a duplicate.
+                        let abort = handle.abort_handle();
+                        if tokio::time::timeout(Duration::from_secs(2), handle)
+                            .await
+                            .is_err()
+                        {
+                            abort.abort();
+                        }
                         info!("Supervisor: stopped {}", def.name);
                     }
                 }
@@ -201,12 +220,20 @@ impl Supervisor {
             }
         }
 
-        // Global shutdown: fire every task's shutdown (thread sensors stop their
-        // threads on it; pure-async ones also self-exit via state.shutdown_tx),
-        // then wait briefly for them to finish.
+        // Global shutdown: fire EVERY task's shutdown first (so they stop in
+        // parallel), then await them under a single 2s budget. Awaiting serially
+        // with a per-task timeout could exceed main's 5s shutdown cap; firing all
+        // then waiting once keeps the whole drain bounded to ~2s.
+        let mut handles = Vec::new();
         for (_, (handle, tx)) in self.running.drain() {
             let _ = tx.send(());
-            let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+            handles.push(handle);
         }
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            for handle in handles {
+                let _ = handle.await;
+            }
+        })
+        .await;
     }
 }

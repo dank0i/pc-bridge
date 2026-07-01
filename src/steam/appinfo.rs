@@ -263,6 +263,9 @@ impl AppInfoReader {
                         name = Some(s);
                         break;
                     }
+                    // Skip nested sub-blocks so a sub-block appearing before `name`
+                    // doesn't end the search early via its BlockEnd.
+                    BinaryVdfValue::BlockStart => reader.skip_block(),
                     BinaryVdfValue::BlockEnd => break,
                     _ => {}
                 }
@@ -295,10 +298,16 @@ impl AppInfoReader {
         while let Some((key, value)) = reader.next_kv() {
             match value {
                 BinaryVdfValue::BlockStart => {
+                    // Reset ONLY when entering a new top-level launch entry (0->1),
+                    // not when descending into a nested sub-block like `config`
+                    // (which holds `oslist`) - resetting there wipes the executable
+                    // already read from the parent entry, so exe extraction fails.
+                    if depth == 0 {
+                        current_exe = None;
+                        is_windows = false;
+                        is_default = true;
+                    }
                     depth += 1;
-                    current_exe = None;
-                    is_windows = false;
-                    is_default = true;
                 }
                 BinaryVdfValue::BlockEnd => {
                     depth -= 1;

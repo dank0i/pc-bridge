@@ -20,7 +20,7 @@ use windows::{
         EDataFlow, ERole, IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl,
         MMDeviceEnumerator, eConsole, eRender,
     },
-    Win32::System::Com::{CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx},
+    Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx},
 };
 
 /// Monotonic counter bumped on every default-device change. Each reader (every
@@ -143,7 +143,16 @@ fn ensure_com_init() {
     COM_INITIALIZED.with(|init| {
         if !init.get() {
             unsafe {
-                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+                // MTA, not STA: the DeviceChangeListener is registered from a
+                // spawn_blocking pool thread that never runs a message pump. Under
+                // STA, COM would marshal OnDefaultDeviceChanged back to that
+                // thread's (nonexistent) pump and the callback would never fire -
+                // so DEVICE_GENERATION would never advance and the endpoint cache
+                // would stay pinned to the old device after a default-device
+                // switch. MTA delivers the callback directly on an audio-service
+                // thread, no pump needed. Core Audio endpoint interfaces work in
+                // both apartments, so the volume/mute reads are unaffected.
+                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             }
             init.set(true);
         }

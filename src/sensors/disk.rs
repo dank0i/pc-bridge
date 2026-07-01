@@ -78,12 +78,18 @@ impl DiskSensor {
                         continue;
                     };
 
-                    // State is the highest used_percent across all paths
-                    let max_used: f64 = entries
-                        .iter()
-                        .filter_map(|e| e["used_percent"].as_str()?.parse::<f64>().ok())
-                        .fold(0.0_f64, f64::max);
-                    let state = format!("{max_used:.1}");
+                    // State is the highest used_percent across all paths. If every
+                    // path failed to read (empty), report unavailable rather than a
+                    // misleading 0% (which could read as a healthy empty disk).
+                    let state = if entries.is_empty() {
+                        "unavailable".to_string()
+                    } else {
+                        let max_used: f64 = entries
+                            .iter()
+                            .filter_map(|e| e["used_percent"].as_str()?.parse::<f64>().ok())
+                            .fold(0.0_f64, f64::max);
+                        format!("{max_used:.1}")
+                    };
 
                     if state != prev_state {
                         self.state.mqtt.publish_sensor("disk_usage", &state).await;

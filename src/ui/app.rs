@@ -336,7 +336,7 @@ fn feature_interval_field(id: &str) -> Option<&'static str> {
     Some(match id {
         "gpu" => "gpu",
         "network" => "network",
-        "disk" => "disk",
+        "disks" => "disk",
         "cpu" => "cpu",
         "memory" => "memory",
         "idle" => "last_active",

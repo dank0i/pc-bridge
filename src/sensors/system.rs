@@ -57,13 +57,14 @@ impl SystemSensor {
     pub async fn run(self, shutdown: tokio::sync::broadcast::Sender<()>) {
         // cpu and memory are independently polled + gated (they used to share one
         // timer/interval). active_window/battery are event-driven (below).
-        let (cpu_secs, mem_secs, mut cpu_on, mut mem_on) = {
+        let (cpu_secs, mem_secs, mut cpu_on, mut mem_on, mut aw_on) = {
             let config = self.state.config.read().await;
             (
                 config.intervals.cpu.max(1),
                 config.intervals.memory.max(1),
                 config.features.cpu_sensor,
                 config.features.memory_sensor,
+                config.features.active_window,
             )
         };
 
@@ -163,6 +164,7 @@ impl SystemSensor {
                     let m = config.intervals.memory.max(1);
                     cpu_on = config.features.cpu_sensor;
                     mem_on = config.features.memory_sensor;
+                    aw_on = config.features.active_window;
                     drop(config);
                     cpu_tick = interval(Duration::from_secs(c));
                     mem_tick = interval(Duration::from_secs(m));
@@ -173,6 +175,10 @@ impl SystemSensor {
                 _ = cpu_tick.tick() => {
                     if cpu_on {
                         self.publish_cpu(&mut prev_cpu, &mut prev_vals).await;
+                    } else {
+                        // Keep prev_cpu fresh so re-enabling doesn't compute a CPU
+                        // delta spanning the whole disabled gap.
+                        prev_cpu = get_cpu_times();
                     }
                     // Bridge health diagnostics (~every 60s), driven off this tick.
                     if last_health_publish.elapsed() >= Duration::from_mins(1) {
@@ -188,13 +194,19 @@ impl SystemSensor {
                 Some(event) = event_rx.recv() => {
                     match event {
                         SystemEvent::WindowFocusChanged => {
-                            #[cfg(windows)]
-                            let title = get_active_window_title();
-                            #[cfg(unix)]
-                            let title = get_active_window_title_async().await;
-                            if title != prev_vals.active_window {
-                                self.state.mqtt.publish_sensor("active_window", &title).await;
-                                prev_vals.active_window = title;
+                            // Gate on the flag: the task also runs for cpu/memory,
+                            // so without this the focus monitor would keep publishing
+                            // window titles after active_window is disabled (its HA
+                            // entity is torn down, but the data would still flow).
+                            if aw_on {
+                                #[cfg(windows)]
+                                let title = get_active_window_title();
+                                #[cfg(unix)]
+                                let title = get_active_window_title_async().await;
+                                if title != prev_vals.active_window {
+                                    self.state.mqtt.publish_sensor("active_window", &title).await;
+                                    prev_vals.active_window = title;
+                                }
                             }
                         }
                         SystemEvent::BatteryChanged => {

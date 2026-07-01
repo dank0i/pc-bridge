@@ -32,7 +32,11 @@ impl NetworkSensor {
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
         let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
-        let mut prev_sample = get_network_totals();
+        // Seed off the runtime: GetIfTable2 enumeration can be slow, and this is
+        // the one read not already wrapped in spawn_blocking.
+        let mut prev_sample = tokio::task::spawn_blocking(get_network_totals)
+            .await
+            .unwrap_or_default();
         let mut last_sample_at = std::time::Instant::now();
         let mut prev_rx = String::new();
         let mut prev_tx = String::new();

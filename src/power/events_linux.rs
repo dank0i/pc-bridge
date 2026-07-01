@@ -10,8 +10,9 @@
 
 use log::{debug, error, info, warn};
 use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::AppState;
 use crate::power::sync_mqtt::{SyncMqttConfig, parse_broker_url, sync_mqtt_publish_sleep};
@@ -60,6 +61,16 @@ impl PowerEventListener {
     pub async fn run(self, shutdown: tokio::sync::broadcast::Sender<()>) {
         let mut shutdown_rx = shutdown.subscribe();
 
+        // Shutdown wiring for the two blocking OS threads. `stop` is polled by the
+        // dpms thread (sliced sleep) and checked by the sleep thread between
+        // gdbus restarts; `gdbus_child` lets us kill the in-flight `gdbus monitor`
+        // to unblock its `reader.lines()`, which is otherwise parked forever. This
+        // matters because the listener is now supervised: feature-disable drops
+        // event_rx, and without this the threads + gdbus child would leak (and a
+        // re-enable would stack a second set).
+        let stop = Arc::new(AtomicBool::new(false));
+        let gdbus_child: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
+
         // Hold a delay-inhibitor so an externally initiated suspend (power
         // button, lid, auto-sleep) still gets "sleeping" on the wire before the
         // NIC drops - mirroring the Windows sync-before-suspend path. Released on
@@ -77,10 +88,12 @@ impl PowerEventListener {
 
         // Spawn blocking thread for sleep/wake events (system bus)
         let sleep_tx = event_tx.clone();
+        let sleep_stop = Arc::clone(&stop);
+        let sleep_child = Arc::clone(&gdbus_child);
         match std::thread::Builder::new()
             .name("power-dbus".into())
             .stack_size(128 * 1024)
-            .spawn(move || Self::dbus_sleep_monitor_thread(sleep_tx))
+            .spawn(move || Self::dbus_sleep_monitor_thread(&sleep_tx, &sleep_stop, &sleep_child))
         {
             Ok(_) => {}
             Err(e) => {
@@ -91,10 +104,11 @@ impl PowerEventListener {
 
         // Spawn blocking thread for monitor DPMS power (x11rb/wlr poll)
         let display_tx = event_tx;
+        let dpms_stop = Arc::clone(&stop);
         match std::thread::Builder::new()
             .name("display-dpms".into())
             .stack_size(128 * 1024)
-            .spawn(move || Self::dpms_poll_thread(display_tx))
+            .spawn(move || Self::dpms_poll_thread(&display_tx, &dpms_stop))
         {
             Ok(_) => {}
             Err(e) => {
@@ -110,6 +124,12 @@ impl PowerEventListener {
                 biased;
                 _ = shutdown_rx.recv() => {
                     debug!("Power listener shutting down");
+                    // Stop the blocking threads: set the flag and kill the in-flight
+                    // gdbus child so its reader unblocks and the thread exits.
+                    stop.store(true, Ordering::Relaxed);
+                    if let Some(mut c) = gdbus_child.lock().unwrap().take() {
+                        let _ = c.kill();
+                    }
                     break;
                 }
                 Some(event) = event_rx.recv() => {
@@ -176,8 +196,15 @@ impl PowerEventListener {
     /// Signal format:
     /// `/org/freedesktop/login1: org.freedesktop.login1.Manager.PrepareForSleep (true)`
     /// `/org/freedesktop/login1: org.freedesktop.login1.Manager.PrepareForSleep (false)`
-    fn dbus_sleep_monitor_thread(tx: tokio::sync::mpsc::Sender<PowerEvent>) {
+    fn dbus_sleep_monitor_thread(
+        tx: &tokio::sync::mpsc::Sender<PowerEvent>,
+        stop: &AtomicBool,
+        child_slot: &Mutex<Option<Child>>,
+    ) {
         loop {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
             let child = Command::new("gdbus")
                 .args([
                     "monitor",
@@ -198,7 +225,7 @@ impl PowerEventListener {
                         "Failed to start gdbus monitor: {} - falling back to polling",
                         e
                     );
-                    Self::poll_fallback(&tx);
+                    Self::poll_fallback(tx, stop);
                     return;
                 }
             };
@@ -207,13 +234,20 @@ impl PowerEventListener {
                 Some(s) => s,
                 None => {
                     warn!("gdbus monitor has no stdout - falling back to polling");
-                    Self::poll_fallback(&tx);
+                    Self::poll_fallback(tx, stop);
                     return;
                 }
             };
 
+            // Publish the child so run() can kill it on shutdown (unblocks the
+            // reader below). We keep ownership via the shared slot.
+            *child_slot.lock().unwrap() = Some(child);
+
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
                 let Ok(line) = line else { break };
 
                 // Look for PrepareForSleep signal
@@ -229,24 +263,35 @@ impl PowerEventListener {
                 };
                 if tx.blocking_send(event).is_err() {
                     // Receiver dropped (shutdown)
-                    let _ = child.kill();
+                    if let Some(mut c) = child_slot.lock().unwrap().take() {
+                        let _ = c.kill();
+                    }
                     return;
                 }
             }
 
-            // gdbus exited unexpectedly - restart after a short delay
-            let _ = child.wait();
+            // Reader ended: either run() killed the child on shutdown, or gdbus
+            // exited on its own. Reap it and decide whether to restart.
+            if let Some(mut c) = child_slot.lock().unwrap().take() {
+                let _ = c.wait();
+            }
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
             warn!("gdbus monitor exited, restarting in 2s");
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
     }
 
     /// Fallback: poll systemctl every 5 seconds (used if gdbus is unavailable)
-    fn poll_fallback(tx: &tokio::sync::mpsc::Sender<PowerEvent>) {
+    fn poll_fallback(tx: &tokio::sync::mpsc::Sender<PowerEvent>, stop: &AtomicBool) {
         warn!("Using polling fallback for power events (install gdbus for instant detection)");
         let mut was_sleeping = false;
 
         loop {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
             let is_sleeping = if let Ok(output) = Command::new("systemctl")
                 .args(["is-active", "sleep.target"])
                 .output()
@@ -269,7 +314,13 @@ impl PowerEventListener {
                 was_sleeping = is_sleeping;
             }
 
-            std::thread::sleep(std::time::Duration::from_secs(5));
+            // Sleep ~5s in slices so disable/shutdown is observed promptly.
+            for _ in 0..50 {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
         }
     }
 
@@ -279,11 +330,14 @@ impl PowerEventListener {
     /// GUID_CONSOLE_DISPLAY_STATE behavior) rather than screensaver state - so an
     /// idle DPMS-off, and the MonitorOff command, both flip it. On GNOME/KDE
     /// Wayland there's no query path, so the sensor simply doesn't update.
-    fn dpms_poll_thread(tx: tokio::sync::mpsc::Sender<PowerEvent>) {
+    fn dpms_poll_thread(tx: &tokio::sync::mpsc::Sender<PowerEvent>, stop: &AtomicBool) {
         info!("Display state monitor started (x11rb/wlr DPMS poll)");
         let mut prev_on: Option<bool> = None;
 
         loop {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
             // On Wayland use wlr (XWayland's DPMS is its own, not the real
             // monitor); on X11 use x11rb. None on GNOME/KDE Wayland (no wlr) -
             // the sensor simply doesn't update there.
@@ -307,7 +361,13 @@ impl PowerEventListener {
                 }
             }
 
-            std::thread::sleep(std::time::Duration::from_secs(5));
+            // Sleep ~5s in slices so disable/shutdown is observed promptly.
+            for _ in 0..50 {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
         }
     }
 }

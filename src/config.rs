@@ -618,7 +618,10 @@ impl Config {
             mqtt.insert("pass".to_string(), serde_json::Value::String(String::new()));
         }
         let content = serde_json::to_string_pretty(&json)?;
-        std::fs::write(config_path, content)?;
+        // Atomic write like every other userConfig.json writer: a bare write()
+        // here could leave a truncated file (and fire the hot-reload watcher on
+        // the partial write) if it's interrupted mid-flight.
+        crate::fsutil::write_atomic(config_path, content.as_bytes(), None)?;
         Ok(())
     }
 
