@@ -1784,6 +1784,14 @@ mod tests {
         assert_eq!(parse_vk_code(""), None);
         assert_eq!(parse_vk_code("not-a-key"), None);
         assert_eq!(parse_vk_code("ctrl"), None); // modifier, not handled here
-        assert_eq!(parse_vk_code("1"), None); // digit not mapped
+    }
+
+    #[test]
+    fn test_parse_vk_code_single_char_maps_to_vk() {
+        // Single letters/digits map to their Windows VK code (ASCII-aligned):
+        // VK_1 = 0x31, VK_A = 0x41.
+        assert_eq!(parse_vk_code("1"), Some(b'1')); // 0x31
+        assert_eq!(parse_vk_code("a"), Some(b'A')); // lowercased input, uppercase VK
+        assert_eq!(parse_vk_code("Z"), Some(b'Z'));
     }
 }
