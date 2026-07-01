@@ -22,6 +22,10 @@ tokio = { version = "1", features = ["rt", "macros", "sync", "time", "signal"] }
 # MQTT (native TLS via OS certificate store - same backend as ureq, zero extra binary cost)
 rumqttc = { version = "0.25", default-features = false, features = ["use-native-tls"] }
 
+# Update signature verification (minisign). Small pure-Rust verifier; signing is
+# done out-of-band in release CI with the minisign CLI.
+minisign-verify = "0.2"
+
 # Serialization
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"

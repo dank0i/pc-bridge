@@ -15,6 +15,22 @@ const GITHUB_REPO: &str = "pc-bridge";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const USER_AGENT: &str = concat!("pc-bridge/", env!("CARGO_PKG_VERSION"));
 
+/// Minisign public key used to verify update binaries. The SHA-256 check only
+/// proves the download matches the checksum the *same host* served, so a
+/// compromised release host could swap both; a signature can't be forged
+/// without the private key.
+///
+/// Setup (one time): generate a keypair with `minisign -G -p update.pub -s
+/// update.sec` (keep `update.sec` offline / as a CI secret), paste the base64
+/// line from `update.pub` (the line after the comment) below, and in the
+/// release CI sign each asset with `minisign -S -s update.sec -m
+/// pc-bridge-<os>.exe`, uploading the resulting `.minisig` next to the asset
+/// and its `.sha256`.
+///
+/// While this is empty, updates use checksum-only verification and log a
+/// warning. Once set, a missing or invalid signature aborts the update.
+const UPDATE_PUBLIC_KEY: &str = "";
+
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -282,12 +298,50 @@ async fn download_update(
             );
         }
 
+        // Cryptographic signature: defends against a compromised release host
+        // serving a malicious binary with a matching checksum. Fail-closed once
+        // a public key is embedded; checksum-only (with a warning) until then.
+        // (const_is_empty: this is deliberately toggled by editing the const.)
+        #[allow(clippy::const_is_empty)]
+        if UPDATE_PUBLIC_KEY.is_empty() {
+            warn!("Update is not signature-verified (no update public key embedded)");
+        } else if let Err(e) = verify_signature(&path, &format!("{url}.minisig")) {
+            let _ = std::fs::remove_file(&path);
+            return Err(e);
+        }
+
         Ok(())
     })
     .await??;
 
     info!("Downloaded update to {:?}", update_path);
     Ok(update_path)
+}
+
+/// Download the `.minisig` sidecar and verify it against the downloaded file
+/// using the embedded [`UPDATE_PUBLIC_KEY`]. Only called when a key is set.
+fn verify_signature(file_path: &Path, sig_url: &str) -> anyhow::Result<()> {
+    use minisign_verify::{PublicKey, Signature};
+
+    let public_key = PublicKey::from_base64(UPDATE_PUBLIC_KEY)
+        .map_err(|e| anyhow::anyhow!("invalid embedded update public key: {e}"))?;
+
+    let sig_text = http_agent()
+        .get(sig_url)
+        .header("User-Agent", USER_AGENT)
+        .call()?
+        .body_mut()
+        .read_to_string()?;
+    let signature = Signature::decode(&sig_text)
+        .map_err(|e| anyhow::anyhow!("malformed update signature: {e}"))?;
+
+    let bytes = std::fs::read(file_path)?;
+    public_key
+        .verify(&bytes, &signature, false)
+        .map_err(|e| anyhow::anyhow!("update signature verification failed: {e}"))?;
+
+    info!("Update signature verified (minisign)");
+    Ok(())
 }
 
 /// Download the `.sha256` sidecar and verify the file matches.
