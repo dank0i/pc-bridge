@@ -111,6 +111,13 @@ impl CommandExecutor {
             return Ok(());
         }
 
+        // Defense: a disabled feature's command can still arrive via a stale
+        // broker subscription. Drop it rather than execute (e.g. Shutdown).
+        if !crate::commands::command_feature_enabled(name, &state.config.read().await.features) {
+            warn!("Ignoring '{}' - its feature is disabled", name);
+            return Ok(());
+        }
+
         match name {
             // Discord: Leave the current voice channel by simulating a keybind
             // (default: Ctrl+F6, Discord's "Disconnect from Voice Channel").

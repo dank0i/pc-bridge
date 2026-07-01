@@ -100,6 +100,13 @@ impl CommandExecutor {
             return Ok(());
         }
 
+        // Defense: a disabled feature's command can still arrive via a stale
+        // broker subscription. Drop it rather than execute (e.g. Shutdown).
+        if !crate::commands::command_feature_enabled(name, &state.config.read().await.features) {
+            warn!("Ignoring '{}' - its feature is disabled", name);
+            return Ok(());
+        }
+
         // ── Native commands (no shell needed) ──────────────────────────
         match name {
             "DiscordLeaveChannel" => {
