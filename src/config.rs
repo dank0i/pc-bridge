@@ -914,12 +914,16 @@ impl Config {
         if self.mqtt.broker.is_empty() {
             bail!("mqtt.broker is required");
         }
-        if !self.mqtt.broker.starts_with("tcp://")
-            && !self.mqtt.broker.starts_with("ssl://")
-            && !self.mqtt.broker.starts_with("ws://")
-            && !self.mqtt.broker.starts_with("wss://")
-        {
-            bail!("mqtt.broker must start with tcp://, ssl://, ws://, or wss://");
+        // ws:// / wss:// parse but were never given a WebSocket transport (they
+        // silently connected as raw TCP/TLS, which the broker rejects). Reject
+        // them explicitly until real WebSocket support is wired and tested.
+        if self.mqtt.broker.starts_with("ws://") || self.mqtt.broker.starts_with("wss://") {
+            bail!(
+                "mqtt.broker: ws:// and wss:// are not supported yet; use tcp:// or ssl:// (MQTT over TLS)"
+            );
+        }
+        if !self.mqtt.broker.starts_with("tcp://") && !self.mqtt.broker.starts_with("ssl://") {
+            bail!("mqtt.broker must start with tcp:// or ssl://");
         }
 
         // Validate custom sensors
@@ -1579,17 +1583,19 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ws_broker() {
+    fn test_validate_ws_broker_rejected() {
+        // ws:// was never given a real WebSocket transport; reject it rather
+        // than let it silently connect as raw TCP.
         let mut config = minimal_config();
         config.mqtt.broker = "ws://localhost:8083".to_string();
-        assert!(config.validate().is_ok());
+        assert!(config.validate().is_err());
     }
 
     #[test]
-    fn test_validate_wss_broker() {
+    fn test_validate_wss_broker_rejected() {
         let mut config = minimal_config();
         config.mqtt.broker = "wss://mqtt.example.com:8084".to_string();
-        assert!(config.validate().is_ok());
+        assert!(config.validate().is_err());
     }
 
     // ===== Custom sensor validation =====
