@@ -92,11 +92,78 @@ fn main() -> anyhow::Result<()> {
     if std::env::args().any(|a| a == "--ui") {
         return ui::run();
     }
+
+    // Single-instance: if the headless agent is already running and this is a plain
+    // launch (the user opened the app again), don't kill + restart it - open the
+    // settings window instead. The updater relaunches with `--replace`, which skips
+    // this so an update still takes over the running instance.
+    let is_replace = std::env::args().any(|a| a == "--replace");
+    if !is_replace && instance_already_running() {
+        if let Err(e) = spawn_settings_window() {
+            eprintln!("pc-bridge is already running; failed to open settings window: {e}");
+        }
+        return Ok(());
+    }
+
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
         .block_on(run_agent())
 }
+
+/// Spawn the settings window as a separate `--ui` process (it runs independently of
+/// the agent and edits the config the agent hot-reloads).
+fn spawn_settings_window() -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    std::process::Command::new(exe).arg("--ui").spawn()?;
+    Ok(())
+}
+
+/// True if a headless agent is already running (it holds a named singleton). A
+/// non-owning probe, so it never affects the running agent.
+#[cfg(windows)]
+fn instance_already_running() -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZE};
+    use windows::core::w;
+    unsafe {
+        match OpenMutexW(SYNCHRONIZE, false, w!("Local\\pc-bridge-agent-singleton")) {
+            Ok(h) => {
+                let _ = CloseHandle(h);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn instance_already_running() -> bool {
+    // Linux runs headless as a service; the open-settings-on-relaunch behavior is a
+    // desktop nicety we only wire on Windows for now.
+    false
+}
+
+/// Mark this process as the running agent by creating the named singleton mutex and
+/// holding it for the process lifetime (the kernel releases it on exit, so the next
+/// launch's probe sees it gone). No-op off Windows.
+#[cfg(windows)]
+fn hold_singleton() {
+    use windows::Win32::System::Threading::CreateMutexW;
+    use windows::core::w;
+    unsafe {
+        // Keep the handle alive for the whole process; leaking it is intentional (it
+        // is closed by the OS on exit). If another handle to the name exists (an old
+        // instance mid-exit), we still get a valid handle and become the sole owner
+        // once it closes.
+        if let Ok(h) = CreateMutexW(None, false, w!("Local\\pc-bridge-agent-singleton")) {
+            std::mem::forget(h);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn hold_singleton() {}
 
 async fn run_agent() -> anyhow::Result<()> {
     // On Windows, attach to parent console if launched from terminal
@@ -144,8 +211,11 @@ async fn run_agent() -> anyhow::Result<()> {
             Ok("1" | "true")
         );
 
-    // Kill any existing instances
+    // Kill any existing instances (an updater --replace takeover, or a stale one),
+    // then claim the singleton so a later plain launch opens settings instead of
+    // killing us.
     kill_existing_instances();
+    hold_singleton();
 
     // Clean up leftover .old files from a previous update
     updater::cleanup_old_files();

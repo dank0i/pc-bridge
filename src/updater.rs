@@ -528,9 +528,12 @@ fn install_and_restart(update_path: &Path) {
     info!("Update installed, starting new version...");
 
     // Step 3: Spawn the new exe, forwarding the CLI args we were started with
-    // (e.g. --config-dir / service flags) so the restart preserves them.
+    // (e.g. --config-dir / service flags) so the restart preserves them. `--replace`
+    // tells the new process this is an update takeover, so it replaces us instead of
+    // treating the still-running old instance as "already running" and opening the UI.
     let mut cmd = Command::new(&current_exe);
     cmd.args(std::env::args_os().skip(1));
+    cmd.arg("--replace");
     cmd.creation_flags(CREATE_NO_WINDOW);
 
     if let Err(e) = cmd.spawn() {
@@ -574,6 +577,7 @@ fn install_and_restart(update_path: &Path) {
 
     if let Err(e) = Command::new(&current_exe)
         .args(std::env::args_os().skip(1))
+        .arg("--replace")
         .spawn()
     {
         warn!("Failed to start updated binary: {}", e);
