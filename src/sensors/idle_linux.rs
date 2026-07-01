@@ -1,7 +1,8 @@
 //! Idle time sensor for Linux - tracks last user input and screensaver state
 //!
 //! Screensaver detection uses D-Bus org.freedesktop.ScreenSaver or xdg-screensaver.
-//! Last-active time uses xprintidle (X11) or qdbus (KDE/Wayland).
+//! Last-active time uses bundled backends (x11rb on X11, D-Bus via zbus on
+//! GNOME/KDE Wayland), falling back to xprintidle/qdbus if those don't answer.
 
 use log::{debug, info, warn};
 use std::process::Command;
@@ -128,7 +129,8 @@ impl IdleSensor {
     }
 
     /// Seconds since the last user input, or `None` if no detection method is
-    /// available (X11 `xprintidle` or KDE/Wayland `qdbus`).
+    /// available. Tries bundled x11rb (X11) then D-Bus (Wayland), then the
+    /// external `xprintidle`/`qdbus` fallbacks.
     async fn get_idle_seconds(&self) -> Option<i64> {
         tokio::task::spawn_blocking(Self::get_idle_seconds_blocking)
             .await
