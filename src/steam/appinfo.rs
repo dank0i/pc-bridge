@@ -32,6 +32,9 @@ pub struct AppInfoReader {
     file: File,
     index: HashMap<u32, AppInfoEntry>,
     version: u32,
+    /// v29 string table (binary-VDF key names). Empty on v28, where keys are
+    /// stored inline as null-terminated strings.
+    string_table: Vec<String>,
     /// Reusable read buffer - avoids allocating a fresh Vec per get_game_info() call.
     /// Grows to max entry size and stays there for the lifetime of the reader.
     read_buf: Vec<u8>,
@@ -58,8 +61,24 @@ impl AppInfoReader {
             }
         };
 
-        // Skip rest of header (universe)
+        // Universe (4 bytes).
         file.seek(SeekFrom::Current(4))?;
+
+        // v29 added an i64 string-table offset right after universe, and moved
+        // binary-VDF key names into a string table at that offset (each key is
+        // now a u32 index instead of an inline string). v28 has neither.
+        let string_table = if version >= 29 {
+            let mut buf8 = [0u8; 8];
+            file.read_exact(&mut buf8)?;
+            let st_offset = i64::from_le_bytes(buf8);
+            if st_offset > 0 {
+                Self::read_string_table(&mut file, st_offset as u64).unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
 
         let index = Self::build_index(&mut file, version)?;
 
@@ -67,8 +86,38 @@ impl AppInfoReader {
             file,
             index,
             version,
+            string_table,
             read_buf: Vec::new(),
         })
+    }
+
+    /// Read the v29 string table at `offset`: a u32 count followed by that many
+    /// null-terminated UTF-8 strings, running to end of file.
+    fn read_string_table(file: &mut File, offset: u64) -> io::Result<Vec<String>> {
+        file.seek(SeekFrom::Start(offset))?;
+        let mut buf4 = [0u8; 4];
+        file.read_exact(&mut buf4)?;
+        let count = u32::from_le_bytes(buf4) as usize;
+        // Sanity cap so a corrupt offset can't drive a wild allocation.
+        if count > 10_000_000 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "appinfo string-table count implausibly large",
+            ));
+        }
+        let mut rest = Vec::new();
+        file.read_to_end(&mut rest)?;
+
+        let mut table = Vec::with_capacity(count.min(65_536));
+        let mut start = 0usize;
+        for _ in 0..count {
+            let Some(nul) = rest[start..].iter().position(|&b| b == 0) else {
+                break; // truncated table - keep what we have
+            };
+            table.push(String::from_utf8_lossy(&rest[start..start + nul]).into_owned());
+            start += nul + 1;
+        }
+        Ok(table)
     }
 
     /// Build index in single sequential pass - O(n) where n = file size
@@ -79,7 +128,10 @@ impl AppInfoReader {
         use log::info;
 
         let file_size = file.seek(SeekFrom::End(0))?;
-        file.seek(SeekFrom::Start(8))?; // Back to after header
+        // Header is magic(4)+universe(4)=8 on v28; v29 adds an i64 string-table
+        // offset -> 16. Seeking to the wrong one reads app entries mid-field.
+        let header_size: u64 = if version >= 29 { 16 } else { 8 };
+        file.seek(SeekFrom::Start(header_size))?;
         info!(
             "Steam: appinfo.vdf size={} bytes, version={}",
             file_size, version
@@ -182,13 +234,21 @@ impl AppInfoReader {
         self.read_buf.resize(vdf_len, 0);
         self.file.read_exact(&mut self.read_buf[..vdf_len]).ok()?;
 
-        // Parse binary VDF to find name and executable
-        Self::parse_game_info(&self.read_buf[..vdf_len])
+        // Parse binary VDF to find name and executable (v29 keys are indices).
+        Self::parse_game_info(
+            &self.read_buf[..vdf_len],
+            &self.string_table,
+            self.version >= 29,
+        )
     }
 
     /// Parse binary VDF data to extract game name and Windows launch executable
-    fn parse_game_info(data: &[u8]) -> Option<(String, String)> {
-        let mut reader = BinaryVdfReader::new(data);
+    fn parse_game_info(
+        data: &[u8],
+        string_table: &[String],
+        indexed_keys: bool,
+    ) -> Option<(String, String)> {
+        let mut reader = BinaryVdfReader::new(data, string_table, indexed_keys);
 
         // Get name from "common" block
         let mut name = None;
@@ -276,6 +336,10 @@ impl AppInfoReader {
 struct BinaryVdfReader<'a> {
     data: &'a [u8],
     pos: usize,
+    /// v29 key-name pool; keys in `data` are u32 indices into this.
+    string_table: &'a [String],
+    /// True on v29+ (keys are string-table indices); false on v28 (inline keys).
+    indexed_keys: bool,
 }
 
 enum BinaryVdfValue {
@@ -286,8 +350,13 @@ enum BinaryVdfValue {
 }
 
 impl<'a> BinaryVdfReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
+    fn new(data: &'a [u8], string_table: &'a [String], indexed_keys: bool) -> Self {
+        Self {
+            data,
+            pos: 0,
+            string_table,
+            indexed_keys,
+        }
     }
 
     fn reset(&mut self) {
@@ -310,13 +379,24 @@ impl<'a> BinaryVdfReader<'a> {
                 return Some(("", BinaryVdfValue::BlockEnd));
             }
 
-            // Read key (null-terminated string)
-            let key_start = self.pos;
-            while self.pos < self.data.len() && self.data[self.pos] != 0 {
-                self.pos += 1;
-            }
-            let key = std::str::from_utf8(&self.data[key_start..self.pos]).ok()?;
-            self.pos += 1; // Skip null terminator
+            // Read key: v29 = u32 string-table index; v28 = inline null-terminated.
+            let key: &'a str = if self.indexed_keys {
+                if self.pos + 4 > self.data.len() {
+                    return None;
+                }
+                let idx =
+                    u32::from_le_bytes(self.data[self.pos..self.pos + 4].try_into().ok()?) as usize;
+                self.pos += 4;
+                self.string_table.get(idx).map(String::as_str)?
+            } else {
+                let key_start = self.pos;
+                while self.pos < self.data.len() && self.data[self.pos] != 0 {
+                    self.pos += 1;
+                }
+                let k = std::str::from_utf8(&self.data[key_start..self.pos]).ok()?;
+                self.pos += 1; // Skip null terminator
+                k
+            };
 
             let value = match type_byte {
                 TYPE_BLOCK_START => BinaryVdfValue::BlockStart,
@@ -393,5 +473,46 @@ mod tests {
     fn test_header_constants() {
         // Verify magic bytes are correct
         assert_eq!(APPINFO_MAGIC_V28, 0x07564428);
+        assert_eq!(APPINFO_MAGIC_V29, 0x07564429);
+    }
+
+    #[test]
+    fn test_v29_indexed_keys() {
+        // v29: keys are u32 indices into the string table; string values inline.
+        let table = vec!["common".to_string(), "name".to_string()];
+        let mut data = Vec::new();
+        data.push(TYPE_BLOCK_START);
+        data.extend_from_slice(&0u32.to_le_bytes()); // key idx 0 -> "common"
+        data.push(TYPE_STRING);
+        data.extend_from_slice(&1u32.to_le_bytes()); // key idx 1 -> "name"
+        data.extend_from_slice(b"Half-Life\0"); // inline string value
+        data.push(TYPE_BLOCK_END);
+
+        let mut reader = BinaryVdfReader::new(&data, &table, true);
+        assert!(reader.find_block("common"));
+        let (key, value) = reader.next_kv().expect("kv");
+        assert_eq!(key, "name");
+        match value {
+            BinaryVdfValue::String(s) => assert_eq!(s, "Half-Life"),
+            _ => panic!("expected string value"),
+        }
+    }
+
+    #[test]
+    fn test_v28_inline_keys() {
+        // v28: keys are inline null-terminated strings (empty string table).
+        let table: Vec<String> = Vec::new();
+        let mut data = Vec::new();
+        data.push(TYPE_STRING);
+        data.extend_from_slice(b"name\0"); // inline key
+        data.extend_from_slice(b"Portal\0"); // inline value
+
+        let mut reader = BinaryVdfReader::new(&data, &table, false);
+        let (key, value) = reader.next_kv().expect("kv");
+        assert_eq!(key, "name");
+        match value {
+            BinaryVdfValue::String(s) => assert_eq!(s, "Portal"),
+            _ => panic!("expected string value"),
+        }
     }
 }
