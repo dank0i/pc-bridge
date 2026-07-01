@@ -104,8 +104,12 @@ pub fn expand_launcher_shortcut(cmd: &str) -> Option<String> {
                 return None;
             }
             info!("Closing process: {}", arg);
+            // Exact ProcessName match (not `-like '{name}*'`): the prefix wildcard
+            // would also close unrelated processes that merely share the prefix
+            // (closing "Rust" would hit "RustDesk"). ProcessName has no .exe, and
+            // this matches the Linux `pkill -x` behavior + the CloseGame comment.
             Some(format!(
-                r#"Get-Process | Where-Object {{ $_.ProcessName -like '{}*' }} | ForEach-Object {{ $_.CloseMainWindow() }}"#,
+                r#"Get-Process | Where-Object {{ $_.ProcessName -eq '{}' }} | ForEach-Object {{ $_.CloseMainWindow() }}"#,
                 process_name
             ))
         }

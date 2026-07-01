@@ -111,7 +111,9 @@ impl DiskInfo {
         if total == 0 {
             return None;
         }
-        let used = total - free;
+        // Some network/virtual mounts report free > total; saturate to avoid a
+        // u64 underflow that would wrap to a garbage percentage.
+        let used = total.saturating_sub(free);
         Some(Self {
             total_bytes: total,
             free_bytes: free,
