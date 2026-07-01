@@ -2816,6 +2816,7 @@ dependencies = [
  "winreg",
  "winresource",
  "wmi",
+ "x11rb",
 ]
 
 [[package]]

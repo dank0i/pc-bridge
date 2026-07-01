@@ -70,6 +70,14 @@ rfd = "0.15"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Pure-Rust X11 client (no libX11, no external tools) for idle time, active
+# window, DPMS query/control, and XTEST input on X11 sessions.
+x11rb = { version = "0.13", default-features = false, features = [
+    "screensaver",
+    "dpms",
+    "xtest",
+] }
+
 
 
 # Windows registry

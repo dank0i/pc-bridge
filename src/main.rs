@@ -15,6 +15,8 @@ mod config;
 mod credential;
 mod fsutil;
 mod hwinfo;
+#[cfg(unix)]
+mod linux_x11;
 mod logging;
 mod mqtt;
 mod notification;

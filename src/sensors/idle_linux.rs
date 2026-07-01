@@ -137,6 +137,11 @@ impl IdleSensor {
     }
 
     fn get_idle_seconds_blocking() -> Option<i64> {
+        // Bundled X11 (pure Rust, no external tools) - covers all X11 sessions.
+        if let Some(ms) = crate::linux_x11::idle_millis() {
+            return Some((ms / 1000) as i64);
+        }
+
         // xprintidle (X11): idle time in milliseconds.
         if let Ok(output) = Command::new("xprintidle").output()
             && output.status.success()
