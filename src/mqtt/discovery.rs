@@ -18,6 +18,19 @@ use super::{DISCOVERY_PREFIX, MqttClient};
 use crate::config::{Config, CustomCommand, CustomSensor};
 
 impl MqttClient {
+    /// Publish a retained discovery config, logging on failure. A broker
+    /// rejection (16 KB packet cap, ACL) mid-registration would otherwise
+    /// silently orphan the entity with no diagnostics.
+    async fn publish_discovery(&self, topic: &str, payload: impl Into<Vec<u8>>) {
+        if let Err(e) = self
+            .client
+            .publish(topic, QoS::AtLeastOnce, true, payload)
+            .await
+        {
+            error!("Failed to publish discovery config for {topic}: {e:?}");
+        }
+    }
+
     pub(crate) async fn register_discovery(&self, config: &Config) {
         // Fix #5: Use shared device reference instead of creating new one
         let device = &self.device;
@@ -100,10 +113,7 @@ impl MqttClient {
                 error!("Failed to serialize HA discovery payload");
                 return;
             };
-            let _ = self
-                .client
-                .publish(&topic, QoS::AtLeastOnce, true, json)
-                .await;
+            self.publish_discovery(&topic, json).await;
         }
 
         // Display power state sensor
@@ -260,10 +270,7 @@ impl MqttClient {
                 error!("Failed to serialize HA discovery payload");
                 return;
             };
-            let _ = self
-                .client
-                .publish(&topic, QoS::AtLeastOnce, true, json)
-                .await;
+            self.publish_discovery(&topic, json).await;
         }
 
         // GPU sensor
@@ -666,10 +673,7 @@ impl MqttClient {
         // per-entity shape, so clear it directly.
         if !config.features.notifications {
             let topic = format!("{}/notify/{}/config", DISCOVERY_PREFIX, self.device_name);
-            let _ = self
-                .client
-                .publish(&topic, QoS::AtLeastOnce, true, Vec::<u8>::new())
-                .await;
+            self.publish_discovery(&topic, Vec::<u8>::new()).await;
         }
         if cleared > 0 {
             info!(
@@ -717,10 +721,7 @@ impl MqttClient {
             error!("Failed to serialize HA discovery payload");
             return;
         };
-        let _ = self
-            .client
-            .publish(&topic, QoS::AtLeastOnce, true, json)
-            .await;
+        self.publish_discovery(&topic, json).await;
     }
 
     /// Helper to register a sensor with JSON attributes support
@@ -787,10 +788,7 @@ impl MqttClient {
             error!("Failed to serialize HWiNFO HA discovery payload");
             return;
         };
-        let _ = self
-            .client
-            .publish(&topic, QoS::AtLeastOnce, true, json)
-            .await;
+        self.publish_discovery(&topic, json).await;
     }
 
     /// Internal helper to register a sensor
@@ -830,10 +828,7 @@ impl MqttClient {
             error!("Failed to serialize HA discovery payload");
             return;
         };
-        let _ = self
-            .client
-            .publish(&topic, QoS::AtLeastOnce, true, json)
-            .await;
+        self.publish_discovery(&topic, json).await;
     }
 
     /// Register notify service for MQTT discovery
@@ -864,10 +859,7 @@ impl MqttClient {
             error!("Failed to serialize HA discovery payload");
             return;
         };
-        let _ = self
-            .client
-            .publish(&topic, QoS::AtLeastOnce, true, json)
-            .await;
+        self.publish_discovery(&topic, json).await;
 
         debug!("Registered notify service");
     }
@@ -903,10 +895,7 @@ impl MqttClient {
                 error!("Failed to serialize HA discovery payload");
                 return;
             };
-            let _ = self
-                .client
-                .publish(&topic, QoS::AtLeastOnce, true, json)
-                .await;
+            self.publish_discovery(&topic, json).await;
 
             debug!("Registered custom sensor: {}", sensor.name);
         }
@@ -949,10 +938,7 @@ impl MqttClient {
                 error!("Failed to serialize HA discovery payload");
                 return;
             };
-            let _ = self
-                .client
-                .publish(&topic, QoS::AtLeastOnce, true, json)
-                .await;
+            self.publish_discovery(&topic, json).await;
 
             // Subscribe to command topic
             let cmd_topic = self.command_topic(&cmd.name);
