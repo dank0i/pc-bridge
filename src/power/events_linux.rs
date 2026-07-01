@@ -212,9 +212,9 @@ impl PowerEventListener {
         let mut prev_on: Option<bool> = None;
 
         loop {
-            // Bundled X11 DPMS query (pure Rust, no `xset`). None on Wayland /
-            // no X11 - the sensor simply doesn't update there.
-            let on = crate::linux_x11::dpms_on();
+            // Bundled X11 DPMS query, then wlr (wlroots Wayland). None on
+            // GNOME/KDE Wayland - the sensor simply doesn't update there.
+            let on = crate::linux_x11::dpms_on().or_else(crate::linux_wayland::dpms_on);
 
             if let Some(on) = on
                 && prev_on != Some(on)

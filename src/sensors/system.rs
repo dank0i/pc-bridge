@@ -885,6 +885,10 @@ fn get_active_window_title_blocking() -> String {
     if let Some(title) = crate::linux_x11::active_window_title() {
         return truncate_title(title);
     }
+    // Bundled Wayland (wlr-foreign-toplevel) for wlroots compositors.
+    if let Some(title) = crate::linux_wayland::active_window_title() {
+        return truncate_title(title);
+    }
     // Fallback: xdotool (X11).
     if let Ok(output) = std::process::Command::new("xdotool")
         .args(["getactivewindow", "getwindowname"])

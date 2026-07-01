@@ -14,6 +14,11 @@ pub fn wake_display() {
         info!("WakeDisplay: woke via x11");
         return;
     }
+    // Bundled Wayland (wlr-output-power) for wlroots compositors.
+    if crate::linux_wayland::set_dpms(true) {
+        info!("WakeDisplay: woke via wlr");
+        return;
+    }
 
     // Fallbacks (Wayland / no x11rb).
     let _ = Command::new("xdotool").args(["key", "shift"]).status();
@@ -36,6 +41,9 @@ pub fn wake_display() {
 pub fn monitor_off() {
     info!("MonitorOff: turning display off (Linux)");
     if crate::linux_x11::set_dpms(false) {
+        return;
+    }
+    if crate::linux_wayland::set_dpms(false) {
         return;
     }
     let _ = Command::new("xset").args(["dpms", "force", "off"]).status();

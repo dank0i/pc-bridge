@@ -59,9 +59,9 @@ pub struct App {
     /// True after a successful Save, for a "Saved" acknowledgment (distinct from
     /// the broker "connected" status).
     saved: bool,
-    /// Feature ids that can't work on this session (X11-only on Wayland); their
-    /// toggles are greyed out and forced off.
-    unsupported: &'static [&'static str],
+    /// Feature ids that can't work on this session (no X11 and no wlr protocol);
+    /// their toggles are greyed out and forced off.
+    unsupported: Vec<&'static str>,
     /// One-time alert shown when saved-on features were forced off as unsupported.
     unsupported_alert: Option<String>,
 }
@@ -262,21 +262,27 @@ fn in_view(f: &Feature, g: Group, ct: Kind) -> bool {
 /// have no backing flag (e.g. custom entries) return None and keep their
 /// in-memory state.
 /// Feature ids that can't work on the current session and must be forced off /
-/// greyed out. Currently only the X11-only Linux features on a Wayland session
-/// (window title, monitor DPMS, monitor on/off). Empty everywhere else.
-fn unsupported_features() -> &'static [&'static str] {
+/// greyed out: the window/DPMS/monitor features when neither X11 nor the wlr
+/// Wayland protocols are available (e.g. GNOME/KDE Wayland). Empty elsewhere.
+fn unsupported_features() -> Vec<&'static str> {
     #[cfg(target_os = "linux")]
     {
         if crate::linux_x11::is_available() {
-            &[]
-        } else {
-            // Wayland (or headless): the window/DPMS/monitor features need X11.
-            &["active_window", "display_state", "cmd_monitor"]
+            return Vec::new(); // X11: everything works.
         }
+        let mut out = Vec::new();
+        if !crate::linux_wayland::has_foreign_toplevel() {
+            out.push("active_window");
+        }
+        if !crate::linux_wayland::has_output_power() {
+            out.push("display_state");
+            out.push("cmd_monitor");
+        }
+        out
     }
     #[cfg(not(target_os = "linux"))]
     {
-        &[]
+        Vec::new()
     }
 }
 

@@ -85,6 +85,12 @@ zbus = { version = "5", default-features = false, features = [
     "async-io",
 ] }
 
+# Wayland client (dlopen libwayland at runtime, no build-time link) + wlr
+# protocols for active window (foreign-toplevel) and monitor DPMS (output-power)
+# on wlroots compositors (Sway, Hyprland, gaming stacks).
+wayland-client = { version = "0.31", features = ["dlopen"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
 
 
 # Windows registry
