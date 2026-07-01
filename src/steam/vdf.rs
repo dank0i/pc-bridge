@@ -96,10 +96,12 @@ pub fn extract_library_info(content: &str) -> Vec<(String, Vec<u32>)> {
             continue;
         }
 
-        // Check for numbered library blocks ("0", "1", etc.)
-        if brace_depth == 1 && line.starts_with('"') && line.ends_with('"') {
+        // Check for numbered library blocks ("0", "1", etc.). len >= 2 guard:
+        // a lone `"` line satisfies both starts_with and ends_with, and
+        // line[1..0] would panic on a corrupt/truncated file.
+        if brace_depth == 1 && line.len() >= 2 && line.starts_with('"') && line.ends_with('"') {
             let key = &line[1..line.len() - 1];
-            if key.chars().all(|c| c.is_ascii_digit()) {
+            if !key.is_empty() && key.chars().all(|c| c.is_ascii_digit()) {
                 debug!("  Found library block: {}", key);
                 in_library_block = true;
             }

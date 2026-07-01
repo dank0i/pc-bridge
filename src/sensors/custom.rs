@@ -88,16 +88,21 @@ impl CustomSensorManager {
                     debug!("Custom sensor manager shutting down");
                     break;
                 }
-                _ = config_rx.recv() => {
+                Ok(()) = config_rx.recv() => {
                     // Hot-reload: re-snapshot config
                     let config = self.state.config.read().await;
                     sensors.clone_from(&config.custom_sensors);
                     enabled = config.custom_sensors_enabled;
-                    // Reset schedules for new/changed sensors
+                    // Reset schedules for new/changed sensors. Only when enabled:
+                    // seeding next_due while disabled leaves next_wake permanently
+                    // in the past (the tick body `continue`s without advancing it),
+                    // busy-looping the whole single-threaded runtime.
                     let reload_now = tokio::time::Instant::now();
                     next_due.clear();
-                    for s in &sensors {
-                        next_due.insert(s.name.clone(), reload_now);
+                    if enabled {
+                        for s in &sensors {
+                            next_due.insert(s.name.clone(), reload_now);
+                        }
                     }
                     info!("Custom sensors config reloaded ({} sensors, enabled={})", sensors.len(), enabled);
                 }
