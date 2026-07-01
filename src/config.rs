@@ -50,6 +50,11 @@ pub struct Config {
     #[serde(default)]
     pub allow_global_close: bool,
 
+    /// Show a system tray icon (Windows) with an Open Settings / Quit menu. Default
+    /// on; hot-reloadable (the tray appears/disappears when this is toggled).
+    #[serde(default = "default_true")]
+    pub show_tray_icon: bool,
+
     /// Custom keybind for Discord "leave channel" (e.g. "ctrl+f6", "ctrl+shift+m").
     /// When absent, defaults to ctrl+f6 (Discord's default disconnect keybind).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,6 +94,7 @@ impl Default for Config {
             allow_raw_commands: false,
             allow_global_launch: true,
             allow_global_close: false,
+            show_tray_icon: true,
             discord_keybind: None,
             update_channel: default_update_channel(),
             disk_sensor_paths: Vec::new(),
@@ -751,10 +757,9 @@ impl Config {
             migrated = true;
         }
 
-        // Remove legacy show_tray_icon fields (tray feature removed)
-        if obj.remove("show_tray_icon").is_some() {
-            migrated = true;
-        }
+        // show_tray_icon is a real top-level field again (the tray is back), so leave
+        // the top-level value alone. Only strip the stale FEATURES-level copy from
+        // the era when it briefly lived there; the top-level field defaults to true.
         if let Some(features) = obj.get_mut("features").and_then(|v| v.as_object_mut())
             && features.remove("show_tray_icon").is_some()
         {
@@ -1330,6 +1335,8 @@ async fn reload_hot_config(state: &AppState) {
         config.allow_raw_commands = new_config.allow_raw_commands;
         config.allow_global_launch = new_config.allow_global_launch;
         config.allow_global_close = new_config.allow_global_close;
+        // Tray manager reconciles on config_generation and reads this live.
+        config.show_tray_icon = new_config.show_tray_icon;
 
         // Discord keybind
         config.discord_keybind = new_config.discord_keybind;
@@ -1509,6 +1516,7 @@ mod tests {
             allow_raw_commands: false,
             allow_global_launch: true,
             allow_global_close: false,
+            show_tray_icon: true,
             discord_keybind: None,
             custom_sensors: vec![],
             custom_commands: vec![],

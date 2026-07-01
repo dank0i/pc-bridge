@@ -442,6 +442,7 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
         allow_raw_commands: false,
         allow_global_launch: true,
         allow_global_close: false,
+        show_tray_icon: true,
         discord_keybind: if config.discord_keybind.is_empty() {
             None
         } else {

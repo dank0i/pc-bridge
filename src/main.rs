@@ -31,6 +31,8 @@ mod sensors;
 mod setup;
 mod steam;
 mod supervisor;
+#[cfg(windows)]
+mod tray;
 mod ui;
 mod updater;
 
@@ -408,6 +410,11 @@ async fn run_agent() -> anyhow::Result<()> {
     handles.push(tokio::spawn(
         supervisor::Supervisor::new(Arc::clone(&state)).run(),
     ));
+
+    // Tray icon manager (Windows): creates/destroys the tray as show_tray_icon
+    // toggles; its Quit menu fires the global shutdown.
+    #[cfg(windows)]
+    handles.push(tokio::spawn(tray::run_manager(Arc::clone(&state))));
 
     // Custom commands (just register discovery, executor handles them)
     if config.custom_commands_enabled && !config.custom_commands.is_empty() {

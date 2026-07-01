@@ -35,6 +35,7 @@ pub struct App {
     allow_privileged: bool,
     allow_global_launch: bool,
     allow_global_close: bool,
+    show_tray_icon: bool,
     selected: Group,
     search: String,
     show_library: bool,
@@ -135,6 +136,7 @@ impl App {
             allow_privileged: cfg.custom_command_privileges_allowed,
             allow_global_launch: cfg.allow_global_launch,
             allow_global_close: cfg.allow_global_close,
+            show_tray_icon: cfg.show_tray_icon,
             selected: Group::Games,
             search: String::new(),
             show_library: false,
@@ -197,6 +199,7 @@ impl App {
         self.cfg.custom_command_privileges_allowed = self.allow_privileged;
         self.cfg.allow_global_launch = self.allow_global_launch;
         self.cfg.allow_global_close = self.allow_global_close;
+        self.cfg.show_tray_icon = self.show_tray_icon;
         self.cfg.custom_commands_enabled = self.custom_actions_on;
         self.cfg.custom_sensors_enabled = self.custom_sensors_on;
         // A game's process is its detection KEY; two rows sharing one would
@@ -1644,6 +1647,12 @@ fn general_panel(app: &mut App, ui: &mut egui::Ui) {
 
         section(ui, "Behavior", |ui| {
             switch_row(ui, "Beta updates", "Get pre-release builds.", &mut app.beta_updates);
+            switch_row(
+                ui,
+                "Show tray icon",
+                "System tray icon with Open Settings / Quit (Windows). Toggles live.",
+                &mut app.show_tray_icon,
+            );
         });
         ui.add_space(BLOCK);
 
