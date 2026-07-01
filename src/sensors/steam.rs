@@ -80,8 +80,10 @@ impl SteamSensor {
 
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
 
-        // Discover Steam library folders
-        self.discover_library_folders();
+        // Discover Steam library folders (blocking registry/file I/O - off-runtime)
+        self.library_folders = tokio::task::spawn_blocking(discover_library_folders_blocking)
+            .await
+            .unwrap_or_default();
 
         if self.library_folders.is_empty() {
             warn!("No Steam library folders found, steam sensor disabled");
@@ -200,51 +202,8 @@ impl SteamSensor {
         if watched_any { Some(watcher) } else { None }
     }
 
-    fn discover_library_folders(&mut self) {
-        self.library_folders.clear();
-
-        // Get Steam install path from shared discovery
-        let steam_path = match crate::steam::find_steam_path() {
-            Some(p) => p,
-            None => {
-                debug!("Steam installation not found");
-                return;
-            }
-        };
-
-        // Primary library is in Steam install dir
-        let primary_steamapps = steam_path.join("steamapps");
-        if primary_steamapps.exists() {
-            self.library_folders.push(primary_steamapps.clone());
-        }
-
-        // Parse libraryfolders.vdf for additional libraries
-        let vdf_path = primary_steamapps.join("libraryfolders.vdf");
-        if vdf_path.exists()
-            && let Ok(content) = std::fs::read_to_string(&vdf_path)
-        {
-            self.parse_library_folders_vdf(&content);
-        }
-    }
-
-    fn parse_library_folders_vdf(&mut self, content: &str) {
-        // Simple VDF parser - look for "path" entries
-        // Format: "path"		"D:\\SteamLibrary"
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("\"path\"") {
-                // Extract the path value
-                let parts: Vec<&str> = trimmed.split('"').collect();
-                if parts.len() >= 4 {
-                    let path_str = crate::steam::vdf::unescape_vdf(parts[3]);
-                    let library_path = PathBuf::from(&path_str).join("steamapps");
-                    if library_path.exists() && !self.library_folders.contains(&library_path) {
-                        self.library_folders.push(library_path);
-                    }
-                }
-            }
-        }
-    }
+    // (library discovery moved to the free blocking functions below so it can run
+    // off the single-threaded runtime via spawn_blocking)
 
     async fn do_full_scan(&mut self) {
         // Move blocking filesystem I/O off the single-threaded async runtime
@@ -462,6 +421,49 @@ impl SteamSensor {
                 .mqtt
                 .publish_sensor_attributes("steam_updating", &IDLE_STEAM_ATTRS)
                 .await;
+        }
+    }
+}
+
+/// Discover Steam library folders. Does blocking I/O (registry read on Windows,
+/// file reads), so run it via spawn_blocking, not directly on the runtime.
+fn discover_library_folders_blocking() -> Vec<PathBuf> {
+    let mut folders = Vec::new();
+
+    let Some(steam_path) = crate::steam::find_steam_path() else {
+        debug!("Steam installation not found");
+        return folders;
+    };
+
+    // Primary library is in the Steam install dir.
+    let primary_steamapps = steam_path.join("steamapps");
+    if primary_steamapps.exists() {
+        folders.push(primary_steamapps.clone());
+    }
+
+    // Additional libraries from libraryfolders.vdf.
+    let vdf_path = primary_steamapps.join("libraryfolders.vdf");
+    if vdf_path.exists()
+        && let Ok(content) = std::fs::read_to_string(&vdf_path)
+    {
+        parse_library_folders_vdf(&content, &mut folders);
+    }
+    folders
+}
+
+fn parse_library_folders_vdf(content: &str, folders: &mut Vec<PathBuf>) {
+    // Format: "path"		"D:\\SteamLibrary"
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("\"path\"") {
+            let parts: Vec<&str> = trimmed.split('"').collect();
+            if parts.len() >= 4 {
+                let path_str = crate::steam::vdf::unescape_vdf(parts[3]);
+                let library_path = PathBuf::from(&path_str).join("steamapps");
+                if library_path.exists() && !folders.contains(&library_path) {
+                    folders.push(library_path);
+                }
+            }
         }
     }
 }

@@ -950,6 +950,12 @@ impl Config {
                 sensor.name
             );
         }
+        if sensor.name.contains(['/', '+', '#']) {
+            bail!(
+                "Custom sensor name '{}' cannot contain MQTT topic characters '/', '+', or '#'",
+                sensor.name
+            );
+        }
 
         match sensor.sensor_type {
             CustomSensorType::Powershell => {
@@ -1029,6 +1035,12 @@ impl Config {
         if cmd.name.contains(char::is_whitespace) {
             bail!(
                 "Custom command name '{}' cannot contain whitespace",
+                cmd.name
+            );
+        }
+        if cmd.name.contains(['/', '+', '#']) {
+            bail!(
+                "Custom command name '{}' cannot contain MQTT topic characters '/', '+', or '#'",
                 cmd.name
             );
         }

@@ -14,31 +14,58 @@ use std::path::Path;
 /// file, which may hold plaintext on non-Windows).
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> io::Result<()> {
     use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    let tmp = path.with_extension("tmp");
+    let pid = std::process::id();
 
-    // Write + fsync the temp file.
-    {
+    // Unique per-process temp name + O_EXCL create (create_new). Two concurrent
+    // writers - e.g. the agent's Steam-refresh save racing a separate settings
+    // (`--ui`) process's Save - must NOT share the same temp inode, or their
+    // interleaved writes commit a corrupt `userConfig.json` that won't parse. A
+    // leftover temp from a prior crash (same pid+counter after pid reuse) is
+    // skipped by advancing the counter.
+    let (mut file, tmp) = loop {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_extension(format!("tmp.{pid}.{n}"));
+
         #[cfg(unix)]
-        let mut file = {
+        let opened = {
             use std::os::unix::fs::OpenOptionsExt;
             let mut opts = std::fs::OpenOptions::new();
-            opts.write(true).create(true).truncate(true);
+            opts.write(true).create_new(true);
             if let Some(m) = mode {
                 opts.mode(m);
             }
-            opts.open(&tmp)?
+            opts.open(&tmp)
         };
         #[cfg(not(unix))]
-        let mut file = {
+        let opened = {
             let _ = mode;
-            std::fs::File::create(&tmp)?
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
         };
 
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
+        match opened {
+            Ok(f) => break (f, tmp),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    };
 
-    // Atomic replace (same directory => same filesystem).
-    std::fs::rename(&tmp, path)
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+
+    // Atomic replace (same directory => same filesystem). Clean up our temp on
+    // failure so a rename error doesn't strand it.
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }

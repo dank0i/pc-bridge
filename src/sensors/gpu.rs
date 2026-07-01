@@ -85,9 +85,11 @@ fn get_gpu_usage() -> String {
         has_first_sample: bool,
     }
 
-    // SAFETY: PdhState contains raw isize handles (PDH query/counter) which are
-    // only accessed from the single-threaded tokio runtime. Mutex satisfies the
-    // Sync bound required for statics.
+    // SAFETY: PdhState contains raw isize handles (PDH query/counter). Access is
+    // serialized by the enclosing `Mutex` and the sensor makes only one call per
+    // tick, so the handles are never touched concurrently even though
+    // spawn_blocking may run get_gpu_usage on different pool threads. PDH query
+    // handles are not apartment-bound, so cross-thread (serialized) use is fine.
     unsafe impl Send for PdhState {}
 
     static PDH_INIT: OnceLock<Mutex<Option<PdhState>>> = OnceLock::new();

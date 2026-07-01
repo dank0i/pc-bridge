@@ -20,6 +20,9 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 /// Uses byte-level sliding window comparison.
 #[cfg(windows)]
 fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true; // `windows(0)` would panic; an empty needle is a substring
+    }
     if needle.len() > haystack.len() {
         return false;
     }
