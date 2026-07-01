@@ -44,10 +44,18 @@ pub(crate) fn command_feature_enabled(name: &str, f: &FeatureConfig) -> bool {
 /// resolver consumes (on Windows that is the env-expanded payload).
 pub(crate) fn is_arbitrary_launch(payload: &str) -> bool {
     match payload.split_once(':') {
-        Some((scheme, _)) => matches!(
-            scheme.trim().to_ascii_lowercase().as_str(),
-            "exe" | "lnk" | "url"
-        ),
+        Some((scheme, rest)) => match scheme.trim().to_ascii_lowercase().as_str() {
+            "exe" | "lnk" => true,
+            // url:discord://... is the DiscordJoin channel deep-link (a feature
+            // gated by f.discord), not an arbitrary program/URL launch. Any other
+            // url: target is arbitrary. Metacharacters are still validated by
+            // is_safe_url downstream regardless.
+            "url" => !rest
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("discord://"),
+            _ => false,
+        },
         None => false,
     }
 }
@@ -89,6 +97,18 @@ mod tests {
         assert!(is_arbitrary_launch("exe :C:/x.exe"));
         assert!(is_arbitrary_launch("  URL:steam://run/1"));
         assert!(is_arbitrary_launch("LNK:C:/x.lnk"));
+    }
+
+    #[test]
+    fn test_discord_deeplink_not_arbitrary() {
+        // DiscordJoin's channel deep-link is feature-gated, not arbitrary exec.
+        assert!(!is_arbitrary_launch(
+            "url:discord://discord.com/channels/1/2"
+        ));
+        assert!(!is_arbitrary_launch("URL:discord://x"));
+        // Any other url: target is still arbitrary.
+        assert!(is_arbitrary_launch("url:file:///etc/passwd"));
+        assert!(is_arbitrary_launch("url:https://evil"));
     }
 
     #[test]

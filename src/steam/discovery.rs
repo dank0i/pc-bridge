@@ -130,15 +130,18 @@ impl SteamGameDiscovery {
             return None;
         }
 
-        // Open appinfo.vdf for name + executable lookup
+        // Open appinfo.vdf for name + executable lookup. Optional: a new/unknown
+        // appinfo version (Valve bumps it periodically) must NOT disable discovery
+        // entirely - the per-app appmanifest_*.acf fallback below needs nothing
+        // from appinfo.
         let mut appinfo = match AppInfoReader::open(appinfo_path) {
             Ok(reader) => {
                 info!("Steam: appinfo.vdf indexed {} apps", reader.app_count());
-                reader
+                Some(reader)
             }
             Err(e) => {
-                warn!("Failed to open appinfo.vdf: {}", e);
-                return None;
+                warn!("Failed to open appinfo.vdf ({e}); using appmanifest fallback only");
+                None
             }
         };
 
@@ -160,8 +163,9 @@ impl SteamGameDiscovery {
                 continue;
             }
 
-            // Try appinfo.vdf first (fast)
-            if let Some((name, executable)) = appinfo.get_game_info(app_id)
+            // Try appinfo.vdf first (fast), when it opened.
+            if let Some(reader) = appinfo.as_mut()
+                && let Some((name, executable)) = reader.get_game_info(app_id)
                 && let Some(_key) =
                     Self::add_game(&mut games, app_id, name, executable, &library_path)
             {
