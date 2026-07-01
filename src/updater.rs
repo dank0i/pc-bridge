@@ -27,8 +27,14 @@ const USER_AGENT: &str = concat!("pc-bridge/", env!("CARGO_PKG_VERSION"));
 /// pc-bridge-<os>.exe`, uploading the resulting `.minisig` next to the asset
 /// and its `.sha256`.
 ///
-/// While this is empty, updates use checksum-only verification and log a
-/// warning. Once set, a missing or invalid signature aborts the update.
+/// The CI also signs a per-asset `{version, sha256}` manifest. The updater trusts
+/// that SIGNED version for its anti-rollback check (a compromised host can only
+/// replay old manifests, whose version matches their binary, so it can't serve an
+/// old validly-signed build under a newer tag) and verifies the downloaded binary
+/// against the manifest's hash.
+///
+/// While this is empty, updates are refused (there is no signed manifest to trust).
+/// Once set, a missing/invalid signature or manifest aborts the update.
 const UPDATE_PUBLIC_KEY: &str = "RWSE5vU+bgt+LQ0szYtrcZL3qLst9oXVEdB/fptCnHUivRlWn1rgcw/E";
 
 #[cfg(windows)]
@@ -174,6 +180,8 @@ pub async fn check_for_updates(update_channel: String) {
         }
     };
 
+    // Cheap unsigned pre-check (the tag is attacker-controllable, so this is only
+    // a "maybe there's an update" gate, not the authoritative decision).
     if !is_newer_version(&remote_version, CURRENT_VERSION) {
         info!("Already up to date (v{})", CURRENT_VERSION);
         return;
@@ -187,9 +195,43 @@ pub async fn check_for_updates(update_channel: String) {
     let asset_name = platform_asset_name();
     let base = download_base_for(&remote_version);
     let asset_url = format!("{}/{}", base, asset_name);
-    let checksum_url = format!("{}/{}.sha256", base, asset_name);
 
-    match download_update(&asset_url, asset_name, Some(&checksum_url)).await {
+    // Anti-rollback: the AUTHORITATIVE version + binary hash come from the SIGNED
+    // manifest, never the release tag. A compromised host can only replay a
+    // previously-signed manifest, whose version matches its binary, so it can't
+    // serve an old build under a newer tag.
+    #[allow(clippy::const_is_empty)]
+    let expected_sha256 = if UPDATE_PUBLIC_KEY.is_empty() {
+        None
+    } else {
+        match tokio::task::spawn_blocking({
+            let base = base.clone();
+            move || fetch_verified_manifest(&base, asset_name)
+        })
+        .await
+        {
+            Ok(Ok(m)) => {
+                if !is_newer_version(&m.version, CURRENT_VERSION) {
+                    warn!(
+                        "Signed manifest version {} is not newer than {} - refusing (possible rollback)",
+                        m.version, CURRENT_VERSION
+                    );
+                    return;
+                }
+                Some(m.sha256)
+            }
+            Ok(Err(e)) => {
+                warn!("Could not verify update manifest: {e} - refusing to install");
+                return;
+            }
+            Err(e) => {
+                warn!("Manifest verification task failed: {e}");
+                return;
+            }
+        }
+    };
+
+    match download_update(&asset_url, asset_name, expected_sha256.as_deref()).await {
         Ok(update_path) => {
             info!("Update downloaded, installing...");
             install_and_restart(&update_path);
@@ -263,7 +305,7 @@ async fn resolve_latest_via_api() -> anyhow::Result<String> {
 async fn download_update(
     url: &str,
     filename: &str,
-    checksum_url: Option<&str>,
+    expected_sha256: Option<&str>,
 ) -> anyhow::Result<PathBuf> {
     let exe_dir = std::env::current_exe()?
         .parent()
@@ -273,7 +315,7 @@ async fn download_update(
     let update_path = exe_dir.join(format!("{}.update", filename));
 
     let url = url.to_string();
-    let checksum_url = checksum_url.map(String::from);
+    let expected_sha256 = expected_sha256.map(String::from);
     let path = update_path.clone();
 
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -288,14 +330,12 @@ async fn download_update(
         std::io::copy(&mut body.as_reader(), &mut file)?;
         drop(file);
 
-        // Verify SHA-256 - refuse to install if no checksum is available
-        if let Some(checksum_url) = checksum_url {
-            verify_sha256(&path, &checksum_url)?;
+        // Verify the binary against the SIGNED manifest hash - refuse without it.
+        if let Some(hash) = expected_sha256 {
+            verify_sha256_hex(&path, &hash)?;
         } else {
             let _ = std::fs::remove_file(&path);
-            anyhow::bail!(
-                "No .sha256 checksum asset in release - refusing to install unverified binary"
-            );
+            anyhow::bail!("No signed manifest hash - refusing to install unverified binary");
         }
 
         // Cryptographic signature: defends against a compromised release host
@@ -321,6 +361,15 @@ async fn download_update(
 /// Download the `.minisig` sidecar and verify it against the downloaded file
 /// using the embedded [`UPDATE_PUBLIC_KEY`]. Only called when a key is set.
 fn verify_signature(file_path: &Path, sig_url: &str) -> anyhow::Result<()> {
+    let bytes = std::fs::read(file_path)?;
+    verify_signature_bytes(&bytes, sig_url)?;
+    info!("Update signature verified (minisign)");
+    Ok(())
+}
+
+/// Verify a minisign signature (fetched from `sig_url`) over `bytes` using the
+/// embedded [`UPDATE_PUBLIC_KEY`].
+fn verify_signature_bytes(bytes: &[u8], sig_url: &str) -> anyhow::Result<()> {
     use minisign_verify::{PublicKey, Signature};
 
     let public_key = PublicKey::from_base64(UPDATE_PUBLIC_KEY)
@@ -335,51 +384,58 @@ fn verify_signature(file_path: &Path, sig_url: &str) -> anyhow::Result<()> {
     let signature = Signature::decode(&sig_text)
         .map_err(|e| anyhow::anyhow!("malformed update signature: {e}"))?;
 
-    let bytes = std::fs::read(file_path)?;
     public_key
-        .verify(&bytes, &signature, false)
+        .verify(bytes, &signature, false)
         .map_err(|e| anyhow::anyhow!("update signature verification failed: {e}"))?;
-
-    info!("Update signature verified (minisign)");
     Ok(())
 }
 
-/// Download the `.sha256` sidecar and verify the file matches.
-fn verify_sha256(file_path: &Path, checksum_url: &str) -> anyhow::Result<()> {
-    use sha2::{Digest, Sha256};
+/// Signed release manifest binding a version to the binary's SHA-256. Signing
+/// the (version, hash) pair - not just the binary - is what prevents rollback: a
+/// compromised release host can only replay previously-signed manifests, whose
+/// version genuinely matches their binary, so an old build can't be served under
+/// a newer tag.
+#[derive(serde::Deserialize)]
+struct UpdateManifest {
+    version: String,
+    sha256: String,
+}
 
-    // Fetch expected hash from the .sha256 file
-    let checksum_body = http_agent()
-        .get(checksum_url)
+/// Download + signature-verify the manifest for `asset_name` at `base`.
+fn fetch_verified_manifest(base: &str, asset_name: &str) -> anyhow::Result<UpdateManifest> {
+    let manifest_url = format!("{base}/{asset_name}.manifest");
+    let body = http_agent()
+        .get(&manifest_url)
         .header("User-Agent", USER_AGENT)
         .call()?
         .body_mut()
         .read_to_string()?;
+    verify_signature_bytes(body.as_bytes(), &format!("{manifest_url}.minisig"))?;
+    let manifest: UpdateManifest = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("malformed update manifest: {e}"))?;
+    Ok(manifest)
+}
 
-    // Format: "<hex_hash>  <filename>" or just "<hex_hash>"
-    let expected_hex = checksum_body
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("Empty checksum file"))?
-        .to_lowercase();
+/// Download the `.sha256` sidecar and verify the file matches.
+/// Verify `file_path`'s SHA-256 equals `expected_hex` (taken from the SIGNED
+/// manifest, so this ties the downloaded binary to the signed version).
+fn verify_sha256_hex(file_path: &Path, expected_hex: &str) -> anyhow::Result<()> {
+    use sha2::{Digest, Sha256};
 
-    // Compute actual hash
+    let expected = expected_hex.trim().to_lowercase();
     let mut hasher = Sha256::new();
     let mut file = std::fs::File::open(file_path)?;
     std::io::copy(&mut file, &mut hasher)?;
     let actual_hex = format!("{:x}", hasher.finalize());
 
-    if actual_hex != expected_hex {
-        // Remove the corrupt download
+    if actual_hex != expected {
         let _ = std::fs::remove_file(file_path);
         anyhow::bail!(
-            "SHA-256 mismatch: expected {}, got {} - download may be corrupted or tampered",
-            expected_hex,
-            actual_hex
+            "SHA-256 mismatch: expected {expected}, got {actual_hex} - download tampered or wrong build"
         );
     }
 
-    info!("SHA-256 verified: {}", actual_hex);
+    info!("SHA-256 verified against signed manifest: {actual_hex}");
     Ok(())
 }
 

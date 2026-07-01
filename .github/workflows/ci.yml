@@ -208,9 +208,12 @@ jobs:
 
       # Cryptographically sign each asset with minisign so the updater can verify
       # it against the public key embedded in updater.rs (defends against a
-      # compromised release host, which a same-host checksum cannot). Skips
-      # (with a warning) until MINISIGN_SECRET_KEY is set, so it won't block
-      # releases before signing is configured.
+      # compromised release host, which a same-host checksum cannot). Also sign a
+      # per-asset manifest binding {version, sha256} so the updater's anti-rollback
+      # can trust the version (a compromised host can only replay old manifests,
+      # whose version matches their binary). Skips (with a warning) until
+      # MINISIGN_SECRET_KEY is set, so it won't block releases before signing is
+      # configured.
       - name: Sign release assets (minisign)
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
@@ -221,8 +224,13 @@ jobs:
           fi
           sudo apt-get update && sudo apt-get install -y minisign
           printf '%s' "$MINISIGN_SECRET_KEY" > minisign.key
-          minisign -S -s minisign.key -m pc-bridge-windows.exe
-          minisign -S -s minisign.key -m pc-bridge-linux
+          VERSION="${GITHUB_REF_NAME#v}"
+          for asset in pc-bridge-windows.exe pc-bridge-linux; do
+            HASH=$(sha256sum "$asset" | awk '{print $1}')
+            printf '{"version":"%s","sha256":"%s"}' "$VERSION" "$HASH" > "$asset.manifest"
+            minisign -S -s minisign.key -m "$asset"
+            minisign -S -s minisign.key -m "$asset.manifest"
+          done
           rm -f minisign.key
 
       - name: Upload assets to release
@@ -233,6 +241,7 @@ jobs:
             pc-bridge-windows.exe.sha256
             pc-bridge-linux
             pc-bridge-linux.sha256
+            *.manifest
             *.minisig
 
       - name: Publish release
