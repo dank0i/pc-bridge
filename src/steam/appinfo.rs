@@ -363,10 +363,6 @@ impl<'a> BinaryVdfReader<'a> {
         }
     }
 
-    fn reset(&mut self) {
-        self.pos = 0;
-    }
-
     /// Step into the single root block (key "appinfo") that wraps each app's
     /// blob, so sibling searches see its children. No-op if the first token
     /// isn't a block (position is left unchanged).

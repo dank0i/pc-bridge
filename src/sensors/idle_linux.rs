@@ -225,6 +225,9 @@ fn is_screensaver_active() -> bool {
             "--dest=org.freedesktop.ScreenSaver",
             "--type=method_call",
             "--print-reply",
+            // Bound the wait: a hung ScreenSaver service must not block the idle
+            // tick (and process shutdown) for dbus-send's 25s default.
+            "--reply-timeout=2000",
             "/org/freedesktop/ScreenSaver",
             "org.freedesktop.ScreenSaver.GetActive",
         ])
@@ -242,6 +245,9 @@ fn is_screensaver_active() -> bool {
             "--dest=org.gnome.ScreenSaver",
             "--type=method_call",
             "--print-reply",
+            // Bound the wait: a hung ScreenSaver service must not block the idle
+            // tick (and process shutdown) for dbus-send's 25s default.
+            "--reply-timeout=2000",
             "/org/gnome/ScreenSaver",
             "org.gnome.ScreenSaver.GetActive",
         ])

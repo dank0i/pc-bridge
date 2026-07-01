@@ -61,15 +61,23 @@ pub fn idle_millis() -> Option<u64> {
 /// protocol (the thread exits and leaves `available = false`).
 pub fn ensure_started() {
     {
-        let mut s = shared().lock().unwrap_or_else(|e| e.into_inner());
+        let s = shared().lock().unwrap_or_else(|e| e.into_inner());
         if s.spawned {
             return;
         }
+    }
+    // Latch `spawned` only after the thread actually started, so a (very rare)
+    // spawn failure doesn't permanently wedge idle with a latched flag and no
+    // listener. ensure_started has a single caller (IdleSensor::run), so there's
+    // no double-spawn race here.
+    if std::thread::Builder::new()
+        .name("wl-idle-notify".into())
+        .spawn(listen)
+        .is_ok()
+        && let Ok(mut s) = shared().lock()
+    {
         s.spawned = true;
     }
-    let _ = std::thread::Builder::new()
-        .name("wl-idle-notify".into())
-        .spawn(listen);
 }
 
 fn set_available(available: bool) {
@@ -104,8 +112,25 @@ struct Listener {
 }
 
 fn listen() {
+    // Self-heal: one persistent thread that reconnects after a compositor
+    // restart or a startup race (service started before the Wayland socket is
+    // ready). Give up only if the compositor genuinely lacks the protocol.
+    loop {
+        let retry = run_once();
+        set_available(false);
+        if !retry {
+            return; // ext-idle-notify not offered here; it won't appear later
+        }
+        std::thread::sleep(Duration::from_secs(5));
+    }
+}
+
+/// Run one connect+dispatch cycle. Returns `true` if the caller should retry
+/// (couldn't connect / roundtrip failed / connection died), `false` if the
+/// compositor has no ext-idle-notify support (don't bother retrying).
+fn run_once() -> bool {
     let Ok(conn) = Connection::connect_to_env() else {
-        return; // not a Wayland session
+        return true; // socket not ready yet - retry
     };
     let mut queue = conn.new_event_queue::<Listener>();
     let qh = queue.handle();
@@ -113,10 +138,10 @@ fn listen() {
 
     let mut listener = Listener::default();
     if queue.roundtrip(&mut listener).is_err() {
-        return;
+        return true;
     }
     let (Some(notifier), Some(seat)) = (listener.notifier.clone(), listener.seat.clone()) else {
-        return; // no ext-idle-notify / seat on this compositor
+        return false; // no ext-idle-notify / seat on this compositor
     };
 
     // Create the notification; idled/resumed then arrive on its Dispatch.
@@ -126,7 +151,7 @@ fn listen() {
     set_available(true);
     // Block dispatching events until the connection dies (compositor exit).
     while queue.blocking_dispatch(&mut listener).is_ok() {}
-    set_available(false);
+    true // connection died - reconnect
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for Listener {
@@ -144,7 +169,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Listener {
         {
             if interface == ExtIdleNotifierV1::interface().name {
                 state.notifier = Some(registry.bind::<ExtIdleNotifierV1, _, _>(name, 1, qh, ()));
-            } else if interface == WlSeat::interface().name {
+            } else if interface == WlSeat::interface().name && state.seat.is_none() {
+                // Bind only the first seat; binding every advertised seat would
+                // leak the earlier proxies and could pick a non-primary seat.
                 state.seat = Some(registry.bind::<WlSeat, _, _>(name, 1, qh, ()));
             }
         }
