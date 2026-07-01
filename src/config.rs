@@ -892,7 +892,7 @@ impl Config {
     }
 
     /// Validate configuration values
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.device_name.is_empty() {
             bail!("device_name is required");
         }

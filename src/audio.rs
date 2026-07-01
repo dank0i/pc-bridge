@@ -23,15 +23,11 @@ use windows::{
     Win32::System::Com::{CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx},
 };
 
-/// Signalled by the IMMNotificationClient callback when the default audio
-/// device changes.  Checked (and cleared) before using the cached endpoint.
-#[cfg(windows)]
-static DEVICE_CHANGED: AtomicBool = AtomicBool::new(false);
-
-/// Monotonic counter bumped on every default-device change. Unlike
-/// `DEVICE_CHANGED` (a consume-once flag for the volume cache), this lets
-/// multiple readers (e.g. the audio-device sensor) detect a change by comparing
-/// against their own last-seen value without racing each other.
+/// Monotonic counter bumped on every default-device change. Each reader (every
+/// thread's endpoint cache and the audio-device sensor) compares it against its
+/// own last-seen value, so all of them observe the change. A consume-once flag
+/// would only be seen by the first reader, leaving other worker threads with a
+/// stale endpoint pointed at the old device.
 #[cfg(windows)]
 static DEVICE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -57,6 +53,8 @@ thread_local! {
     /// Cached audio endpoint volume interface - avoids recreating 3 COM objects per call.
     /// Invalidated on any COM error or when the default audio device changes.
     static CACHED_ENDPOINT: RefCell<Option<IAudioEndpointVolume>> = const { RefCell::new(None) };
+    /// The device-change generation this thread's cache was built against.
+    static LAST_DEVICE_GEN: Cell<u64> = const { Cell::new(0) };
 }
 
 // ---------------------------------------------------------------------------
@@ -77,7 +75,6 @@ impl IMMNotificationClient_Impl for DeviceChangeListener_Impl {
         _pwstrdefaultdeviceid: &windows::core::PCWSTR,
     ) -> windows::core::Result<()> {
         log::debug!("Default audio device changed - will rebuild endpoint cache");
-        DEVICE_CHANGED.store(true, Ordering::Release);
         DEVICE_GENERATION.fetch_add(1, Ordering::Release);
         Ok(())
     }
@@ -164,11 +161,16 @@ fn ensure_com_init() {
 fn get_endpoint_volume() -> Option<IAudioEndpointVolume> {
     ensure_com_init();
 
-    // If the default device changed, drop the stale cache
-    if DEVICE_CHANGED.swap(false, Ordering::Acquire) {
-        log::info!("Default audio device changed - rebuilding endpoint cache");
-        invalidate_endpoint_cache();
-    }
+    // Rebuild this thread's cache if the default device changed since it last
+    // checked (per-thread generation compare, so every thread sees the change).
+    let generation = DEVICE_GENERATION.load(Ordering::Acquire);
+    LAST_DEVICE_GEN.with(|last| {
+        if last.get() != generation {
+            last.set(generation);
+            log::info!("Default audio device changed - rebuilding endpoint cache");
+            invalidate_endpoint_cache();
+        }
+    });
 
     CACHED_ENDPOINT.with(|cell| {
         let cached = cell.borrow();

@@ -438,6 +438,9 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
         disk_sensor_paths: Vec::new(),
     };
 
+    // Validate before saving so the wizard can't produce a config that then
+    // fails to load on the next start (Config::load validates).
+    full_config.validate().map_err(std::io::Error::other)?;
     full_config.save().map_err(std::io::Error::other)?;
 
     let config_path = crate::config::Config::config_path().map_err(std::io::Error::other)?;
