@@ -330,29 +330,55 @@ fn verify_sha256(file_path: &Path, checksum_url: &str) -> anyhow::Result<()> {
 }
 
 fn is_newer_version(remote: &str, current: &str) -> bool {
-    // Stop at the first non-numeric segment so pre-release suffixes like
-    // "beta", "rc1", etc. are excluded rather than silently dropped.
-    // e.g. "4.0.3-beta.1" → [4,0,3] (stops at "beta"), NOT [4,0,3,1].
-    let parse = |v: &str| -> Vec<u32> {
-        v.trim_start_matches('v')
-            .split(['.', '-'])
-            .map_while(|s| s.parse().ok())
-            .collect()
-    };
+    // Split "1.2.3-beta.4" into ([1,2,3], Some("beta.4")).
+    fn parse(v: &str) -> (Vec<u32>, Option<String>) {
+        let v = v.trim_start_matches('v');
+        let (core, pre) = match v.split_once('-') {
+            Some((c, p)) => (c, Some(p.to_string())),
+            None => (v, None),
+        };
+        let nums = core.split('.').map_while(|s| s.parse().ok()).collect();
+        (nums, pre)
+    }
 
-    let remote_parts = parse(remote);
-    let current_parts = parse(current);
+    let (r_nums, r_pre) = parse(remote);
+    let (c_nums, c_pre) = parse(current);
 
-    for (r, c) in remote_parts.iter().zip(current_parts.iter()) {
-        if r > c {
-            return true;
-        }
-        if r < c {
-            return false;
+    // Compare the numeric core (major.minor.patch), missing fields as 0.
+    for i in 0..r_nums.len().max(c_nums.len()) {
+        let r = r_nums.get(i).copied().unwrap_or(0);
+        let c = c_nums.get(i).copied().unwrap_or(0);
+        if r != c {
+            return r > c;
         }
     }
 
-    remote_parts.len() > current_parts.len()
+    // Cores equal: semver precedence. A stable release outranks any pre-release
+    // of the same core; two pre-releases compare by their dot identifiers.
+    match (r_pre, c_pre) {
+        (None, None) => false,
+        (None, Some(_)) => true,  // remote stable > current pre-release
+        (Some(_), None) => false, // remote pre-release < current stable
+        (Some(r), Some(c)) => prerelease_gt(&r, &c),
+    }
+}
+
+/// Semver pre-release precedence: numeric identifiers compare numerically and
+/// rank below alphanumeric ones; more identifiers outrank a prefix.
+fn prerelease_gt(a: &str, b: &str) -> bool {
+    use std::cmp::Ordering;
+    for (ai, bi) in a.split('.').zip(b.split('.')) {
+        let cmp = match (ai.parse::<u64>(), bi.parse::<u64>()) {
+            (Ok(x), Ok(y)) => x.cmp(&y),
+            (Ok(_), Err(_)) => Ordering::Less,
+            (Err(_), Ok(_)) => Ordering::Greater,
+            (Err(_), Err(_)) => ai.cmp(bi),
+        };
+        if cmp != Ordering::Equal {
+            return cmp == Ordering::Greater;
+        }
+    }
+    a.split('.').count() > b.split('.').count()
 }
 
 /// Install update and restart the application.
@@ -590,6 +616,18 @@ mod tests {
     fn test_is_newer_version_shorter_not_newer() {
         // [2,7] vs [2,7,0] - equal prefix but shorter, so not newer
         assert!(!is_newer_version("2.7", "2.7.0"));
+    }
+
+    #[test]
+    fn test_is_newer_version_prerelease_ordering() {
+        // Same core: a later pre-release outranks an earlier one (beta channel).
+        assert!(is_newer_version("2.8.0-beta.2", "2.8.0-beta.1"));
+        assert!(!is_newer_version("2.8.0-beta.1", "2.8.0-beta.2"));
+        // A stable release outranks any pre-release of the same core...
+        assert!(is_newer_version("2.8.0", "2.8.0-beta.1"));
+        // ...and a pre-release never outranks the matching stable (was the bug:
+        // "2.8.0-1" used to parse as [2,8,0,1] and count as newer than 2.8.0).
+        assert!(!is_newer_version("2.8.0-1", "2.8.0"));
     }
 
     // ===== Update channel logic =====
