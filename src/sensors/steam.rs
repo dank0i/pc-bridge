@@ -21,7 +21,26 @@ use crate::AppState;
 const STATE_UPDATE_RUNNING: u32 = 1024; // 0x400
 const STATE_UPDATE_PAUSED: u32 = 2048; // 0x800
 const STATE_DOWNLOADING: u32 = 524288; // 0x80000
+#[allow(dead_code)] // documents the installed bit; used in tests
 const STATE_FULLY_INSTALLED: u32 = 4; // Ready to play
+
+/// All Steam EAppState bits that mean an install/update/download is in progress.
+/// Deliberately excludes FullyInstalled (4) and AppRunning (64) so a running
+/// game isn't mistaken for updating (the old "any non-installed flag" catch-all
+/// did exactly that). Includes both the constants above and the documented
+/// EAppState bits, so it's robust to which exact bits a given Steam version sets.
+const STATE_UPDATE_MASK: u32 = STATE_UPDATE_RUNNING
+    | STATE_UPDATE_PAUSED
+    | STATE_DOWNLOADING
+    | 0x2      // UpdateRequired
+    | 0x20     // FilesMissing
+    | 0x80     // FilesCorrupt
+    | 0x100    // UpdateRunning
+    | 0x200    // UpdateStarted
+    | 0x1_0000 // Reconfiguring
+    | 0x4_0000 // Preallocating
+    | 0x10_0000 // Staging
+    | 0x20_0000; // Committing
 
 #[derive(Debug, Clone)]
 struct GameUpdateState {
@@ -405,29 +424,9 @@ fn extract_vdf_value(line: &str) -> Option<String> {
     }
 }
 
-/// Check if a game's state flags indicate an update in progress
+/// Check if a game's state flags indicate an update in progress.
 fn is_updating(game: &GameUpdateState) -> bool {
-    let flags = game.state_flags;
-
-    // Check if any update-related flag is set
-    if flags & STATE_UPDATE_RUNNING != 0 {
-        return true;
-    }
-    if flags & STATE_UPDATE_PAUSED != 0 {
-        return true;
-    }
-    if flags & STATE_DOWNLOADING != 0 {
-        return true;
-    }
-
-    // If not fully installed (~4), something is in progress
-    // But be careful - newly added games might have 0
-    if flags != 0 && flags != STATE_FULLY_INSTALLED {
-        // Could be installing, updating, etc.
-        return true;
-    }
-
-    false
+    game.state_flags & STATE_UPDATE_MASK != 0
 }
 
 impl SteamSensor {
@@ -547,9 +546,19 @@ mod tests {
     }
 
     #[test]
-    fn test_is_updating_unknown_nonzero() {
-        // Non-zero, non-installed flags → updating
+    fn test_is_updating_update_required() {
+        // 2 = UpdateRequired is a real update bit.
         assert!(is_updating(&make_game(2)));
+    }
+
+    #[test]
+    fn test_is_updating_running_game_not_updating() {
+        // Installed(4) + AppRunning(64) must NOT read as updating (the old
+        // "any non-installed flag" catch-all wrongly did).
+        assert!(!is_updating(&make_game(4 | 64)));
+        assert!(!is_updating(&make_game(64)));
+        // Encrypted(8) / Locked(16) alone are not updates either.
+        assert!(!is_updating(&make_game(8)));
     }
 
     // -- parse_acf_content tests --
