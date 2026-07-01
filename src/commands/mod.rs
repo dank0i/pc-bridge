@@ -102,10 +102,59 @@ pub(crate) fn is_configured_launch(config: &crate::config::Config, payload: &str
         .any(|lc| lc == payload)
 }
 
+/// Global launch/close authorization gate. Returns true if this payload should be
+/// BLOCKED because it targets something outside the configured games list and the
+/// corresponding global permission is off:
+/// - launch schemes (steam/epic/update/validate) need `allow_global_launch`
+///   (default ON) to reach an unconfigured title;
+/// - close/kill need `allow_global_close` (default OFF) to reach a process that
+///   isn't a configured game.
+///
+/// Other schemes (exe/lnk/url) return false here - they're governed by the
+/// separate `allow_raw_commands` / arbitrary-launch gate. Pass the same payload
+/// the resolver consumes (env-expanded on Windows).
+pub(crate) fn global_scheme_blocked(config: &crate::config::Config, payload: &str) -> bool {
+    let Some((scheme, target)) = payload.split_once(':') else {
+        return false;
+    };
+    match scheme.trim().to_ascii_lowercase().as_str() {
+        "steam" | "epic" | "update" | "validate" => {
+            !config.allow_global_launch && !is_configured_launch(config, payload)
+        }
+        "close" | "kill" => {
+            let target = target.trim().trim_end_matches(".exe");
+            !config.allow_global_close && config.matching_game_processes([target]).is_empty()
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{command_feature_enabled, is_arbitrary_launch};
+    use super::{command_feature_enabled, global_scheme_blocked, is_arbitrary_launch};
     use crate::config::FeatureConfig;
+
+    #[test]
+    fn test_global_scheme_gate_defaults() {
+        // Defaults: global launch ON, global close OFF, no configured games.
+        let mut cfg = crate::config::Config::default();
+        assert!(cfg.allow_global_launch && !cfg.allow_global_close);
+
+        // Launch an unconfigured title: allowed by default.
+        assert!(!global_scheme_blocked(&cfg, "steam:730"));
+        assert!(!global_scheme_blocked(&cfg, "epic:Fortnite"));
+        // Close/kill an unconfigured process: blocked by default.
+        assert!(global_scheme_blocked(&cfg, "kill:notepad"));
+        assert!(global_scheme_blocked(&cfg, "close:chrome.exe"));
+        // exe/lnk/url are governed by allow_raw_commands, not this gate.
+        assert!(!global_scheme_blocked(&cfg, "exe:/usr/bin/x"));
+
+        // Flip the permissions.
+        cfg.allow_global_launch = false;
+        assert!(global_scheme_blocked(&cfg, "steam:730")); // now blocked
+        cfg.allow_global_close = true;
+        assert!(!global_scheme_blocked(&cfg, "kill:notepad")); // now allowed
+    }
 
     #[test]
     fn test_is_arbitrary_launch() {

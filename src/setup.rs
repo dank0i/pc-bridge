@@ -440,6 +440,8 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
         custom_commands_enabled: false,
         custom_command_privileges_allowed: false,
         allow_raw_commands: false,
+        allow_global_launch: true,
+        allow_global_close: false,
         discord_keybind: if config.discord_keybind.is_empty() {
             None
         } else {

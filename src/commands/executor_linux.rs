@@ -303,6 +303,16 @@ impl CommandExecutor {
             }
         }
 
+        // Global launch/close gate: steam/epic launches need allow_global_launch
+        // (default on) to reach an unconfigured title; close/kill need
+        // allow_global_close (default OFF) to reach a non-configured process.
+        if crate::commands::global_scheme_blocked(&*state.config.read().await, payload) {
+            warn!(
+                "Blocked '{name}': target isn't a configured game and the global launch/close permission for it is off"
+            );
+            return Ok(());
+        }
+
         // ── Shell commands (predefined → launcher → raw → not found) ─────────────
         let cmd_str = match get_predefined_command(name) {
             Some(cmd) => cmd.to_string(),

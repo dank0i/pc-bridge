@@ -38,6 +38,18 @@ pub struct Config {
     #[serde(default)]
     pub allow_raw_commands: bool,
 
+    /// Allow launch commands (steam:/epic:/update:/validate:) to start titles that
+    /// aren't in the configured games list. Default true: launching a game you own
+    /// is low risk. When false, only configured games can be launched.
+    #[serde(default = "default_true")]
+    pub allow_global_launch: bool,
+
+    /// Allow close/kill commands to target processes that aren't configured games.
+    /// Default false: terminating arbitrary processes by name is the sharp edge, so
+    /// out of the box close/kill only act on your configured games.
+    #[serde(default)]
+    pub allow_global_close: bool,
+
     /// Custom keybind for Discord "leave channel" (e.g. "ctrl+f6", "ctrl+shift+m").
     /// When absent, defaults to ctrl+f6 (Discord's default disconnect keybind).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,6 +87,8 @@ impl Default for Config {
             custom_commands_enabled: false,
             custom_command_privileges_allowed: false,
             allow_raw_commands: false,
+            allow_global_launch: true,
+            allow_global_close: false,
             discord_keybind: None,
             update_channel: default_update_channel(),
             disk_sensor_paths: Vec::new(),
@@ -1310,6 +1324,8 @@ async fn reload_hot_config(state: &AppState) {
 
         // Security-relevant flags
         config.allow_raw_commands = new_config.allow_raw_commands;
+        config.allow_global_launch = new_config.allow_global_launch;
+        config.allow_global_close = new_config.allow_global_close;
 
         // Discord keybind
         config.discord_keybind = new_config.discord_keybind;
@@ -1487,6 +1503,8 @@ mod tests {
             custom_commands_enabled: false,
             custom_command_privileges_allowed: false,
             allow_raw_commands: false,
+            allow_global_launch: true,
+            allow_global_close: false,
             discord_keybind: None,
             custom_sensors: vec![],
             custom_commands: vec![],

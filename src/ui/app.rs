@@ -33,6 +33,8 @@ pub struct App {
     connected: bool,
     beta_updates: bool,
     allow_privileged: bool,
+    allow_global_launch: bool,
+    allow_global_close: bool,
     selected: Group,
     search: String,
     show_library: bool,
@@ -131,6 +133,8 @@ impl App {
             connected: false,
             beta_updates: cfg.update_channel == "beta",
             allow_privileged: cfg.custom_command_privileges_allowed,
+            allow_global_launch: cfg.allow_global_launch,
+            allow_global_close: cfg.allow_global_close,
             selected: Group::Games,
             search: String::new(),
             show_library: false,
@@ -191,6 +195,8 @@ impl App {
         self.cfg.mqtt.user = self.mqtt_user.clone();
         self.cfg.mqtt.pass = self.mqtt_pass.clone();
         self.cfg.custom_command_privileges_allowed = self.allow_privileged;
+        self.cfg.allow_global_launch = self.allow_global_launch;
+        self.cfg.allow_global_close = self.allow_global_close;
         self.cfg.custom_commands_enabled = self.custom_actions_on;
         self.cfg.custom_sensors_enabled = self.custom_sensors_on;
         // A game's process is its detection KEY; two rows sharing one would
@@ -1614,6 +1620,18 @@ fn general_panel(app: &mut App, ui: &mut egui::Ui) {
                 "Allow privileged commands",
                 &format!("{priv_count} actions need admin or are destructive (shutdown, restart, custom command). Off blocks them all."),
                 &mut app.allow_privileged,
+            );
+            switch_row(
+                ui,
+                "Allow launching any game",
+                "On: launch commands can start any Steam/Epic title. Off: only games in your list.",
+                &mut app.allow_global_launch,
+            );
+            switch_row(
+                ui,
+                "Allow closing any process",
+                "On: close/kill commands can target any process by name. Off (default): only your configured games.",
+                &mut app.allow_global_close,
             );
         });
         ui.add_space(BLOCK);

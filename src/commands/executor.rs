@@ -314,6 +314,16 @@ impl CommandExecutor {
             }
         }
 
+        // Global launch/close gate: steam/epic launches need allow_global_launch
+        // (default on) to reach an unconfigured title; close/kill need
+        // allow_global_close (default OFF) to reach a non-configured process.
+        if crate::commands::global_scheme_blocked(&*state.config.read().await, &expanded_payload) {
+            warn!(
+                "Blocked '{name}': target isn't a configured game and the global launch/close permission for it is off"
+            );
+            return Ok(());
+        }
+
         // DiscordJoin is subscribed whenever the discord feature is on but has no
         // inline arm, so its payload falls through to the launcher resolver. It
         // must ONLY carry a discord deep-link; otherwise a steam:/epic:/close:/
