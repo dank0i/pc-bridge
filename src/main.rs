@@ -30,6 +30,7 @@ mod power;
 mod sensors;
 mod setup;
 mod steam;
+mod supervisor;
 mod ui;
 mod updater;
 
@@ -54,7 +55,7 @@ use crate::mqtt::MqttClient;
 use crate::power::PowerEventListener;
 #[cfg(windows)]
 use crate::sensors::ProcessWatcher;
-use crate::sensors::{CustomSensorManager, GameSensor, IdleSensor, SystemSensor};
+use crate::sensors::{IdleSensor, SystemSensor};
 
 /// Application state shared across tasks
 pub struct AppState {
@@ -301,12 +302,9 @@ async fn run_agent() -> anyhow::Result<()> {
         }));
     }
 
-    // Conditionally start sensors based on features
-    if config.features.running_game || config.features.game_catalog {
-        let sensor = GameSensor::new(Arc::clone(&state));
-        handles.push(tokio::spawn(sensor.run()));
-        info!("  Game detection enabled");
-    }
+    // Pure-async polling sensors (gpu, network, disk, uptime, games, custom) are
+    // started/stopped live by the supervisor as their feature flags change; see
+    // its spawn below. The thread-spawning sensors stay startup-gated here.
 
     if config.features.idle_tracking {
         let sensor = IdleSensor::new(Arc::clone(&state));
@@ -372,13 +370,6 @@ async fn run_agent() -> anyhow::Result<()> {
         info!("  Steam update detection enabled (filesystem watcher)");
     }
 
-    if config.features.gpu_sensor {
-        use crate::sensors::GpuSensor;
-        let sensor = GpuSensor::new(Arc::clone(&state));
-        handles.push(tokio::spawn(sensor.run()));
-        info!("  GPU sensor enabled");
-    }
-
     #[cfg(windows)]
     if config.features.hwinfo_sensor {
         use crate::sensors::hwinfo::HwInfoSensor;
@@ -387,31 +378,11 @@ async fn run_agent() -> anyhow::Result<()> {
         info!("  HWiNFO sensor enabled (Global\\HWiNFO_SENS_SM2 lazy poll @ 500ms)");
     }
 
-    if config.features.network_sensor {
-        use crate::sensors::NetworkSensor;
-        let sensor = NetworkSensor::new(Arc::clone(&state));
-        handles.push(tokio::spawn(sensor.run()));
-        info!("  Network throughput sensor enabled");
-    }
+    // gpu / network / disk / uptime are supervised (started below).
 
-    if config.features.disk_sensor {
-        use crate::sensors::DiskSensor;
-        let sensor = DiskSensor::new(Arc::clone(&state));
-        handles.push(tokio::spawn(sensor.run()));
-        info!("  Disk usage sensor enabled");
-    }
-
-    if config.features.uptime_sensor {
-        use crate::sensors::UptimeSensor;
-        let sensor = UptimeSensor::new(Arc::clone(&state));
-        handles.push(tokio::spawn(sensor.run()));
-        info!("  System uptime sensor enabled");
-    }
-
-    // Custom sensors (if enabled and defined)
+    // Custom sensors: the manager TASK is supervised (started below); the
+    // discovery registration is done here once (and on hot-reload).
     if config.custom_sensors_enabled && !config.custom_sensors.is_empty() {
-        let manager = CustomSensorManager::new(Arc::clone(&state));
-        handles.push(tokio::spawn(manager.run()));
         state
             .mqtt
             .register_custom_sensors(&config.custom_sensors)
@@ -421,6 +392,13 @@ async fn run_agent() -> anyhow::Result<()> {
             config.custom_sensors.len()
         );
     }
+
+    // Runtime supervisor for the pure-async polling sensors: starts/stops them
+    // live as feature flags change (no restart), gpu/network/disk/uptime/games/
+    // custom.
+    handles.push(tokio::spawn(
+        supervisor::Supervisor::new(Arc::clone(&state)).run(),
+    ));
 
     // Custom commands (just register discovery, executor handles them)
     if config.custom_commands_enabled && !config.custom_commands.is_empty() {
