@@ -278,12 +278,19 @@ impl CommandExecutor {
             return Ok(());
         }
 
-        // Resolve shell command from name/payload
+        // Resolve shell command from name/payload.
         let allow_raw = state.config.read().await.allow_raw_commands;
-        let cmd_str = match resolve_shell_command(name, payload, allow_raw) {
-            ShellResolution::Predefined(cmd)
-            | ShellResolution::LauncherShortcut(cmd)
-            | ShellResolution::RawCommand(cmd) => cmd,
+        // Expand env vars in the payload BEFORE validation, so a %VAR% whose
+        // value contains shell metacharacters is rejected by is_safe_path/url
+        // rather than smuggled past the whitelist after the check.
+        let expanded_payload = expand_env_vars(payload);
+        let cmd_str = match resolve_shell_command(name, &expanded_payload, allow_raw) {
+            // Predefined commands are trusted and may embed env vars (e.g.
+            // Screensaver = %windir%\...), so expand their output here.
+            ShellResolution::Predefined(cmd) => expand_env_vars(&cmd),
+            // Launcher output was validated post-expansion; raw is the (opt-in)
+            // already-expanded payload. Neither needs another expansion pass.
+            ShellResolution::LauncherShortcut(cmd) | ShellResolution::RawCommand(cmd) => cmd,
             ShellResolution::Blocked => {
                 warn!("Raw command blocked (allow_raw_commands=false): {}", name);
                 return Ok(());
@@ -297,15 +304,12 @@ impl CommandExecutor {
         // For steam:// protocol commands, wait for Steam to be running before executing.
         // When the PC was just booted via WoL, Steam may not have started yet and
         // the steam:// protocol URL would be silently dropped.
-        if payload.starts_with("steam:")
-            || payload.starts_with("update:")
-            || payload.starts_with("validate:")
+        if expanded_payload.starts_with("steam:")
+            || expanded_payload.starts_with("update:")
+            || expanded_payload.starts_with("validate:")
         {
             wait_for_steam(state).await;
         }
-
-        // Expand environment variables
-        let cmd_str = expand_env_vars(&cmd_str);
 
         info!("Running: {}", cmd_str);
 
