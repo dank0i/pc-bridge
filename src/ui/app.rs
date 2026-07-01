@@ -52,12 +52,28 @@ pub struct App {
     /// The real on-disk config. Settings widgets read/write the App fields
     /// above; Save folds them back into this and persists.
     cfg: Config,
+    /// Set when an existing config existed but failed to load (corrupt file,
+    /// credential can't decrypt). While set, Save is disabled so we never
+    /// overwrite the user's real config with blank defaults.
+    load_error: Option<String>,
 }
 
 impl App {
     pub fn new() -> Self {
-        // Load the real config; fall back to defaults on first run / no file.
-        let cfg = Config::load().unwrap_or_default();
+        // Load the real config. A first run (no file) is fine and starts from
+        // defaults; a genuine load failure (corrupt file / undecryptable
+        // credential) must NOT be shown as blank defaults, or Save would clobber
+        // the real config and delete the credential file.
+        let (cfg, load_error) = match Config::load() {
+            Ok(cfg) => (cfg, None),
+            Err(e) => {
+                if Config::is_first_run().unwrap_or(false) {
+                    (Config::default(), None)
+                } else {
+                    (Config::default(), Some(format!("{e:#}")))
+                }
+            }
+        };
         let (mqtt_host, mqtt_port) = split_broker(&cfg.mqtt.broker);
         let mut features = registry();
         for f in &mut features {
@@ -92,13 +108,20 @@ impl App {
             features,
             library: games_to_library(&cfg.games),
             cfg,
+            load_error,
         }
     }
 
     /// Fold the edited settings back into the config and persist them.
     fn save(&mut self) -> anyhow::Result<()> {
+        if let Some(e) = &self.load_error {
+            anyhow::bail!("refusing to overwrite a config that failed to load: {e}");
+        }
         for f in &self.features {
-            flag_set(&mut self.cfg.features, f.id, f.enabled);
+            // Honor the group master: a group toggled off saves its features
+            // off, so the persisted state matches what the UI shows.
+            let on = f.enabled && self.master_on(f);
+            flag_set(&mut self.cfg.features, f.id, on);
         }
         self.cfg.device_name = self.device.clone();
         self.cfg.mqtt.broker = if self.mqtt_port.is_empty() {
@@ -1266,10 +1289,28 @@ fn general_panel(app: &mut App, ui: &mut egui::Ui) {
                 }
             }
             ui.add_space(GAP);
+            if let Some(err) = &app.load_error {
+                ui.label(
+                    RichText::new(format!("Config failed to load: {err}"))
+                        .color(RED)
+                        .size(13.0),
+                );
+                ui.label(
+                    RichText::new(
+                        "Saving is disabled to avoid overwriting your existing config. Fix the file or credential and reopen.",
+                    )
+                    .color(TEXT_DIM)
+                    .size(12.0),
+                );
+                ui.add_space(GAP);
+            }
+            let can_save = app.load_error.is_none();
             ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
-                    app.connected = app.save().is_ok();
-                }
+                ui.add_enabled_ui(can_save, |ui| {
+                    if ui.button("Save").clicked() {
+                        app.connected = app.save().is_ok();
+                    }
+                });
                 if ui.button("Test connection").clicked() {
                     app.connected = true;
                 }
