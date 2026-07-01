@@ -959,6 +959,32 @@ impl MqttClient {
             );
         }
     }
+
+    /// Tear down removed custom entities by publishing an empty retained config to
+    /// their discovery topics (the HA remove pattern), so a custom sensor/command
+    /// deleted from the config actually disappears from HA instead of lingering as
+    /// a dead retained entity. Topics mirror `register_custom_*` exactly.
+    pub(crate) async fn clear_custom_entities(
+        &self,
+        removed_sensors: &[String],
+        removed_commands: &[String],
+    ) {
+        for name in removed_sensors {
+            let topic = self.config_topic("sensor", &format!("custom_{name}"));
+            self.publish_discovery(&topic, Vec::<u8>::new()).await;
+        }
+        for name in removed_commands {
+            let topic = self.config_topic("button", name);
+            self.publish_discovery(&topic, Vec::<u8>::new()).await;
+        }
+        if !removed_sensors.is_empty() || !removed_commands.is_empty() {
+            info!(
+                "Cleared {} custom sensor(s) and {} custom command(s) from HA discovery",
+                removed_sensors.len(),
+                removed_commands.len()
+            );
+        }
+    }
 }
 
 /// Windows-only HWiNFO sensor object ids (mirrors the `#[cfg(windows)]` HWiNFO

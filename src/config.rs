@@ -1232,9 +1232,20 @@ async fn reload_hot_config(state: &AppState) {
         // Discord keybind
         config.discord_keybind = new_config.discord_keybind;
 
-        // Also reload custom sensors/commands config
+        // Also reload custom sensors/commands config. Capture the old entity
+        // names first so we can tear down any that were removed.
         let old_sensors_enabled = config.custom_sensors_enabled;
         let old_commands_enabled = config.custom_commands_enabled;
+        let old_sensor_names: Vec<String> = config
+            .custom_sensors
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        let old_command_names: Vec<String> = config
+            .custom_commands
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
 
         config.custom_sensors_enabled = new_config.custom_sensors_enabled;
         config.custom_commands_enabled = new_config.custom_commands_enabled;
@@ -1249,6 +1260,28 @@ async fn reload_hot_config(state: &AppState) {
         let new_commands_enabled = config.custom_commands_enabled;
         let new_privileges_allowed = config.custom_command_privileges_allowed;
 
+        // Snapshot the new custom entities (to re-register) and which were removed
+        // (to tear down), while still holding the lock. If a category is now
+        // disabled, ALL of its entities count as removed.
+        let new_sensors = config.custom_sensors.clone();
+        let new_commands = config.custom_commands.clone();
+        let removed_sensors: Vec<String> = if new_sensors_enabled {
+            old_sensor_names
+                .into_iter()
+                .filter(|n| !new_sensors.iter().any(|s| &s.name == n))
+                .collect()
+        } else {
+            old_sensor_names
+        };
+        let removed_commands: Vec<String> = if new_commands_enabled {
+            old_command_names
+                .into_iter()
+                .filter(|n| !new_commands.iter().any(|c| &c.name == n))
+                .collect()
+        } else {
+            old_command_names
+        };
+
         // Drop write lock before notifying subscribers
         drop(config);
 
@@ -1256,6 +1289,20 @@ async fn reload_hot_config(state: &AppState) {
 
         // Notify subscribers (e.g., GameSensor) that config changed
         let _ = state.config_generation.send(());
+
+        // Tear down removed custom entities, then (re)register the current set so
+        // additions/edits appear and deletions disappear from HA on hot-reload
+        // (previously custom entities were only registered once at startup).
+        state
+            .mqtt
+            .clear_custom_entities(&removed_sensors, &removed_commands)
+            .await;
+        if new_sensors_enabled {
+            state.mqtt.register_custom_sensors(&new_sensors).await;
+        }
+        if new_commands_enabled {
+            state.mqtt.register_custom_commands(&new_commands).await;
+        }
 
         // Log security-relevant changes (using captured locals - no lock needed)
         if new_sensors_enabled != old_sensors_enabled {
