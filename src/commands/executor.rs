@@ -281,13 +281,24 @@ impl CommandExecutor {
             return Ok(());
         }
 
+        // Resolve shell command from name/payload.
+        let allow_raw = state.config.read().await.allow_raw_commands;
+        // Expand env vars in the payload BEFORE validation, so a %VAR% whose
+        // value contains shell metacharacters is rejected by is_safe_path/url
+        // rather than smuggled past the whitelist after the check.
+        let expanded_payload = expand_env_vars(payload);
+
         // Authorization: exe:/lnk:/url: payloads run an arbitrary program or URL,
         // which would defeat the allow_raw_commands=false guarantee (the launcher
-        // shortcut path is otherwise "always allowed"). Only run them if they
-        // match a configured game's launch command or raw commands are enabled.
-        if crate::commands::is_arbitrary_launch(payload) {
+        // shortcut path is otherwise "always allowed"). Check the EXPANDED payload
+        // (env vars could inject the scheme) and authorize against a configured
+        // game's launch command (matched raw OR expanded).
+        if crate::commands::is_arbitrary_launch(&expanded_payload) {
             let cfg = state.config.read().await;
-            if !cfg.allow_raw_commands && !crate::commands::is_configured_launch(&cfg, payload) {
+            if !cfg.allow_raw_commands
+                && !crate::commands::is_configured_launch(&cfg, payload)
+                && !crate::commands::is_configured_launch(&cfg, &expanded_payload)
+            {
                 warn!(
                     "Blocked unconfigured launch payload for '{}' (add it as a game or enable allow_raw_commands)",
                     name
@@ -296,12 +307,6 @@ impl CommandExecutor {
             }
         }
 
-        // Resolve shell command from name/payload.
-        let allow_raw = state.config.read().await.allow_raw_commands;
-        // Expand env vars in the payload BEFORE validation, so a %VAR% whose
-        // value contains shell metacharacters is rejected by is_safe_path/url
-        // rather than smuggled past the whitelist after the check.
-        let expanded_payload = expand_env_vars(payload);
         let cmd_str = match resolve_shell_command(name, &expanded_payload, allow_raw) {
             // Predefined commands are trusted and may embed env vars (e.g.
             // Screensaver = %windir%\...), so expand their output here.

@@ -37,8 +37,19 @@ pub(crate) fn command_feature_enabled(name: &str, f: &FeatureConfig) -> bool {
 /// A launch `payload` whose scheme runs an arbitrary program or URL (`exe:`,
 /// `lnk:`, `url:`), as opposed to the ID/name-restricted schemes (`steam:`,
 /// `epic:`, `close:`, `kill:`, `update:`, `validate:`).
+///
+/// The scheme is extracted EXACTLY as `expand_launcher_shortcut` does (split at
+/// the first ':', trim, lowercase), so `EXE:`, `exe :`, etc. can't slip past the
+/// gate while still resolving to a launch. Callers must pass the same string the
+/// resolver consumes (on Windows that is the env-expanded payload).
 pub(crate) fn is_arbitrary_launch(payload: &str) -> bool {
-    payload.starts_with("exe:") || payload.starts_with("lnk:") || payload.starts_with("url:")
+    match payload.split_once(':') {
+        Some((scheme, _)) => matches!(
+            scheme.trim().to_ascii_lowercase().as_str(),
+            "exe" | "lnk" | "url"
+        ),
+        None => false,
+    }
 }
 
 /// Whether `payload` matches a configured game's launch command (what Home
@@ -67,6 +78,17 @@ mod tests {
         assert!(!is_arbitrary_launch("steam:730"));
         assert!(!is_arbitrary_launch("epic:Fortnite"));
         assert!(!is_arbitrary_launch("close:notepad"));
+    }
+
+    #[test]
+    fn test_is_arbitrary_launch_normalizes_scheme() {
+        // The resolver lowercases + trims the scheme, so the gate must too, or
+        // these would slip past while still resolving to a launch.
+        assert!(is_arbitrary_launch("EXE:C:/x.exe"));
+        assert!(is_arbitrary_launch("Exe:C:/x.exe"));
+        assert!(is_arbitrary_launch("exe :C:/x.exe"));
+        assert!(is_arbitrary_launch("  URL:steam://run/1"));
+        assert!(is_arbitrary_launch("LNK:C:/x.lnk"));
     }
 
     #[test]
