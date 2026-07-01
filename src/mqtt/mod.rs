@@ -387,68 +387,39 @@ impl MqttClient {
     // Discovery registration (`register_*` methods) lives in mqtt/discovery.rs
 
     /// Build list of topics to subscribe to (for initial subscription and reconnection)
+    /// Every native command the agent can receive. The subscribe set is this
+    /// list filtered by `command_feature_enabled` - the SAME gate the executor
+    /// applies - so we never subscribe to a command we would refuse to run, and
+    /// the two can't drift apart.
+    const NATIVE_COMMANDS: &[&str] = &[
+        "Launch",
+        "CloseGame",
+        "RefreshSteamGames",
+        "Screensaver",
+        "Wake",
+        "DiscordJoin",
+        "DiscordLeaveChannel",
+        "Shutdown",
+        "Restart",
+        "Sleep",
+        "Hibernate",
+        "Lock",
+        "Logoff",
+        "MonitorOff",
+        "MonitorOn",
+        "MediaPlayPause",
+        "MediaNext",
+        "MediaPrevious",
+        "MediaStop",
+        "VolumeSet",
+        "VolumeMute",
+    ];
+
     fn build_subscribe_topics(device_name: &str, config: &Config) -> Vec<String> {
         let mut topics = Vec::new();
 
-        // Core commands
-        let commands = [
-            "Launch",
-            "CloseGame",
-            "RefreshSteamGames",
-            "Screensaver",
-            "Wake",
-            "DiscordJoin",
-            "DiscordLeaveChannel",
-        ];
-
-        for cmd in commands {
-            topics.push(format!(
-                "{}/button/{}/{}/action",
-                DISCOVERY_PREFIX, device_name, cmd
-            ));
-        }
-
-        // Power commands - each gated by its own feature flag so a disabled
-        // power button is not even subscribed to.
-        let mut power_cmds: Vec<&str> = Vec::new();
-        if config.features.cmd_shutdown {
-            power_cmds.push("Shutdown");
-        }
-        if config.features.cmd_restart {
-            power_cmds.push("Restart");
-        }
-        if config.features.cmd_sleep {
-            power_cmds.push("Sleep");
-            power_cmds.push("Hibernate");
-        }
-        if config.features.cmd_lock {
-            power_cmds.push("Lock");
-        }
-        if config.features.cmd_logoff {
-            power_cmds.push("Logoff");
-        }
-        if config.features.cmd_monitor {
-            power_cmds.push("MonitorOff");
-            power_cmds.push("MonitorOn");
-        }
-        for cmd in power_cmds {
-            topics.push(format!(
-                "{}/button/{}/{}/action",
-                DISCOVERY_PREFIX, device_name, cmd
-            ));
-        }
-
-        // Audio commands if either volume or media controls are enabled
-        if config.features.volume || config.features.media_controls {
-            let audio_commands = [
-                "MediaPlayPause",
-                "MediaNext",
-                "MediaPrevious",
-                "MediaStop",
-                "VolumeSet",
-                "VolumeMute",
-            ];
-            for cmd in audio_commands {
+        for &cmd in Self::NATIVE_COMMANDS {
+            if crate::commands::command_feature_enabled(cmd, &config.features) {
                 topics.push(format!(
                     "{}/button/{}/{}/action",
                     DISCOVERY_PREFIX, device_name, cmd
@@ -1112,15 +1083,19 @@ mod tests {
         let topics = MqttClient::build_subscribe_topics("test-pc", &config);
 
         // Default features: power flags (sleep/wake, display, cmd_*) true, all
-        // others false. Core + enabled power commands are subscribed.
-        assert!(
-            topics.contains(&"homeassistant/button/test-pc/RefreshSteamGames/action".to_string())
-        );
+        // others false. Enabled power commands are subscribed.
         assert!(topics.contains(&"homeassistant/button/test-pc/Sleep/action".to_string()));
         assert!(topics.contains(&"homeassistant/button/test-pc/Shutdown/action".to_string()));
         assert!(topics.contains(&"homeassistant/button/test-pc/Lock/action".to_string()));
         assert!(topics.contains(&"homeassistant/button/test-pc/Restart/action".to_string()));
         assert!(topics.contains(&"homeassistant/button/test-pc/Hibernate/action".to_string()));
+
+        // Game/Discord commands are gated by their own (default-off) features,
+        // so they are NOT subscribed - matching the executor gate exactly.
+        assert!(
+            !topics.contains(&"homeassistant/button/test-pc/RefreshSteamGames/action".to_string())
+        );
+        assert!(!topics.contains(&"homeassistant/button/test-pc/Launch/action".to_string()));
 
         // Audio commands should NOT be present (audio_control=false)
         assert!(
@@ -1130,6 +1105,29 @@ mod tests {
 
         // Notifications should NOT be present
         assert!(!topics.contains(&"pc-bridge/notifications/test-pc".to_string()));
+    }
+
+    #[test]
+    fn test_subscribe_topics_match_executor_gate() {
+        // Single source of truth: every native command topic that is subscribed
+        // must also pass the executor's feature gate, and vice versa. This guards
+        // against the subscribe list drifting from what the executor will run.
+        let features = FeatureConfig {
+            steam_library: true,
+            launch_game: true,
+            discord: true,
+            volume: true,
+            ..FeatureConfig::default()
+        };
+        let config = test_config("test-pc", features);
+        let topics = MqttClient::build_subscribe_topics("test-pc", &config);
+
+        for &cmd in MqttClient::NATIVE_COMMANDS {
+            let topic = format!("homeassistant/button/test-pc/{cmd}/action");
+            let subscribed = topics.contains(&topic);
+            let gated_on = crate::commands::command_feature_enabled(cmd, &config.features);
+            assert_eq!(subscribed, gated_on, "subscribe/execute mismatch for {cmd}");
+        }
     }
 
     #[test]
