@@ -14,6 +14,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use crate::AppState;
+use crate::power::sync_mqtt::{SyncMqttConfig, parse_broker_url, sync_mqtt_publish_sleep};
 
 /// Power-related events from D-Bus monitor threads
 enum PowerEvent {
@@ -32,8 +33,41 @@ impl PowerEventListener {
         Self { state }
     }
 
+    /// Take a systemd-logind "sleep" delay-inhibitor. While the returned fd is
+    /// held, logind waits (up to InhibitDelayMaxSec, ~5s) after PrepareForSleep
+    /// before actually suspending, giving us a window to publish "sleeping"
+    /// before the NIC drops. Dropping the fd releases the lock. `None` if logind
+    /// isn't reachable (non-systemd system).
+    fn take_sleep_inhibitor() -> Option<zbus::zvariant::OwnedFd> {
+        let conn = zbus::blocking::Connection::system().ok()?;
+        let reply = conn
+            .call_method(
+                Some("org.freedesktop.login1"),
+                "/org/freedesktop/login1",
+                Some("org.freedesktop.login1.Manager"),
+                "Inhibit",
+                &(
+                    "sleep",
+                    "pc-bridge",
+                    "Publish sleep state before suspend",
+                    "delay",
+                ),
+            )
+            .ok()?;
+        reply.body().deserialize::<zbus::zvariant::OwnedFd>().ok()
+    }
+
     pub async fn run(self) {
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
+
+        // Hold a delay-inhibitor so an externally initiated suspend (power
+        // button, lid, auto-sleep) still gets "sleeping" on the wire before the
+        // NIC drops - mirroring the Windows sync-before-suspend path. Released on
+        // the Sleep event (after the sync publish) and re-armed on Wake.
+        let mut sleep_inhibitor = Self::take_sleep_inhibitor();
+        if sleep_inhibitor.is_some() {
+            info!("Holding systemd sleep delay-inhibitor for pre-suspend publish");
+        }
 
         // Channel for events from blocking D-Bus reader threads
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<PowerEvent>(8);
@@ -79,11 +113,42 @@ impl PowerEventListener {
                     match event {
                         PowerEvent::Sleep => {
                             info!("Power event: SLEEP");
+                            // Guaranteed-delivery sync publish (fresh TCP) before we
+                            // release the inhibitor and the system suspends. Offloaded
+                            // so the blocking connect doesn't stall the runtime.
+                            let cfg = {
+                                let config = self.state.config.read().await;
+                                let (host, port, use_tls) = parse_broker_url(&config.mqtt.broker);
+                                SyncMqttConfig {
+                                    host,
+                                    port,
+                                    use_tls,
+                                    user: config.mqtt.user.clone(),
+                                    pass: config.mqtt.pass.clone(),
+                                    client_id: format!("{}-sleep", config.client_id()),
+                                    sleep_topic: format!(
+                                        "homeassistant/sensor/{}/sleep_state/state",
+                                        config.device_name
+                                    ),
+                                }
+                            };
+                            match tokio::task::spawn_blocking(move || sync_mqtt_publish_sleep(&cfg))
+                                .await
+                            {
+                                Ok(Ok(())) => info!("Sleep state pre-published via sync TCP"),
+                                Ok(Err(e)) => warn!("Sync MQTT sleep pre-publish failed: {}", e),
+                                Err(e) => warn!("Sync publish task join error: {}", e),
+                            }
                             self.state.mqtt.publish_sensor_retained("sleep_state", "sleeping").await;
+                            // Drop the fd to release the delay-inhibitor: logind now
+                            // proceeds to suspend.
+                            drop(sleep_inhibitor.take());
                         }
                         PowerEvent::Wake => {
                             info!("Power event: WAKE");
                             self.state.mqtt.publish_sensor_retained("sleep_state", "awake").await;
+                            // Re-arm the inhibitor for the next suspend.
+                            sleep_inhibitor = Self::take_sleep_inhibitor();
                         }
                         PowerEvent::DisplayOff => {
                             info!("Power event: DISPLAY OFF");
