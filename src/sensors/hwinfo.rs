@@ -2,7 +2,7 @@
 //!
 //! Lazily polls `Global\HWiNFO_SENS_SM2` every 500 ms by reading just the
 //! `pollTime` field. When HWiNFO advances pollTime, we do a full parse and
-//! republish the 15 mapped sensor values (if changed beyond a threshold or
+//! republish the ~20 mapped sensor values (if changed beyond a threshold or
 //! 30 s stale).
 //!
 //! Mid-session HWiNFO start/stop is auto-detected: we try `HwInfoClient::open()`

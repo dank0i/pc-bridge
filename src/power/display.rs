@@ -171,7 +171,7 @@ fn prevent_sleep_temporary(duration: Duration) {
         SetThreadExecutionState,
     };
 
-    // Only spawn one prevention goroutine at a time
+    // Only spawn one prevention thread at a time
     if SLEEP_PREVENTION_ACTIVE
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
