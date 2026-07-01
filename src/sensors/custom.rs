@@ -111,12 +111,22 @@ impl CustomSensorManager {
                     for sensor in &sensors {
                         let due = next_due.get(&sensor.name).copied().unwrap_or(poll_now);
                         if poll_now >= due {
-                            let value = self.poll_sensor(sensor).await;
-
-                            // Publish to MQTT
                             let topic_name = format!("custom_{}", sensor.name);
-                            self.state.mqtt.publish_sensor(&topic_name, &value).await;
-                            debug!("Custom sensor '{}' = {}", sensor.name, value);
+                            match self.poll_sensor(sensor).await {
+                                Ok(value) => {
+                                    self.state.mqtt.publish_sensor(&topic_name, &value).await;
+                                    debug!("Custom sensor '{}' = {}", sensor.name, value);
+                                }
+                                Err(reason) => {
+                                    // Mark the sensor unavailable in HA rather than
+                                    // publishing the error text as its value.
+                                    debug!("Custom sensor '{}' failed: {}", sensor.name, reason);
+                                    self.state
+                                        .mqtt
+                                        .publish_sensor(&topic_name, "unavailable")
+                                        .await;
+                                }
+                            }
 
                             // Schedule next poll at exact interval from due time
                             next_due.insert(
@@ -130,8 +140,9 @@ impl CustomSensorManager {
         }
     }
 
-    /// Poll a single custom sensor and return its value
-    async fn poll_sensor(&self, sensor: &CustomSensor) -> String {
+    /// Poll a single custom sensor. `Ok` is the value; `Err` is a failure reason
+    /// (published as HA "unavailable", not as the sensor value).
+    async fn poll_sensor(&self, sensor: &CustomSensor) -> Result<String, String> {
         match sensor.sensor_type {
             CustomSensorType::Powershell => self.poll_powershell(sensor).await,
             CustomSensorType::ProcessExists => self.poll_process_exists(sensor).await,
@@ -142,11 +153,11 @@ impl CustomSensorManager {
 
     /// Execute PowerShell script and return output
     #[cfg(windows)]
-    async fn poll_powershell(&self, sensor: &CustomSensor) -> String {
-        let script = match &sensor.script {
-            Some(s) => s.clone(),
-            None => return "error: no script".to_string(),
-        };
+    async fn poll_powershell(&self, sensor: &CustomSensor) -> Result<String, String> {
+        let script = sensor
+            .script
+            .clone()
+            .ok_or_else(|| "no script".to_string())?;
 
         let result = tokio::task::spawn_blocking(move || {
             let output = Command::new("powershell")
@@ -155,34 +166,31 @@ impl CustomSensorManager {
                 .output();
 
             match output {
-                Ok(out) => {
-                    if out.status.success() {
-                        String::from_utf8_lossy(&out.stdout).trim().to_string()
-                    } else {
-                        let stderr = String::from_utf8_lossy(&out.stderr);
-                        format!("error: {}", stderr.trim())
-                    }
+                Ok(out) if out.status.success() => {
+                    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
                 }
-                Err(e) => format!("error: {}", e),
+                Ok(out) => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+                Err(e) => Err(e.to_string()),
             }
         })
         .await;
 
-        result.unwrap_or_else(|e| format!("error: {}", e))
+        result.unwrap_or_else(|e| Err(e.to_string()))
     }
 
     #[cfg(unix)]
-    async fn poll_powershell(&self, _sensor: &CustomSensor) -> String {
-        "error: powershell not available on this platform".to_string()
+    async fn poll_powershell(&self, _sensor: &CustomSensor) -> Result<String, String> {
+        Err("powershell not available on this platform".to_string())
     }
 
     /// Check if a process exists (uses always-up-to-date process watcher)
     #[cfg(windows)]
-    async fn poll_process_exists(&self, sensor: &CustomSensor) -> String {
-        let process = match &sensor.process {
-            Some(p) => p.to_lowercase(),
-            None => return "error: no process".to_string(),
-        };
+    async fn poll_process_exists(&self, sensor: &CustomSensor) -> Result<String, String> {
+        let process = sensor
+            .process
+            .as_ref()
+            .ok_or_else(|| "no process".to_string())?
+            .to_lowercase();
 
         let state = self.state.process_watcher.state();
         let guard = state.read().await;
@@ -190,21 +198,19 @@ impl CustomSensorManager {
             name.eq_ignore_ascii_case(&process) || contains_ignore_ascii_case(name, &process)
         });
 
-        if exists { "on" } else { "off" }.to_string()
+        Ok(if exists { "on" } else { "off" }.to_string())
     }
 
     #[cfg(unix)]
-    async fn poll_process_exists(&self, sensor: &CustomSensor) -> String {
-        let process = match &sensor.process {
-            Some(p) => p.clone(),
-            None => return "error: no process".to_string(),
-        };
+    async fn poll_process_exists(&self, sensor: &CustomSensor) -> Result<String, String> {
+        let process = sensor
+            .process
+            .clone()
+            .ok_or_else(|| "no process".to_string())?;
 
-        let result = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             // Scan /proc/*/comm directly - no subprocess spawn needed
-            let Ok(entries) = std::fs::read_dir("/proc") else {
-                return "error";
-            };
+            let entries = std::fs::read_dir("/proc").map_err(|e| e.to_string())?;
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let Some(name_str) = name.to_str() else {
@@ -216,41 +222,40 @@ impl CustomSensorManager {
                 if let Ok(comm) = std::fs::read_to_string(entry.path().join("comm"))
                     && comm.trim().eq_ignore_ascii_case(&process)
                 {
-                    return "on";
+                    return Ok("on".to_string());
                 }
             }
-            "off"
+            Ok("off".to_string())
         })
-        .await;
-
-        result.unwrap_or("error").to_string()
+        .await
+        .map_err(|e| e.to_string())?
     }
 
     /// Read file contents
-    async fn poll_file_contents(&self, sensor: &CustomSensor) -> String {
-        let path = match &sensor.file_path {
-            Some(p) => p.clone(),
-            None => return "error: no file_path".to_string(),
-        };
+    async fn poll_file_contents(&self, sensor: &CustomSensor) -> Result<String, String> {
+        let path = sensor
+            .file_path
+            .clone()
+            .ok_or_else(|| "no file_path".to_string())?;
 
         match tokio::task::spawn_blocking(move || std::fs::read_to_string(&path)).await {
-            Ok(Ok(contents)) => contents.trim().to_string(),
-            Ok(Err(e)) => format!("error: {}", e),
-            Err(e) => format!("error: {}", e),
+            Ok(Ok(contents)) => Ok(contents.trim().to_string()),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(e) => Err(e.to_string()),
         }
     }
 
     /// Read registry value (Windows only)
     #[cfg(windows)]
-    async fn poll_registry(&self, sensor: &CustomSensor) -> String {
-        let key = match &sensor.registry_key {
-            Some(k) => k.clone(),
-            None => return "error: no registry_key".to_string(),
-        };
-        let value = match &sensor.registry_value {
-            Some(v) => v.clone(),
-            None => return "error: no registry_value".to_string(),
-        };
+    async fn poll_registry(&self, sensor: &CustomSensor) -> Result<String, String> {
+        let key = sensor
+            .registry_key
+            .clone()
+            .ok_or_else(|| "no registry_key".to_string())?;
+        let value = sensor
+            .registry_value
+            .clone()
+            .ok_or_else(|| "no registry_value".to_string())?;
 
         let result = tokio::task::spawn_blocking(move || {
             use winreg::RegKey;
@@ -266,32 +271,29 @@ impl CustomSensorManager {
             } else if let Some(rest) = key.strip_prefix("HKCU\\") {
                 (HKEY_CURRENT_USER, rest)
             } else {
-                return format!("error: unsupported registry hive in '{}'", key);
+                return Err(format!("unsupported registry hive in '{}'", key));
             };
 
-            let reg_key = match RegKey::predef(hive).open_subkey(subkey) {
-                Ok(k) => k,
-                Err(e) => return format!("error: {}", e),
-            };
+            let reg_key = RegKey::predef(hive)
+                .open_subkey(subkey)
+                .map_err(|e| e.to_string())?;
 
             match reg_key.get_value::<String, _>(&value) {
-                Ok(v) => v,
-                Err(_) => {
-                    // Try as DWORD
-                    match reg_key.get_value::<u32, _>(&value) {
-                        Ok(v) => v.to_string(),
-                        Err(e) => format!("error: {}", e),
-                    }
-                }
+                Ok(v) => Ok(v),
+                // Fall back to reading it as a DWORD.
+                Err(_) => reg_key
+                    .get_value::<u32, _>(&value)
+                    .map(|v| v.to_string())
+                    .map_err(|e| e.to_string()),
             }
         })
         .await;
 
-        result.unwrap_or_else(|e| format!("error: {}", e))
+        result.unwrap_or_else(|e| Err(e.to_string()))
     }
 
     #[cfg(unix)]
-    async fn poll_registry(&self, _sensor: &CustomSensor) -> String {
-        "error: registry not available on this platform".to_string()
+    async fn poll_registry(&self, _sensor: &CustomSensor) -> Result<String, String> {
+        Err("registry not available on this platform".to_string())
     }
 }
