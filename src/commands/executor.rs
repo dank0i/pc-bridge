@@ -174,7 +174,10 @@ impl CommandExecutor {
                     .await;
                 tokio::task::yield_now().await;
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                sleep();
+                // SetSuspendState blocks until the machine RESUMES, so run it off
+                // the single-threaded runtime or MQTT keepalives/timers freeze for
+                // the whole suspend (and a vetoed/slow suspend would wedge them).
+                let _ = tokio::task::spawn_blocking(sleep).await;
                 return Ok(());
             }
             "Hibernate" => {
@@ -184,7 +187,7 @@ impl CommandExecutor {
                     .await;
                 tokio::task::yield_now().await;
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                hibernate();
+                let _ = tokio::task::spawn_blocking(hibernate).await;
                 return Ok(());
             }
             "Restart" => {
@@ -320,6 +323,22 @@ impl CommandExecutor {
                 );
                 return Ok(());
             }
+        }
+
+        // DiscordJoin is subscribed whenever the discord feature is on but has no
+        // inline arm, so its payload falls through to the launcher resolver. It
+        // must ONLY carry a discord deep-link; otherwise a steam:/epic:/close:/
+        // kill: payload (which is_arbitrary_launch doesn't gate) would run here,
+        // bypassing the launch_game/close_game feature gates the user set. Check
+        // the expanded payload so an env var can't smuggle a different scheme.
+        if name == "DiscordJoin"
+            && !expanded_payload
+                .trim()
+                .to_ascii_lowercase()
+                .starts_with("url:discord://")
+        {
+            warn!("Blocked non-discord DiscordJoin payload");
+            return Ok(());
         }
 
         let cmd_str = match resolve_shell_command(name, &expanded_payload, allow_raw) {

@@ -576,15 +576,20 @@ mod win {
                         }
                         break;
                     }
-                    Ok(()) = reconnect_rx.recv() => {
+                    r = reconnect_rx.recv() => {
                         // Force republish on reconnect: clear thresholds and
-                        // re-publish availability so HA can pick it up.
-                        last_published.clear();
-                        last_published_attrs.clear();
-                        last_poll_time = None;
-                        last_diagnostic_at = None;
-                        let online = client.is_some();
-                        self.state.mqtt.publish_hwinfo_availability(online).await;
+                        // re-publish availability so HA can pick it up. Treat a
+                        // Lagged receiver the same as a reconnect (a coincident
+                        // lag must not silently drop the forced republish); only a
+                        // Closed channel is ignored here.
+                        if matches!(r, Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) {
+                            last_published.clear();
+                            last_published_attrs.clear();
+                            last_poll_time = None;
+                            last_diagnostic_at = None;
+                            let online = client.is_some();
+                            self.state.mqtt.publish_hwinfo_availability(online).await;
+                        }
                     }
                     _ = tick.tick() => {
                         // Mid-session start: try to open if currently closed.
@@ -651,7 +656,17 @@ mod win {
                             .await
                             {
                                 Ok(pair) => pair,
-                                Err(_) => continue,
+                                Err(_) => {
+                                    // The parse task panicked (e.g. the mapping went
+                                    // invalid) and the client was dropped in the
+                                    // unwind. Signal offline once (retained) so HA
+                                    // doesn't keep showing stale "online" if HWiNFO
+                                    // has actually gone; the next tick attempts a
+                                    // reopen and flips back to online if it returns.
+                                    warn!("HWiNFO snapshot task panicked; marking offline");
+                                    self.state.mqtt.publish_hwinfo_availability(false).await;
+                                    continue;
+                                }
                             };
                             client = Some(taken);
                             let c = client.as_ref().expect("client just restored");

@@ -154,13 +154,16 @@ fn build_mqtt_connect(client_id: &str, user: &str, pass: &str) -> Vec<u8> {
     // Protocol Level (4 = MQTT 3.1.1)
     payload.push(4);
 
-    // Connect Flags: clean session + optional username/password
+    // Connect Flags: clean session + optional username/password. Per
+    // MQTT-3.1.2-22 a password MUST NOT be set without a username, or a compliant
+    // broker rejects the CONNECT - so only set the password flag when a username
+    // is also present.
     let mut flags: u8 = 0x02; // clean session
     if !user.is_empty() {
         flags |= 0x80;
-    }
-    if !pass.is_empty() {
-        flags |= 0x40;
+        if !pass.is_empty() {
+            flags |= 0x40;
+        }
     }
     payload.push(flags);
 
@@ -179,8 +182,8 @@ fn build_mqtt_connect(client_id: &str, user: &str, pass: &str) -> Vec<u8> {
         payload.extend_from_slice(u);
     }
 
-    // Payload: Password
-    if !pass.is_empty() {
+    // Payload: Password (only with a username, matching the flag above).
+    if !user.is_empty() && !pass.is_empty() {
         let p = pass.as_bytes();
         payload.extend_from_slice(&(p.len() as u16).to_be_bytes());
         payload.extend_from_slice(p);

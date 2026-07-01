@@ -229,7 +229,9 @@ impl ProcessWatcher {
         // JoinHandle is intentionally detached - the thread is cleaned up on process exit.
         std::thread::Builder::new()
             .name("wmi-events".into())
-            .stack_size(128 * 1024)
+            // 256 KB: this thread runs COM marshaling + serde deserialization of
+            // WMI objects, deeper call chains than the message-pump threads.
+            .stack_size(256 * 1024)
             .spawn(move || {
                 let com = match COMLibrary::new() {
                     Ok(c) => c,

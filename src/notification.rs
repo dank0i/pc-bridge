@@ -12,6 +12,7 @@ use log::debug;
 use windows::{
     Data::Xml::Dom::XmlDocument,
     UI::Notifications::{ToastNotification, ToastNotificationManager},
+    Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx},
     core::HSTRING,
 };
 
@@ -66,6 +67,16 @@ pub fn show_toast(payload: &str) -> anyhow::Result<()> {
         </toast>"#,
         title, message
     );
+
+    // Initialize COM on this thread (STA) - the WinRT calls below (XmlDocument,
+    // ToastNotificationManager) require an initialized apartment. This runs on a
+    // shared spawn_blocking pool thread that may never have touched COM, so
+    // without this the toast fails with RO_E_UNINITIALIZED. Idempotent per thread
+    // (S_FALSE if already STA-inited); we intentionally never CoUninitialize since
+    // the pool thread is reused.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    }
 
     // Create XML document
     let xml_doc = XmlDocument::new()?;

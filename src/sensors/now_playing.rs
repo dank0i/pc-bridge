@@ -151,6 +151,10 @@ fn windows_media_loop(
         }
     }
 
+    // Release the cached COM object BEFORE CoUninitialize, otherwise its Release
+    // runs on an already-uninitialized apartment (undefined ordering / leak).
+    drop(manager.take());
+
     unsafe {
         CoUninitialize();
     }
