@@ -17,6 +17,10 @@ use crate::power::{monitor_off, wake_display};
 use crate::steam::SteamGameDiscovery;
 
 const MAX_CONCURRENT_COMMANDS: usize = 5;
+/// How long to wait for Steam to come up before launching anyway.
+const STEAM_WAIT_TIMEOUT_SECS: u64 = 90;
+/// Grace period after Steam appears, for it to finish initializing.
+const STEAM_INIT_DELAY_SECS: u64 = 12;
 
 /// Predefined shell commands for Linux
 fn get_predefined_command(name: &str) -> Option<&'static str> {
@@ -302,6 +306,16 @@ impl CommandExecutor {
             }
         };
 
+        // For steam:// launches, make sure Steam is up first (a WoL cold boot may
+        // not have it running yet, and xdg-open steam://rungameid into an absent
+        // Steam is silently dropped). Mirrors the Windows executor.
+        if payload.starts_with("steam:")
+            || payload.starts_with("update:")
+            || payload.starts_with("validate:")
+        {
+            wait_for_steam().await;
+        }
+
         info!("Running: {}", cmd_str);
 
         // Execute via bash in its own process group so a timeout can kill the
@@ -372,6 +386,70 @@ async fn close_running_games(state: &Arc<AppState>) {
             warn!("CloseGame: failed to run close command: {}", e);
         }
     }
+}
+
+/// Best-effort: ensure Steam is running before a steam:// launch. On a WoL cold
+/// boot Steam may not be up yet, and `xdg-open steam://rungameid` into an absent
+/// Steam is silently dropped. Starts Steam if needed and waits for it, then
+/// proceeds regardless (the protocol handler may still bring it up).
+async fn wait_for_steam() {
+    use std::time::Duration;
+
+    if tokio::task::spawn_blocking(steam_running)
+        .await
+        .unwrap_or(false)
+    {
+        debug!("Steam already running");
+        return;
+    }
+
+    info!("Steam not running, starting it before launch...");
+    let _ = tokio::task::spawn_blocking(|| {
+        std::process::Command::new("xdg-open")
+            .arg("steam://open/main")
+            .status()
+    })
+    .await;
+
+    info!("Waiting for Steam to finish starting...");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(STEAM_WAIT_TIMEOUT_SECS);
+    while tokio::time::Instant::now() < deadline {
+        if tokio::task::spawn_blocking(steam_running)
+            .await
+            .unwrap_or(false)
+        {
+            tokio::time::sleep(Duration::from_secs(STEAM_INIT_DELAY_SECS)).await;
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    warn!(
+        "Steam not detected after {}s, proceeding with launch anyway",
+        STEAM_WAIT_TIMEOUT_SECS
+    );
+}
+
+/// Whether a Steam client process is running (scans /proc comm).
+fn steam_running() -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(s) = name.to_str() else {
+            continue;
+        };
+        if !s.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        if let Ok(comm) = std::fs::read_to_string(entry.path().join("comm")) {
+            let comm = comm.trim();
+            if comm.eq_ignore_ascii_case("steam") || comm.eq_ignore_ascii_case("steam.sh") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Send a keybind via xdotool (Linux equivalent of Windows keybd_event).
