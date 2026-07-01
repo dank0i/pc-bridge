@@ -63,9 +63,14 @@ Debt concentrates in three seams:
 - **1.7** Steam-launch permit starvation — needs a permit-handling restructure (wait outside the rate-limit).
 - **2.9** `deny_unknown_fields` — risks rejecting valid legacy configs; the README-keys part folds into the UI migration.
 
-### ⏳ Remaining (needs a decision or your eyes)
-- **Tier 3 style refactors** — god-function splits (`register_discovery`, `execute_command`), N-way entity-registry consolidation, 8 sensor run-loop bodies, 3 Win32 message pumps. These are maintainability, not correctness: every concrete drift/correctness bug they relate to is now fixed, and Windows tests run in CI to catch regressions. Best done as a dedicated refactor pass, not rushed blind.
-- **README→UI migration + `model.rs` mockup fix + phantom UI toggles (0.2 tail / 2.14)** — needs your eyes on the GUI; `model.rs` entity ids must match discovery's object-id sanitization.
+### ☑ Also fixed (third pass)
+- **README→UI**: stale coarse feature-flag table replaced with the granular model + settings-app pointer; example config updated; legacy-key migration documented.
+- **`model.rs` mockup**: feature entity ids now derive from the configured device (`registry(device_id)`) instead of the hardcoded `dank0i_pc`; the hardcoded sensor sample is labeled "Example" (was "Now reporting", which implied live data).
+- **Tier 3 gating consolidation**: audio command gate aligned with the real registration (`media_controls`, not `media_controls || volume`); the three copies of command gating (subscribe / executor / feature_entities teardown) now agree and are locked together by tests (`test_subscribe_topics_match_executor_gate`, `button_entities_agree_with_executor_gate`).
+
+### ⏳ Remaining (pure readability / needs your eyes)
+- **Tier 3 cosmetic refactors** — god-function extraction (`register_discovery`, `execute_command`), 8 sensor run-loop bodies, 3 Win32 message pumps. Now purely maintainability: every drift/correctness bug is fixed AND guarded by tests, so these are readability-only churn. Message-pump dedup is blind-Windows; best as a dedicated pass.
+- **README→UI GUI help panels** — surfacing custom-sensor/command and launch-payload docs inline in the app. Additive egui work that needs visual verification.
 - **`is_safe_path`/`is_safe_url`** are platform-specific (not true duplicates); left separate on purpose.
 
 ---
