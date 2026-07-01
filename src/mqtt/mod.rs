@@ -1967,6 +1967,34 @@ mod tests {
             });
         }
 
+        /// Wait until every one of `topics` has been published. Robust to publish
+        /// ordering and platform-specific publish counts, unlike a fixed-count wait.
+        async fn wait_for_topics(state: &Arc<Mutex<BrokerState>>, topics: &[String]) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    {
+                        let guard = state.lock().unwrap();
+                        if topics
+                            .iter()
+                            .all(|want| guard.published.iter().any(|(t, _)| t == want))
+                        {
+                            return;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                let guard = state.lock().unwrap();
+                let missing: Vec<&String> = topics
+                    .iter()
+                    .filter(|want| !guard.published.iter().any(|(t, _)| t == *want))
+                    .collect();
+                panic!("Timed out waiting for topics; missing: {missing:?}");
+            });
+        }
+
         /// Wait for the broker to receive at least `count` subscribe requests.
         async fn wait_for_subscribes(state: &Arc<Mutex<BrokerState>>, count: usize) {
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -2075,14 +2103,6 @@ mod tests {
 
             let (_mqtt, _cmd_rx) = MqttClient::new(&config, stx.subscribe()).await.unwrap();
 
-            // All features: 12 sensors + 15 buttons + 1 notify = 28 discovery
-            // + 1 availability from ConnAck handler
-            wait_for_publishes(&state, 28).await;
-
-            let guard = state.lock().unwrap();
-            let topics: Vec<&str> = guard.published.iter().map(|(t, _)| t.as_str()).collect();
-
-            // Every sensor must have a config topic published
             let expected_sensors = [
                 "runninggames",
                 "lastactive",
@@ -2097,15 +2117,6 @@ mod tests {
                 "steam_updating",
                 "volume_level",
             ];
-            for sensor in expected_sensors {
-                let t = format!("homeassistant/sensor/test-pc/{sensor}/config");
-                assert!(
-                    topics.contains(&t.as_str()),
-                    "Missing discovery for sensor: {sensor}"
-                );
-            }
-
-            // Every button must have a config topic published
             let expected_buttons = [
                 "Launch",
                 "Screensaver",
@@ -2123,6 +2134,33 @@ mod tests {
                 "MediaStop",
                 "VolumeMute",
             ];
+
+            // Wait until every expected discovery topic is published. Waiting for a
+            // fixed publish count was racy: the total varies by platform (HWiNFO
+            // sensors on Windows) and publish ordering isn't guaranteed, so a
+            // specific topic (e.g. volume_level) could be missing at count 28.
+            let mut want: Vec<String> = expected_sensors
+                .iter()
+                .map(|s| format!("homeassistant/sensor/test-pc/{s}/config"))
+                .collect();
+            want.extend(
+                expected_buttons
+                    .iter()
+                    .map(|b| format!("homeassistant/button/test-pc/{b}/config")),
+            );
+            want.push("homeassistant/notify/test-pc/config".to_string());
+            wait_for_topics(&state, &want).await;
+
+            let guard = state.lock().unwrap();
+            let topics: Vec<&str> = guard.published.iter().map(|(t, _)| t.as_str()).collect();
+
+            for sensor in expected_sensors {
+                let t = format!("homeassistant/sensor/test-pc/{sensor}/config");
+                assert!(
+                    topics.contains(&t.as_str()),
+                    "Missing discovery for sensor: {sensor}"
+                );
+            }
             for button in expected_buttons {
                 let t = format!("homeassistant/button/test-pc/{button}/config");
                 assert!(
@@ -2130,8 +2168,6 @@ mod tests {
                     "Missing discovery for button: {button}"
                 );
             }
-
-            // Notify service
             assert!(
                 topics.contains(&"homeassistant/notify/test-pc/config"),
                 "Missing notify service discovery"
