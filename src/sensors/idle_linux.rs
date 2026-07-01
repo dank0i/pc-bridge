@@ -49,8 +49,11 @@ impl IdleSensor {
         self.publish_idle(&mut prev_last_active, &mut prev_idle_secs)
             .await;
 
-        // Publish initial screensaver state (retained so HA picks it up)
-        let screensaver_active = is_screensaver_active();
+        // Publish initial screensaver state (retained so HA picks it up).
+        // Off the runtime: is_screensaver_active spawns dbus-send subprocesses.
+        let screensaver_active = tokio::task::spawn_blocking(is_screensaver_active)
+            .await
+            .unwrap_or(false);
         let screensaver_state = if screensaver_active { "on" } else { "off" };
         debug!("Initial screensaver state: {}", screensaver_state);
         self.state
@@ -87,8 +90,11 @@ impl IdleSensor {
                 _ = tick.tick() => {
                     self.publish_idle(&mut prev_last_active, &mut prev_idle_secs).await;
 
-                    // Check screensaver state (polled alongside idle time)
-                    let screensaver_active = is_screensaver_active();
+                    // Check screensaver state (polled alongside idle time), off
+                    // the runtime: is_screensaver_active spawns dbus-send.
+                    let screensaver_active = tokio::task::spawn_blocking(is_screensaver_active)
+                        .await
+                        .unwrap_or(false);
                     if screensaver_active != prev_screensaver_state {
                         let state_str = if screensaver_active { "on" } else { "off" };
                         debug!("Screensaver state changed: {}", state_str);
@@ -139,18 +145,26 @@ impl IdleSensor {
     }
 
     fn get_idle_seconds_blocking() -> Option<i64> {
-        // Bundled X11 (pure Rust, no external tools) - covers all X11 sessions.
-        if let Some(ms) = crate::linux_x11::idle_millis() {
+        // On Wayland, XWayland's screensaver counter doesn't track Wayland-native
+        // input, so the X11 paths (x11rb/xprintidle) would report the user as idle
+        // while active. Use the compositor's D-Bus idle there; on X11, x11rb is
+        // exact.
+        let wayland = crate::linux_wayland::is_wayland_session();
+
+        // Bundled X11 (pure Rust) - X11 sessions only.
+        if !wayland && let Some(ms) = crate::linux_x11::idle_millis() {
             return Some((ms / 1000) as i64);
         }
 
-        // Bundled D-Bus (GNOME Mutter / KDE) - covers Wayland with no tools.
+        // Bundled D-Bus (GNOME Mutter / KDE) - the Wayland path, and a fallback on
+        // X11 GNOME/KDE too.
         if let Some(ms) = crate::linux_dbus::idle_millis() {
             return Some((ms / 1000) as i64);
         }
 
-        // xprintidle (X11): idle time in milliseconds.
-        if let Ok(output) = Command::new("xprintidle").output()
+        // xprintidle (X11 only): idle time in milliseconds.
+        if !wayland
+            && let Ok(output) = Command::new("xprintidle").output()
             && output.status.success()
             && let Ok(idle_str) = String::from_utf8(output.stdout)
             && let Ok(idle_ms) = idle_str.trim().parse::<i64>()

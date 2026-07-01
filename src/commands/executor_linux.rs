@@ -152,9 +152,12 @@ impl CommandExecutor {
                         ),
                     }
                 };
-                match sync_mqtt_publish_sleep(&cfg) {
-                    Ok(()) => info!("Sleep state pre-published via sync TCP"),
-                    Err(e) => warn!("Sync MQTT sleep pre-publish failed: {}", e),
+                // Off the runtime: a broker connect timeout would otherwise stall
+                // the single-threaded runtime.
+                match tokio::task::spawn_blocking(move || sync_mqtt_publish_sleep(&cfg)).await {
+                    Ok(Ok(())) => info!("Sleep state pre-published via sync TCP"),
+                    Ok(Err(e)) => warn!("Sync MQTT sleep pre-publish failed: {}", e),
+                    Err(e) => warn!("Sync publish task join error: {}", e),
                 }
                 // Also publish via async client as fallback
                 state

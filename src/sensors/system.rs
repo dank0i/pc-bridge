@@ -884,18 +884,21 @@ pub async fn get_active_window_title_async() -> String {
 
 #[cfg(unix)]
 fn get_active_window_title_blocking() -> String {
-    // Bundled X11 (pure Rust, no xdotool).
-    if let Some(title) = crate::linux_x11::active_window_title() {
+    let wayland = crate::linux_wayland::is_wayland_session();
+    // Bundled X11 (pure Rust) - X11 sessions only; on Wayland XWayland would
+    // report only X clients, missing native Wayland windows.
+    if !wayland && let Some(title) = crate::linux_x11::active_window_title() {
         return truncate_title(title);
     }
     // Bundled Wayland (wlr-foreign-toplevel) for wlroots compositors.
     if let Some(title) = crate::linux_wayland::active_window_title() {
         return truncate_title(title);
     }
-    // Fallback: xdotool (X11).
-    if let Ok(output) = std::process::Command::new("xdotool")
-        .args(["getactivewindow", "getwindowname"])
-        .output()
+    // Fallback: xdotool (X11 only).
+    if !wayland
+        && let Ok(output) = std::process::Command::new("xdotool")
+            .args(["getactivewindow", "getwindowname"])
+            .output()
         && output.status.success()
     {
         return truncate_title(String::from_utf8_lossy(&output.stdout).trim().to_string());

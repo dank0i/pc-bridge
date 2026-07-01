@@ -17,30 +17,33 @@ use tokio::time::{Duration, Instant};
 
 use crate::AppState;
 
-/// StateFlags indicating a game is updating/downloading
-const STATE_UPDATE_RUNNING: u32 = 1024; // 0x400
-const STATE_UPDATE_PAUSED: u32 = 2048; // 0x800
-const STATE_DOWNLOADING: u32 = 524288; // 0x80000
+// Steam appmanifest StateFlags bits indicating an install/update/download is in
+// progress. NOTE: appmanifest StateFlags observed in the wild do NOT map cleanly
+// onto SteamKit's EAppState enum - a real updating game has been seen with 0x404,
+// where SteamKit would call 0x400 "Uninstalling". So this mask is deliberately
+// INCLUSIVE: a rare false "updating" during an uninstall/backup is far better
+// than missing an actual download. Only FullyInstalled (0x4) and AppRunning
+// (0x40) are excluded, so a merely-running/installed game is never flagged.
+const STATE_UPDATE_RUNNING: u32 = 0x400;
+const STATE_UPDATE_PAUSED: u32 = 0x800;
+const STATE_DOWNLOADING: u32 = 0x8_0000;
 #[allow(dead_code)] // documents the installed bit; used in tests
-const STATE_FULLY_INSTALLED: u32 = 4; // Ready to play
+const STATE_FULLY_INSTALLED: u32 = 0x4;
 
-/// All Steam EAppState bits that mean an install/update/download is in progress.
-/// Deliberately excludes FullyInstalled (4) and AppRunning (64) so a running
-/// game isn't mistaken for updating (the old "any non-installed flag" catch-all
-/// did exactly that). Includes both the constants above and the documented
-/// EAppState bits, so it's robust to which exact bits a given Steam version sets.
-const STATE_UPDATE_MASK: u32 = STATE_UPDATE_RUNNING
-    | STATE_UPDATE_PAUSED
-    | STATE_DOWNLOADING
-    | 0x2      // UpdateRequired
-    | 0x20     // FilesMissing
-    | 0x80     // FilesCorrupt
-    | 0x100    // UpdateRunning
-    | 0x200    // UpdateStarted
-    | 0x1_0000 // Reconfiguring
-    | 0x4_0000 // Preallocating
-    | 0x10_0000 // Staging
-    | 0x20_0000; // Committing
+const STATE_UPDATE_MASK: u32 = 0x2      // UpdateRequired
+    | 0x20      // FilesMissing
+    | 0x80      // FilesCorrupt
+    | 0x100     // UpdateRunning (SteamKit)
+    | 0x200     // UpdateStarted
+    | STATE_UPDATE_RUNNING // 0x400
+    | STATE_UPDATE_PAUSED  // 0x800
+    | 0x1_0000  // Reconfiguring
+    | 0x2_0000  // Validating
+    | 0x4_0000  // AddingFiles
+    | STATE_DOWNLOADING // 0x8_0000
+    | 0x10_0000 // Downloading
+    | 0x20_0000 // Staging
+    | 0x40_0000; // Committing
 
 #[derive(Debug, Clone)]
 struct GameUpdateState {

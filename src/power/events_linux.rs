@@ -64,7 +64,10 @@ impl PowerEventListener {
         // button, lid, auto-sleep) still gets "sleeping" on the wire before the
         // NIC drops - mirroring the Windows sync-before-suspend path. Released on
         // the Sleep event (after the sync publish) and re-armed on Wake.
-        let mut sleep_inhibitor = Self::take_sleep_inhibitor();
+        let mut sleep_inhibitor = tokio::task::spawn_blocking(Self::take_sleep_inhibitor)
+            .await
+            .ok()
+            .flatten();
         if sleep_inhibitor.is_some() {
             info!("Holding systemd sleep delay-inhibitor for pre-suspend publish");
         }
@@ -147,8 +150,12 @@ impl PowerEventListener {
                         PowerEvent::Wake => {
                             info!("Power event: WAKE");
                             self.state.mqtt.publish_sensor_retained("sleep_state", "awake").await;
-                            // Re-arm the inhibitor for the next suspend.
-                            sleep_inhibitor = Self::take_sleep_inhibitor();
+                            // Re-arm the inhibitor for the next suspend, off the
+                            // runtime (the D-Bus connect+call is blocking).
+                            sleep_inhibitor = tokio::task::spawn_blocking(Self::take_sleep_inhibitor)
+                                .await
+                                .ok()
+                                .flatten();
                         }
                         PowerEvent::DisplayOff => {
                             info!("Power event: DISPLAY OFF");
@@ -277,9 +284,14 @@ impl PowerEventListener {
         let mut prev_on: Option<bool> = None;
 
         loop {
-            // Bundled X11 DPMS query, then wlr (wlroots Wayland). None on
-            // GNOME/KDE Wayland - the sensor simply doesn't update there.
-            let on = crate::linux_x11::dpms_on().or_else(crate::linux_wayland::dpms_on);
+            // On Wayland use wlr (XWayland's DPMS is its own, not the real
+            // monitor); on X11 use x11rb. None on GNOME/KDE Wayland (no wlr) -
+            // the sensor simply doesn't update there.
+            let on = if crate::linux_wayland::is_wayland_session() {
+                crate::linux_wayland::dpms_on()
+            } else {
+                crate::linux_x11::dpms_on()
+            };
 
             if let Some(on) = on
                 && prev_on != Some(on)

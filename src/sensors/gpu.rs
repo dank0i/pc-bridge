@@ -184,8 +184,13 @@ fn get_gpu_usage() -> String {
             }
             // Present but failed this tick (e.g. driver busy): keep trying.
             Ok(_) => {}
-            // Can't spawn it (not installed): don't fork it again.
-            Err(_) => NVIDIA_ABSENT.store(true, Ordering::Relaxed),
+            // Not installed: don't fork it again. A transient spawn failure
+            // (EAGAIN/ENOMEM under load) must NOT latch, or a working GPU would
+            // read "unavailable" forever - so only give up on NotFound.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                NVIDIA_ABSENT.store(true, Ordering::Relaxed);
+            }
+            Err(_) => {}
         }
     }
 

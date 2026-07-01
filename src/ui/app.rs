@@ -267,16 +267,20 @@ fn in_view(f: &Feature, g: Group, ct: Kind) -> bool {
 fn unsupported_features() -> Vec<&'static str> {
     #[cfg(target_os = "linux")]
     {
-        if crate::linux_x11::is_available() {
-            return Vec::new(); // X11: everything works.
+        // A real X11 session (NOT XWayland under a Wayland compositor - that would
+        // report x11 as reachable while the X11 backends only see XWayland): the
+        // X11 backends handle everything.
+        if !crate::linux_wayland::is_wayland_session() && crate::linux_x11::is_available() {
+            return Vec::new();
         }
+        // Wayland (or headless): window/DPMS/monitor need the wlr protocols.
         let mut out = Vec::new();
         if !crate::linux_wayland::has_foreign_toplevel() {
             out.push("active_window");
         }
         if !crate::linux_wayland::has_output_power() {
             out.push("display_state");
-            out.push("cmd_monitor");
+            out.push("monitor");
         }
         out
     }

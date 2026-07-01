@@ -9,6 +9,15 @@
 
 use std::collections::HashMap;
 
+/// Whether this is a Wayland session. When true, the X11 (x11rb) paths must NOT
+/// be trusted even though an XWayland server is usually reachable: XWayland only
+/// sees its own clients and its own DPMS, not the real Wayland windows/monitors,
+/// and its idle counter doesn't track Wayland-native input. Callers gate the X11
+/// backends on `!is_wayland_session()` and use the wlr/D-Bus paths here instead.
+pub fn is_wayland_session() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some()
+}
+
 use wayland_client::backend::ObjectId;
 use wayland_client::protocol::wl_registry;
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
@@ -25,13 +34,15 @@ use wayland_protocols_wlr::output_power_management::v1::client::{
 
 #[derive(Default)]
 struct ToplevelState {
+    /// The foreign-toplevel manager, if the compositor advertised it (wlroots).
+    manager: Option<ZwlrForeignToplevelManagerV1>,
     /// object id -> (title, is-activated)
     windows: HashMap<ObjectId, (String, bool)>,
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for ToplevelState {
     fn event(
-        _state: &mut Self,
+        state: &mut Self,
         registry: &wl_registry::WlRegistry,
         event: wl_registry::Event,
         _: &(),
@@ -43,7 +54,8 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ToplevelState {
         } = event
             && interface == ZwlrForeignToplevelManagerV1::interface().name
         {
-            registry.bind::<ZwlrForeignToplevelManagerV1, _, _>(name, 1, qh, ());
+            state.manager =
+                Some(registry.bind::<ZwlrForeignToplevelManagerV1, _, _>(name, 1, qh, ()));
         }
     }
 }
@@ -128,8 +140,12 @@ pub fn has_foreign_toplevel() -> bool {
     let qh = queue.handle();
     let _registry = conn.display().get_registry(&qh, ());
     let mut state = ToplevelState::default();
-    // One roundtrip binds the manager if the global is advertised.
-    queue.roundtrip(&mut state).is_ok()
+    // Bind happens during the roundtrip; supported only if the manager global
+    // was actually advertised (not merely that the connection/roundtrip worked).
+    if queue.roundtrip(&mut state).is_err() {
+        return false;
+    }
+    state.manager.is_some()
 }
 
 // ── Monitor DPMS via wlr-output-power-management ───────────────────────────

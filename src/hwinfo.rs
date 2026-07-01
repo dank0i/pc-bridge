@@ -388,8 +388,11 @@ mod win {
                 {
                     mbi.RegionSize
                 } else {
-                    // Conservative fallback if the query fails.
-                    MAX_VIEW_SIZE
+                    // VirtualQuery failed (near-impossible for a pointer just
+                    // returned by MapViewOfFile): fall back to the header only -
+                    // the sole region we know is mapped - so a corrupt header can
+                    // never make us slice past the real mapping.
+                    HEADER_SIZE
                 }
             };
 

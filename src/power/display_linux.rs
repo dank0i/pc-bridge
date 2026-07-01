@@ -8,21 +8,24 @@ use std::process::Command;
 /// fallbacks for setups where x11rb can't reach the display.
 pub fn wake_display() {
     info!("WakeDisplay: Initiating display wake sequence (Linux)");
+    let wayland = crate::linux_wayland::is_wayland_session();
 
-    // Bundled X11 (pure Rust, no external tools).
-    if crate::linux_x11::wake() {
+    // On X11 use x11rb; on Wayland skip it (XWayland accepts DPMS requests but
+    // they don't reach the real monitor) and use wlr-output-power.
+    if !wayland && crate::linux_x11::wake() {
         info!("WakeDisplay: woke via x11");
         return;
     }
-    // Bundled Wayland (wlr-output-power) for wlroots compositors.
     if crate::linux_wayland::set_dpms(true) {
         info!("WakeDisplay: woke via wlr");
         return;
     }
 
-    // Fallbacks (Wayland / no x11rb).
-    let _ = Command::new("xdotool").args(["key", "shift"]).status();
-    let _ = Command::new("xset").args(["dpms", "force", "on"]).status();
+    // Fallbacks: X11 tools (X11 only) + GNOME/KDE screensaver un-blank.
+    if !wayland {
+        let _ = Command::new("xdotool").args(["key", "shift"]).status();
+        let _ = Command::new("xset").args(["dpms", "force", "on"]).status();
+    }
     let _ = Command::new("dbus-send")
         .args([
             "--session",
@@ -37,14 +40,17 @@ pub fn wake_display() {
     info!("WakeDisplay: Wake sequence completed");
 }
 
-/// Turn the display off (bundled X11 DPMS, falling back to `xset`).
+/// Turn the display off (bundled X11 DPMS on X11 / wlr on Wayland, `xset` fallback).
 pub fn monitor_off() {
     info!("MonitorOff: turning display off (Linux)");
-    if crate::linux_x11::set_dpms(false) {
+    let wayland = crate::linux_wayland::is_wayland_session();
+    if !wayland && crate::linux_x11::set_dpms(false) {
         return;
     }
     if crate::linux_wayland::set_dpms(false) {
         return;
     }
-    let _ = Command::new("xset").args(["dpms", "force", "off"]).status();
+    if !wayland {
+        let _ = Command::new("xset").args(["dpms", "force", "off"]).status();
+    }
 }
