@@ -144,7 +144,14 @@ impl CommandExecutor {
             }
             "notification" => {
                 if !payload.is_empty() {
-                    notification::show_toast(payload)?;
+                    // WinRT toast does ~10ms of COM work; keep it off the
+                    // single-threaded runtime (matches the Linux path).
+                    let p = payload.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        if let Err(e) = notification::show_toast(&p) {
+                            warn!("Failed to show notification: {e}");
+                        }
+                    });
                 }
                 return Ok(());
             }
