@@ -1086,6 +1086,41 @@ mod tests {
     }
 
     #[test]
+    fn button_entities_agree_with_executor_gate() {
+        // Third copy of the command gating: the teardown list's button entries
+        // must agree with the executor gate (command_feature_enabled), or a
+        // button could be registered/torn-down out of step with what runs. Test
+        // across enabled and disabled feature sets.
+        for &all_on in &[false, true] {
+            let mut config = Config::default();
+            if all_on {
+                let f = &mut config.features;
+                f.launch_game = true;
+                f.close_game = true;
+                f.steam_library = true;
+                f.idle_tracking = true;
+                f.discord = true;
+                f.media_controls = true;
+                f.volume = true;
+            } else {
+                // A case that previously drifted: volume on, media_controls off.
+                config.features.volume = true;
+                config.features.media_controls = false;
+            }
+            for (component, name, enabled) in feature_entities(&config) {
+                if component != "button" {
+                    continue;
+                }
+                let gated = crate::commands::command_feature_enabled(name, &config.features);
+                assert_eq!(
+                    enabled, gated,
+                    "button '{name}' gating disagrees (all_on={all_on})"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn default_config_keeps_power_disables_optin_sensors() {
         let config = Config::default();
         // Power features default on.

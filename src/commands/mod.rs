@@ -26,8 +26,10 @@ pub(crate) fn command_feature_enabled(name: &str, f: &FeatureConfig) -> bool {
         "RefreshSteamGames" => f.steam_library,
         "Screensaver" | "Wake" => f.idle_tracking,
         "DiscordJoin" | "DiscordLeaveChannel" => f.discord,
+        // Audio buttons are all registered under media_controls (register_discovery);
+        // volume gates the volume_level sensor, not these commands.
         "MediaPlayPause" | "MediaNext" | "MediaPrevious" | "MediaStop" => f.media_controls,
-        "VolumeMute" | "VolumeSet" => f.media_controls || f.volume,
+        "VolumeMute" | "VolumeSet" => f.media_controls,
         _ => true,
     }
 }
