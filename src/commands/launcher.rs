@@ -146,12 +146,40 @@ fn is_safe_identifier(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
 }
 
-/// Check if path doesn't contain dangerous shell metacharacters
+/// Check if path doesn't contain dangerous shell metacharacters.
+///
+/// Mirrors the Linux blocklist (launcher_linux.rs), which was hardened against
+/// `>` redirection and `(...)` subexpression injection. The extra chars matter
+/// on Windows too: `powershell -Command "Start-Process (calc)"` evaluates the
+/// `()` subexpression, so a space-free payload like `exe:(calc)` would bypass
+/// the `allow_raw_commands=false` gate. `\` and `:` stay allowed (Windows paths
+/// need them); `"` stays blocked because paths are double-quoted downstream.
 fn is_safe_path(s: &str) -> bool {
     !s.is_empty()
-        && !s
-            .chars()
-            .any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '"' | '\'' | '\n' | '\r'))
+        && !s.chars().any(|c| {
+            matches!(
+                c,
+                ';' | '|'
+                    | '&'
+                    | '$'
+                    | '`'
+                    | '"'
+                    | '\''
+                    | '<'
+                    | '>'
+                    | '('
+                    | ')'
+                    | '{'
+                    | '}'
+                    | '*'
+                    | '?'
+                    | '['
+                    | ']'
+                    | '~'
+                    | '\n'
+                    | '\r'
+            )
+        })
 }
 
 /// Check if string is a safe protocol URL (scheme://path, no shell metacharacters)
@@ -226,6 +254,17 @@ mod tests {
         let result = expand_launcher_shortcut("close:notepad");
         assert!(result.is_some());
         assert!(result.unwrap().contains("CloseMainWindow"));
+    }
+
+    #[test]
+    fn test_exe_shortcut_rejects_powershell_injection() {
+        // Space-free payloads that would inject into `powershell -Command`
+        // must be rejected (they bypass the allow_raw_commands gate).
+        assert_eq!(expand_launcher_shortcut("exe:(calc)"), None);
+        assert_eq!(expand_launcher_shortcut(r"exe:calc>C:\file"), None);
+        assert_eq!(expand_launcher_shortcut("exe:$(evil)"), None);
+        assert_eq!(expand_launcher_shortcut("lnk:{evil}"), None);
+        assert_eq!(expand_launcher_shortcut("exe:a*b"), None);
     }
 
     #[test]

@@ -49,7 +49,11 @@ impl GpuSensor {
                     prev_gpu.clear();
                 }
                 _ = tick.tick() => {
-                    let gpu_str = get_gpu_usage();
+                    // get_gpu_usage blocks (PDH collection on Windows, nvidia-smi
+                    // fork+exec on Linux); keep it off the single-threaded runtime.
+                    let Ok(gpu_str) = tokio::task::spawn_blocking(get_gpu_usage).await else {
+                        continue;
+                    };
                     if gpu_str != prev_gpu {
                         self.state.mqtt.publish_sensor("gpu_usage", &gpu_str).await;
                         prev_gpu = gpu_str;

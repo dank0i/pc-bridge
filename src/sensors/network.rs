@@ -53,7 +53,11 @@ impl NetworkSensor {
                     prev_tx.clear();
                 }
                 _ = tick.tick() => {
-                    let curr = get_network_totals();
+                    // GetIfTable2 (Windows) enumerates the interface table; keep
+                    // it off the single-threaded runtime.
+                    let Ok(curr) = tokio::task::spawn_blocking(get_network_totals).await else {
+                        continue;
+                    };
                     let rx_per_sec = (curr.0.saturating_sub(prev_sample.0)) / interval_secs;
                     let tx_per_sec = (curr.1.saturating_sub(prev_sample.1)) / interval_secs;
                     prev_sample = curr;

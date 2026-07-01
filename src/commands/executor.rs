@@ -179,12 +179,15 @@ impl CommandExecutor {
                 return Ok(());
             }
             "MonitorOff" => {
-                monitor_off();
+                // SendMessageW broadcast blocks until every top-level window
+                // responds; keep it off the single-threaded runtime.
+                tokio::task::spawn_blocking(monitor_off);
                 return Ok(());
             }
             "MonitorOn" => {
-                // Monitor-on is the same as the display wake sequence.
-                wake_display();
+                // Monitor-on is the display wake sequence (process scan +
+                // broadcast + sleep); offload it too.
+                tokio::task::spawn_blocking(wake_display);
                 return Ok(());
             }
             "CloseGame" => {

@@ -58,17 +58,26 @@ impl DiskSensor {
                     prev_state.clear();
                 }
                 _ = tick.tick() => {
-                    let mut entries = Vec::new();
-                    for path in &paths {
-                        if let Some(info) = get_disk_usage(path) {
-                            entries.push(serde_json::json!({
-                                "path": path,
-                                "total_gb": format!("{:.1}", info.total_bytes as f64 / 1_073_741_824.0),
-                                "free_gb": format!("{:.1}", info.free_bytes as f64 / 1_073_741_824.0),
-                                "used_percent": format!("{:.1}", info.used_percent),
-                            }));
+                    // GetDiskFreeSpaceExW/statvfs can block for seconds on a
+                    // network or spun-down drive; keep it off the runtime.
+                    let paths_snapshot = paths.clone();
+                    let Ok(entries) = tokio::task::spawn_blocking(move || {
+                        let mut entries = Vec::new();
+                        for path in &paths_snapshot {
+                            if let Some(info) = get_disk_usage(path) {
+                                entries.push(serde_json::json!({
+                                    "path": path,
+                                    "total_gb": format!("{:.1}", info.total_bytes as f64 / 1_073_741_824.0),
+                                    "free_gb": format!("{:.1}", info.free_bytes as f64 / 1_073_741_824.0),
+                                    "used_percent": format!("{:.1}", info.used_percent),
+                                }));
+                            }
                         }
-                    }
+                        entries
+                    })
+                    .await else {
+                        continue;
+                    };
 
                     // State is the highest used_percent across all paths
                     let max_used: f64 = entries

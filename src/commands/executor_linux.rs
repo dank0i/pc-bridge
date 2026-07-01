@@ -317,7 +317,13 @@ async fn close_running_games(state: &Arc<AppState>) {
             continue;
         };
         info!("CloseGame: closing {}", proc);
-        let _ = Command::new("bash").args(["-c", &cmd]).spawn();
+        // .status() blocks briefly (pkill returns fast) and reaps the child so
+        // we don't leak a zombie; run it off the async runtime.
+        let handle =
+            tokio::task::spawn_blocking(move || Command::new("bash").args(["-c", &cmd]).status());
+        if let Ok(Err(e)) = handle.await {
+            warn!("CloseGame: failed to run close command: {}", e);
+        }
     }
 }
 

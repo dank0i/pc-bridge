@@ -11,6 +11,9 @@ use tokio::time::{Duration, MissedTickBehavior, interval};
 
 use crate::AppState;
 
+#[cfg(unix)]
+static PLAYERCTL_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub struct NowPlayingSensor {
     state: Arc<AppState>,
 }
@@ -103,34 +106,55 @@ fn read_now_playing() -> String {
 #[cfg(unix)]
 fn read_now_playing() -> String {
     use std::process::Command;
-    let out = Command::new("playerctl")
+    // Tab-delimited fields so empty artist/title can be collapsed the same way
+    // the Windows branch does (a combined "artist - title" string would be
+    // ambiguous when either half is empty).
+    let out = match Command::new("playerctl")
         .args([
             "metadata",
             "--format",
-            "{{lc(status)}}: {{artist}} - {{title}}",
+            "{{lc(status)}}\t{{artist}}\t{{title}}",
         ])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => parse_playerctl(&String::from_utf8_lossy(&o.stdout)),
-        _ => "idle".to_string(),
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound
+                && !PLAYERCTL_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                log::warn!(
+                    "playerctl not found; now-playing will report 'idle' (install playerctl)"
+                );
+            }
+            return "idle".to_string();
+        }
+    };
+    if !out.status.success() {
+        return "idle".to_string();
     }
+    parse_playerctl(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// Turn a `playerctl` line into a sensor value. A player with no metadata yields
-/// e.g. "playing:  - "; any result whose artist/title part has no real content
-/// becomes "idle".
+/// Turn a tab-delimited "status\tartist\ttitle" line into a sensor value,
+/// collapsing empty artist/title exactly like the Windows branch.
 #[cfg(unix)]
 fn parse_playerctl(raw: &str) -> String {
-    let s = raw.trim();
-    let has_content = s
-        .split_once(": ")
-        .map_or("", |(_, rest)| rest)
-        .chars()
-        .any(|c| c.is_alphanumeric());
-    if has_content {
-        s.to_string()
-    } else {
+    let line = raw.trim_end_matches(['\n', '\r']);
+    let mut parts = line.splitn(3, '\t');
+    let status = parts.next().unwrap_or("").trim();
+    let artist = parts.next().unwrap_or("").trim();
+    let title = parts.next().unwrap_or("").trim();
+
+    let label = match (artist.is_empty(), title.is_empty()) {
+        (false, false) => format!("{artist} - {title}"),
+        (true, false) => title.to_string(),
+        (false, true) => artist.to_string(),
+        (true, true) => return "idle".to_string(),
+    };
+    if status.is_empty() {
         "idle".to_string()
+    } else {
+        format!("{status}: {label}")
     }
 }
 
@@ -141,13 +165,17 @@ mod tests {
     #[test]
     fn test_parse_playerctl() {
         assert_eq!(
-            parse_playerctl("playing: Queen - Bohemian Rhapsody\n"),
+            parse_playerctl("playing\tQueen\tBohemian Rhapsody\n"),
             "playing: Queen - Bohemian Rhapsody"
         );
-        assert_eq!(parse_playerctl("paused: Artist - "), "paused: Artist -");
+        // Empty artist / empty title collapse (no dangling " - ").
+        assert_eq!(
+            parse_playerctl("playing\t\tBohemian Rhapsody"),
+            "playing: Bohemian Rhapsody"
+        );
+        assert_eq!(parse_playerctl("paused\tArtist\t"), "paused: Artist");
         // No metadata / no player -> idle.
-        assert_eq!(parse_playerctl("playing:  - "), "idle");
-        assert_eq!(parse_playerctl("stopped: -"), "idle");
+        assert_eq!(parse_playerctl("playing\t\t"), "idle");
         assert_eq!(parse_playerctl(""), "idle");
     }
 }
