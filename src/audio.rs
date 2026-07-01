@@ -12,7 +12,7 @@ use std::cell::Cell;
 #[cfg(windows)]
 use std::cell::RefCell;
 #[cfg(windows)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(windows)]
 use windows::{
     Win32::Media::Audio::Endpoints::IAudioEndpointVolume,
@@ -27,6 +27,20 @@ use windows::{
 /// device changes.  Checked (and cleared) before using the cached endpoint.
 #[cfg(windows)]
 static DEVICE_CHANGED: AtomicBool = AtomicBool::new(false);
+
+/// Monotonic counter bumped on every default-device change. Unlike
+/// `DEVICE_CHANGED` (a consume-once flag for the volume cache), this lets
+/// multiple readers (e.g. the audio-device sensor) detect a change by comparing
+/// against their own last-seen value without racing each other.
+#[cfg(windows)]
+static DEVICE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Current default-audio-device change generation. The audio-device sensor
+/// polls this cheaply and only performs the expensive COM read when it moves.
+#[cfg(windows)]
+pub fn default_device_generation() -> u64 {
+    DEVICE_GENERATION.load(Ordering::Acquire)
+}
 
 /// Ensures the notification listener is registered exactly once (process-wide).
 #[cfg(windows)]
@@ -64,6 +78,7 @@ impl IMMNotificationClient_Impl for DeviceChangeListener_Impl {
     ) -> windows::core::Result<()> {
         log::debug!("Default audio device changed - will rebuild endpoint cache");
         DEVICE_CHANGED.store(true, Ordering::Release);
+        DEVICE_GENERATION.fetch_add(1, Ordering::Release);
         Ok(())
     }
 
