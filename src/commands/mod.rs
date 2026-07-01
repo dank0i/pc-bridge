@@ -34,6 +34,36 @@ pub(crate) fn command_feature_enabled(name: &str, f: &FeatureConfig) -> bool {
     }
 }
 
+/// True if `name` is a built-in command. Custom commands must not reuse these:
+/// a same-named custom command registers to the identical retained config +
+/// action topic, so the native executor claims the button press and the user's
+/// script never runs.
+pub(crate) fn is_native_command(name: &str) -> bool {
+    matches!(
+        name,
+        "Shutdown"
+            | "Restart"
+            | "Sleep"
+            | "Hibernate"
+            | "Lock"
+            | "Logoff"
+            | "MonitorOff"
+            | "MonitorOn"
+            | "Launch"
+            | "CloseGame"
+            | "RefreshSteamGames"
+            | "Screensaver"
+            | "Wake"
+            | "DiscordJoin"
+            | "DiscordLeaveChannel"
+            | "MediaPlayPause"
+            | "MediaNext"
+            | "MediaPrevious"
+            | "MediaStop"
+            | "VolumeMute"
+    )
+}
+
 /// A launch `payload` whose scheme runs an arbitrary program or URL (`exe:`,
 /// `lnk:`, `url:`), as opposed to the ID/name-restricted schemes (`steam:`,
 /// `epic:`, `close:`, `kill:`, `update:`, `validate:`).

@@ -1094,6 +1094,13 @@ impl Config {
                 cmd.name
             );
         }
+        if crate::commands::is_native_command(&cmd.name) {
+            bail!(
+                "Custom command name '{}' collides with a built-in command; \
+                 rename it (a same-named custom command would be shadowed by the native one)",
+                cmd.name
+            );
+        }
 
         if cmd.admin && !privileges_allowed {
             bail!(

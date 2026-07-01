@@ -516,6 +516,9 @@ mod win {
     /// Diagnostic publish interval. We rebuild the payload on every snapshot
     /// but only flush to MQTT this often, to keep the broker traffic boring.
     const DIAGNOSTIC_INTERVAL_SECS: u64 = 5;
+    /// If HWiNFO's pollTime stops advancing for this long, treat it as gone (the
+    /// mapped section can outlive the app). HWiNFO's own poll is usually ~2s.
+    const HWINFO_STALE_SECS: u64 = 15;
 
     pub struct HwInfoSensor {
         state: Arc<AppState>,
@@ -540,6 +543,14 @@ mod win {
 
             let mut client: Option<HwInfoClient> = None;
             let mut last_poll_time: Option<i64> = None;
+            // Staleness watchdog: when HWiNFO exits gracefully its named section
+            // stays mapped (our handle keeps it alive) with frozen contents, so
+            // read_poll_time keeps returning the same value and we'd otherwise
+            // stay "online" republishing stale numbers forever. Track when
+            // pollTime last advanced; if it stops for HWINFO_STALE_SECS, mark
+            // offline (and flip back online when it resumes, e.g. HWiNFO relaunch).
+            let mut last_poll_change = Instant::now();
+            let mut stale_offline = false;
             let mut last_published: HashMap<&'static str, (f64, Instant)> = HashMap::new();
             // Last (min, max, avg, unit) actually published for each sensor.
             // The state value changes every threshold-crossing, but attributes
@@ -597,6 +608,8 @@ mod win {
                             if let Some(c) = HwInfoClient::open() {
                                 info!("HWiNFO shared memory opened");
                                 client = Some(c);
+                                last_poll_change = Instant::now();
+                                stale_offline = false;
                                 self.state.mqtt.publish_hwinfo_availability(true).await;
                             } else {
                                 // Still not open - publish a "not open" diagnostic
@@ -642,6 +655,24 @@ mod win {
                                 .await;
                             continue;
                         };
+
+                        // Staleness watchdog: pollTime frozen too long means HWiNFO
+                        // is gone even though the mapped section is still readable.
+                        if last_poll_time == Some(pt) {
+                            if !stale_offline
+                                && last_poll_change.elapsed() >= Duration::from_secs(HWINFO_STALE_SECS)
+                            {
+                                warn!("HWiNFO pollTime stalled; marking offline");
+                                stale_offline = true;
+                                self.state.mqtt.publish_hwinfo_availability(false).await;
+                            }
+                        } else {
+                            last_poll_change = Instant::now();
+                            if stale_offline {
+                                stale_offline = false;
+                                self.state.mqtt.publish_hwinfo_availability(true).await;
+                            }
+                        }
 
                         // Open detection: did pollTime actually advance?
                         if last_poll_time != Some(pt) {
