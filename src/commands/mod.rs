@@ -29,7 +29,7 @@ pub(crate) fn command_feature_enabled(name: &str, f: &FeatureConfig) -> bool {
         // Audio buttons are all registered under media_controls (register_discovery);
         // volume gates the volume_level sensor, not these commands.
         "MediaPlayPause" | "MediaNext" | "MediaPrevious" | "MediaStop" => f.media_controls,
-        "VolumeMute" | "VolumeSet" => f.media_controls,
+        "VolumeMute" => f.media_controls,
         _ => true,
     }
 }

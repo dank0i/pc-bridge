@@ -226,13 +226,29 @@ impl GameSensor {
                 && let Some(name_str) = name.to_str()
                 && name_str.chars().all(|c| c.is_ascii_digit())
             {
-                // Read the process command line or comm
-                let comm_path = path.join("comm");
-                if let Ok(comm) = fs::read_to_string(&comm_path) {
-                    let comm = comm.trim().to_string();
-                    if !comm.is_empty() {
-                        names.push(comm);
-                    }
+                // /proc/<pid>/comm is truncated to 15 bytes (TASK_COMM_LEN-1), so a
+                // game with a longer executable name (e.g. MarvelRivals_Shipping)
+                // would never match. When comm is at the truncation length, prefer
+                // the untruncated basename from cmdline.
+                let comm = fs::read_to_string(path.join("comm"))
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                let name = if comm.len() >= 15 {
+                    fs::read_to_string(path.join("cmdline"))
+                        .ok()
+                        .and_then(|cl| {
+                            cl.split('\0')
+                                .next()
+                                .filter(|a| !a.is_empty())
+                                .map(|a0| a0.rsplit(['/', '\\']).next().unwrap_or(a0).to_string())
+                        })
+                        .filter(|b| !b.is_empty())
+                        .unwrap_or(comm)
+                } else {
+                    comm
+                };
+                if !name.is_empty() {
+                    names.push(name);
                 }
             }
         }

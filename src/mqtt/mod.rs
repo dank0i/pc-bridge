@@ -411,7 +411,6 @@ impl MqttClient {
         "MediaNext",
         "MediaPrevious",
         "MediaStop",
-        "VolumeSet",
         "VolumeMute",
     ];
 
@@ -1145,7 +1144,6 @@ mod tests {
         assert!(topics.contains(&"homeassistant/button/test-pc/MediaNext/action".to_string()));
         assert!(topics.contains(&"homeassistant/button/test-pc/MediaPrevious/action".to_string()));
         assert!(topics.contains(&"homeassistant/button/test-pc/MediaStop/action".to_string()));
-        assert!(topics.contains(&"homeassistant/button/test-pc/VolumeSet/action".to_string()));
         assert!(topics.contains(&"homeassistant/button/test-pc/VolumeMute/action".to_string()));
     }
 
@@ -2174,7 +2172,6 @@ mod tests {
                 "homeassistant/button/test-pc/MediaNext/action",
                 "homeassistant/button/test-pc/MediaPrevious/action",
                 "homeassistant/button/test-pc/MediaStop/action",
-                "homeassistant/button/test-pc/VolumeSet/action",
                 "homeassistant/button/test-pc/VolumeMute/action",
                 "pc-bridge/notifications/test-pc",
             ];
