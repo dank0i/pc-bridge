@@ -34,10 +34,40 @@ pub(crate) fn command_feature_enabled(name: &str, f: &FeatureConfig) -> bool {
     }
 }
 
+/// A launch `payload` whose scheme runs an arbitrary program or URL (`exe:`,
+/// `lnk:`, `url:`), as opposed to the ID/name-restricted schemes (`steam:`,
+/// `epic:`, `close:`, `kill:`, `update:`, `validate:`).
+pub(crate) fn is_arbitrary_launch(payload: &str) -> bool {
+    payload.starts_with("exe:") || payload.starts_with("lnk:") || payload.starts_with("url:")
+}
+
+/// Whether `payload` matches a configured game's launch command (what Home
+/// Assistant's Launch button publishes). Used to authorize the arbitrary-launch
+/// schemes above so an attacker with MQTT access can't run an unconfigured
+/// program while `allow_raw_commands` is off.
+pub(crate) fn is_configured_launch(config: &crate::config::Config, payload: &str) -> bool {
+    config
+        .games
+        .values()
+        .filter_map(|g| g.launch_command())
+        .any(|lc| lc == payload)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::command_feature_enabled;
+    use super::{command_feature_enabled, is_arbitrary_launch};
     use crate::config::FeatureConfig;
+
+    #[test]
+    fn test_is_arbitrary_launch() {
+        assert!(is_arbitrary_launch("exe:C:/Games/g.exe"));
+        assert!(is_arbitrary_launch("lnk:C:/x.lnk"));
+        assert!(is_arbitrary_launch("url:steam://run/1"));
+        // ID/name-restricted schemes are not "arbitrary".
+        assert!(!is_arbitrary_launch("steam:730"));
+        assert!(!is_arbitrary_launch("epic:Fortnite"));
+        assert!(!is_arbitrary_launch("close:notepad"));
+    }
 
     #[test]
     fn test_command_feature_enabled() {
