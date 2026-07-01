@@ -119,12 +119,16 @@ pub fn cleanup_old_files() {
         }
     }
 
-    // Linux: pc-bridge-linux.update (leftover if install failed mid-way)
-    let update_path = current_exe.with_extension("update");
-    if update_path.exists() {
-        match std::fs::remove_file(&update_path) {
-            Ok(()) => info!("Cleaned up leftover update file: {:?}", update_path),
-            Err(e) => warn!("Failed to clean up {:?}: {}", update_path, e),
+    // Leftover download from a failed install. Use the same name the download
+    // path writes (<asset_name>.update), not current_exe.with_extension, which
+    // produced a different name ("pc-bridge.update") that never matched.
+    if let Some(exe_dir) = current_exe.parent() {
+        let update_path = exe_dir.join(format!("{}.update", platform_asset_name()));
+        if update_path.exists() {
+            match std::fs::remove_file(&update_path) {
+                Ok(()) => info!("Cleaned up leftover update file: {:?}", update_path),
+                Err(e) => warn!("Failed to clean up {:?}: {}", update_path, e),
+            }
         }
     }
 }
@@ -402,8 +406,10 @@ fn install_and_restart(update_path: &Path) {
 
     info!("Update installed, starting new version...");
 
-    // Step 3: Spawn the new exe
+    // Step 3: Spawn the new exe, forwarding the CLI args we were started with
+    // (e.g. --config-dir / service flags) so the restart preserves them.
     let mut cmd = Command::new(&current_exe);
+    cmd.args(std::env::args_os().skip(1));
     cmd.creation_flags(CREATE_NO_WINDOW);
 
     if let Err(e) = cmd.spawn() {
@@ -445,7 +451,10 @@ fn install_and_restart(update_path: &Path) {
 
     info!("Update installed, starting new version...");
 
-    if let Err(e) = Command::new(&current_exe).spawn() {
+    if let Err(e) = Command::new(&current_exe)
+        .args(std::env::args_os().skip(1))
+        .spawn()
+    {
         warn!("Failed to start updated binary: {}", e);
         return;
     }

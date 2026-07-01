@@ -47,6 +47,7 @@ impl IdleSensor {
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
         let mut process_rx = self.state.process_watcher.subscribe();
         let mut config_rx = self.state.config_generation.subscribe();
+        let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
 
         // Dedup trackers: only publish when the whole-second value changes.
         // `idle_seconds` grows each tick while idle (so it keeps publishing);
@@ -90,6 +91,12 @@ impl IdleSensor {
                     tick = interval(Duration::from_secs(new_interval));
                     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
                     debug!("Idle sensor: interval updated to {}s", new_interval);
+                }
+                // Re-publish (non-retained) idle values after a broker reconnect
+                // so they don't stay stale until the value next changes.
+                Ok(()) = reconnect_rx.recv() => {
+                    prev_idle_secs = -1;
+                    prev_lastactive_secs = i64::MIN;
                 }
                 _ = tick.tick() => {
                     self.publish_idle(&mut prev_idle_secs, &mut prev_lastactive_secs, &mut query_failed).await;
