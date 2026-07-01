@@ -1232,6 +1232,16 @@ async fn reload_hot_config(state: &AppState) {
         // Discord keybind
         config.discord_keybind = new_config.discord_keybind;
 
+        // Built-in feature enable flags. Previously these were NOT hot-reloaded,
+        // so disabling a feature in the UI didn't stick (a reconnect re-registered
+        // it from the stale in-memory flags). Applying them here + the discovery
+        // re-register/teardown below makes a disable actually remove the entity
+        // from HA. NOTE: the sensor TASKS are startup-spawned and grouped, so a
+        // newly-ENABLED feature still needs a restart to start publishing (its
+        // entity will show until then); full runtime task start/stop is the
+        // separate foundation refactor.
+        config.features = new_config.features;
+
         // Also reload custom sensors/commands config. Capture the old entity
         // names first so we can tear down any that were removed.
         let old_sensors_enabled = config.custom_sensors_enabled;
@@ -1302,6 +1312,15 @@ async fn reload_hot_config(state: &AppState) {
         }
         if new_commands_enabled {
             state.mqtt.register_custom_commands(&new_commands).await;
+        }
+
+        // Re-register enabled built-in entities and tear down ones for features
+        // just disabled, so a feature toggle takes effect in HA on hot-reload
+        // (not only at restart), mirroring what the reconnect handler does.
+        {
+            let config = state.config.read().await;
+            state.mqtt.register_discovery(&config).await;
+            state.mqtt.clear_disabled_entities(&config).await;
         }
 
         // Log security-relevant changes (using captured locals - no lock needed)
