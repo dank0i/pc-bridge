@@ -55,13 +55,22 @@ impl SystemSensor {
     }
 
     pub async fn run(self, shutdown: tokio::sync::broadcast::Sender<()>) {
-        let config = self.state.config.read().await;
-        let interval_secs = config.intervals.system_sensors.max(1);
-        drop(config);
+        // cpu and memory are independently polled + gated (they used to share one
+        // timer/interval). active_window/battery are event-driven (below).
+        let (cpu_secs, mem_secs, mut cpu_on, mut mem_on) = {
+            let config = self.state.config.read().await;
+            (
+                config.intervals.cpu.max(1),
+                config.intervals.memory.max(1),
+                config.features.cpu_sensor,
+                config.features.memory_sensor,
+            )
+        };
 
-        let mut tick = interval(Duration::from_secs(interval_secs));
-
-        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut cpu_tick = interval(Duration::from_secs(cpu_secs));
+        let mut mem_tick = interval(Duration::from_secs(mem_secs));
+        cpu_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        mem_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut shutdown_rx = shutdown.subscribe();
         let mut config_rx = self.state.config_generation.subscribe();
 
@@ -147,23 +156,33 @@ impl SystemSensor {
                     }
                     break;
                 }
-                // Hot-reload: pick up new interval from config changes
+                // Hot-reload: pick up new cpu/memory intervals + enable flags.
                 Ok(()) = config_rx.recv() => {
                     let config = self.state.config.read().await;
-                    let new_interval = config.intervals.system_sensors.max(1);
+                    let c = config.intervals.cpu.max(1);
+                    let m = config.intervals.memory.max(1);
+                    cpu_on = config.features.cpu_sensor;
+                    mem_on = config.features.memory_sensor;
                     drop(config);
-                    tick = interval(Duration::from_secs(new_interval));
-                    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-                    debug!("System sensor: interval updated to {}s", new_interval);
+                    cpu_tick = interval(Duration::from_secs(c));
+                    mem_tick = interval(Duration::from_secs(m));
+                    cpu_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+                    mem_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+                    debug!("System sensor: cpu={c}s memory={m}s");
                 }
-                _ = tick.tick() => {
-                    // Polled: CPU and memory only
-                    self.publish_cpu_mem(&mut prev_cpu, &mut prev_vals).await;
-
-                    // Bridge health diagnostics (~every 60s)
+                _ = cpu_tick.tick() => {
+                    if cpu_on {
+                        self.publish_cpu(&mut prev_cpu, &mut prev_vals).await;
+                    }
+                    // Bridge health diagnostics (~every 60s), driven off this tick.
                     if last_health_publish.elapsed() >= Duration::from_mins(1) {
                         last_health_publish = tokio::time::Instant::now();
                         self.publish_health(&mut prev_vals).await;
+                    }
+                }
+                _ = mem_tick.tick() => {
+                    if mem_on {
+                        self.publish_memory(&mut prev_vals).await;
                     }
                 }
                 Some(event) = event_rx.recv() => {
@@ -198,15 +217,16 @@ impl SystemSensor {
         }
     }
 
-    async fn publish_cpu_mem(&self, prev_cpu: &mut CpuTimes, prev: &mut PrevSystemValues) {
-        // CPU usage (percentage)
+    async fn publish_cpu(&self, prev_cpu: &mut CpuTimes, prev: &mut PrevSystemValues) {
         let cpu = calculate_cpu_usage(prev_cpu);
         let cpu_str = format!("{cpu:.1}");
         if cpu_str != prev.cpu {
             self.state.mqtt.publish_sensor("cpu_usage", &cpu_str).await;
             prev.cpu = cpu_str;
         }
+    }
 
+    async fn publish_memory(&self, prev: &mut PrevSystemValues) {
         // Memory usage (percentage); unavailable on a read/parse failure rather
         // than a misleading 0% or 100%.
         let mem_str = match get_memory_percent() {
@@ -224,7 +244,8 @@ impl SystemSensor {
 
     async fn publish_all(&self, prev_cpu: &mut CpuTimes, prev: &mut PrevSystemValues) {
         // CPU and memory (polled metrics)
-        self.publish_cpu_mem(prev_cpu, prev).await;
+        self.publish_cpu(prev_cpu, prev).await;
+        self.publish_memory(prev).await;
 
         // Bridge health (initial publish)
         self.publish_health(prev).await;

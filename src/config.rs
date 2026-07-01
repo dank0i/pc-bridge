@@ -425,11 +425,16 @@ pub struct IntervalConfig {
     pub last_active: u64,
     #[serde(default = "default_steam_check")]
     pub steam_check: u64,
-    /// Shared poll interval for the grouped SystemSensor task (cpu + memory).
+    /// Legacy shared interval; cpu/memory/gpu/network/disk now each have their
+    /// own field below. Kept for backward compatibility (nothing reads it now).
     #[serde(default = "default_system_sensors")]
     pub system_sensors: u64,
-    /// Per-sensor poll intervals. gpu/network/disk are their own tasks, so they
-    /// get independent rates (they used to all share `system_sensors`).
+    /// Per-sensor poll intervals - each is its own task/timer now, so they get
+    /// independent rates (they used to all share `system_sensors`).
+    #[serde(default = "default_system_sensors")]
+    pub cpu: u64,
+    #[serde(default = "default_system_sensors")]
+    pub memory: u64,
     #[serde(default = "default_system_sensors")]
     pub gpu: u64,
     #[serde(default = "default_system_sensors")]
@@ -445,6 +450,8 @@ impl Default for IntervalConfig {
             last_active: default_last_active(),
             steam_check: default_steam_check(),
             system_sensors: default_system_sensors(),
+            cpu: default_system_sensors(),
+            memory: default_system_sensors(),
             gpu: default_system_sensors(),
             network: default_system_sensors(),
             disk: default_disk_sensor(),
@@ -644,6 +651,14 @@ impl Config {
             // predates their own fields, seed them from system_sensors so a
             // user's customized rate is preserved (disk kept its 6x cadence).
             if let Some(sys) = intervals.get("system_sensors").and_then(|v| v.as_u64()) {
+                if !intervals.contains_key("cpu") {
+                    intervals.insert("cpu".to_string(), serde_json::json!(sys));
+                    migrated = true;
+                }
+                if !intervals.contains_key("memory") {
+                    intervals.insert("memory".to_string(), serde_json::json!(sys));
+                    migrated = true;
+                }
                 if !intervals.contains_key("gpu") {
                     intervals.insert("gpu".to_string(), serde_json::json!(sys));
                     migrated = true;

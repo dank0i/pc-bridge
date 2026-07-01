@@ -337,8 +337,8 @@ fn feature_interval_field(id: &str) -> Option<&'static str> {
         "gpu" => "gpu",
         "network" => "network",
         "disk" => "disk",
-        // cpu/memory/active_window still share the grouped SystemSensor task.
-        "cpu" | "memory" | "active_window" => "system_sensors",
+        "cpu" => "cpu",
+        "memory" => "memory",
         "idle" => "last_active",
         "steam_updates" => "steam_check",
         "running_game" | "game_catalog" => "game_sensor",
@@ -349,6 +349,8 @@ fn feature_interval_field(id: &str) -> Option<&'static str> {
 fn interval_field_get(iv: &crate::config::IntervalConfig, field: &str) -> u32 {
     let v = match field {
         "system_sensors" => iv.system_sensors,
+        "cpu" => iv.cpu,
+        "memory" => iv.memory,
         "gpu" => iv.gpu,
         "network" => iv.network,
         "disk" => iv.disk,
@@ -364,6 +366,8 @@ fn interval_field_set(iv: &mut crate::config::IntervalConfig, field: &str, v: u3
     let v = u64::from(v);
     match field {
         "system_sensors" => iv.system_sensors = v,
+        "cpu" => iv.cpu = v,
+        "memory" => iv.memory = v,
         "gpu" => iv.gpu = v,
         "network" => iv.network = v,
         "disk" => iv.disk = v,
