@@ -44,22 +44,29 @@ Debt concentrates in three seams:
 - ☑ **Tier 1**: 1.1 (idempotent process add), 1.2 (try_send dispatch), 1.3 (Linux timeout kills the tree), 1.5 (env-expand before validation, Windows), 1.10 (credential 0600-atomic), 1.13 (preemptible backoff).
 - ☑ **Tier 2**: 2.1 (Wayland media keys via playerctl), 2.3 (reap Linux display subprocs + offload), 2.4 (per-thread audio cache generation), 2.6a/2.6c (updater cleanup name + arg forwarding), 2.7 (setup validates before save), 2.8 (device_name sanitize), 2.12 (checked notify exits), 2.13 (network elapsed-rate, idle_linux Skip, idle Windows reconnect, gpu stale comment), 2.14 (real Test-connection, safe header).
 
-### ⏸ Deferred with reason
-- **1.6** hwinfo slice length — blind UB territory (untrusted header vs real mapping); needs `VirtualQuery` + a Windows box to verify.
-- **1.7** Steam-launch permit starvation — needs a permit-handling restructure (wait outside the rate-limit).
-- **1.8 / 1.12** — fold into the Tier 3 registry/dedup (games join-split; re-publish discovery on reconnect).
-- **1.9** updater signing — verification is code, but it needs a signing keypair + a CI signing step (your infra).
-- **1.11** appinfo over-read — blind binary-offset arithmetic (both reviewers hedged); only drops the last game.
-- **2.5** ws/wss — decision: wire the WebSocket transport (rumqttc feature) or reject the scheme.
-- **2.6b** beta channel prerelease ordering — needs real semver precedence (niche: only affects beta→beta).
-- **2.9** README stale keys + `deny_unknown_fields` — README part folds into the UI migration; `deny_unknown_fields` risks rejecting valid legacy configs, needs care.
-- **2.10** steam `is_updating` bitmask — needs the real Steam StateFlags verified against a live install.
-- **2.11** custom-sensor errors in value string — needs a per-sensor availability topic (moderate refactor).
+### ☑ Also fixed (second pass)
+- **1.8** games id/name pairs carried structured through publish (no join-then-resplit misalignment).
+- **1.9** update binaries verified with minisign signatures (inert until a public key is embedded; signing steps documented in `updater.rs`).
+- **1.12** HA discovery re-published on MQTT reconnect (broker restart can't orphan entities).
+- **1.4 / Tier 3** subscribe topics now derive from the executor feature gate (`command_feature_enabled`) — one source of truth, with a drift-guard test.
+- **2.5** ws/wss brokers rejected (were silently connecting as raw TCP/TLS).
+- **2.6b** proper semver precedence in the update check (stable > prerelease, ordered prereleases).
+- **2.11** custom sensors report HA "unavailable" on failure instead of leaking the error text.
+- **Item 7 (Tier 3)** Windows-only tests (426) now run in CI — they never did; enabling them caught a stale `parse_vk_code` test (code was right, test wrong).
 
-### ⏳ Remaining big-ticket
-- **Tier 3** — the structural registry refactor (root cause of the drift bugs). Large, touches everything, mostly Windows so CI-compile-verified only.
-- **README→UI migration + `model.rs` mockup fix + phantom toggles (0.2 tail / 2.14)** — needs your eyes on the visuals.
-- **hwinfo offload / flag-macro** (original deferrals).
+### ⏸ Deferred with reason — group (d), excluded by request
+- **1.6** hwinfo slice length — blind UB territory; needs a Windows box to verify.
+- **1.11** appinfo over-read — blind binary-offset arithmetic (both reviewers hedged); only drops the last game.
+- **2.10** steam `is_updating` bitmask — needs the real Steam StateFlags verified against a live install.
+
+### ⏸ Deferred with reason — other
+- **1.7** Steam-launch permit starvation — needs a permit-handling restructure (wait outside the rate-limit).
+- **2.9** `deny_unknown_fields` — risks rejecting valid legacy configs; the README-keys part folds into the UI migration.
+
+### ⏳ Remaining (needs a decision or your eyes)
+- **Tier 3 style refactors** — god-function splits (`register_discovery`, `execute_command`), N-way entity-registry consolidation, 8 sensor run-loop bodies, 3 Win32 message pumps. These are maintainability, not correctness: every concrete drift/correctness bug they relate to is now fixed, and Windows tests run in CI to catch regressions. Best done as a dedicated refactor pass, not rushed blind.
+- **README→UI migration + `model.rs` mockup fix + phantom UI toggles (0.2 tail / 2.14)** — needs your eyes on the GUI; `model.rs` entity ids must match discovery's object-id sanitization.
+- **`is_safe_path`/`is_safe_url`** are platform-specific (not true duplicates); left separate on purpose.
 
 ---
 
