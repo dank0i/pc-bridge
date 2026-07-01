@@ -31,11 +31,8 @@ pub struct App {
     ha_token: String,
     show_secrets: bool,
     connected: bool,
-    tray_enabled: bool,
-    autostart: bool,
     beta_updates: bool,
     allow_privileged: bool,
-    confirm_destructive: bool,
     selected: Group,
     search: String,
     show_library: bool,
@@ -59,6 +56,9 @@ pub struct App {
     /// Set to the reason when the last Save failed (e.g. validation rejected the
     /// device name), so the user sees why instead of a silent no-op.
     save_error: Option<String>,
+    /// True after a successful Save, for a "Saved" acknowledgment (distinct from
+    /// the broker "connected" status).
+    saved: bool,
 }
 
 impl App {
@@ -94,11 +94,8 @@ impl App {
             ha_token: String::new(),
             show_secrets: false,
             connected: false,
-            tray_enabled: true,
-            autostart: true,
             beta_updates: cfg.update_channel == "beta",
             allow_privileged: cfg.custom_command_privileges_allowed,
-            confirm_destructive: true,
             selected: Group::Games,
             search: String::new(),
             show_library: false,
@@ -113,6 +110,7 @@ impl App {
             cfg,
             load_error,
             save_error: None,
+            saved: false,
         }
     }
 
@@ -1351,13 +1349,15 @@ fn general_panel(app: &mut App, ui: &mut egui::Ui) {
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(can_save, |ui| {
                     if ui.button("Save").clicked() {
+                        // Saving writes the config; it does NOT contact the broker,
+                        // so it must not claim "connected" (that's Test connection).
                         match app.save() {
                             Ok(()) => {
-                                app.connected = true;
+                                app.saved = true;
                                 app.save_error = None;
                             }
                             Err(e) => {
-                                app.connected = false;
+                                app.saved = false;
                                 app.save_error = Some(format!("{e:#}"));
                             }
                         }
@@ -1365,6 +1365,10 @@ fn general_panel(app: &mut App, ui: &mut egui::Ui) {
                 });
                 if ui.button("Test connection").clicked() {
                     app.connected = app.test_connection();
+                }
+                if app.saved && app.save_error.is_none() {
+                    ui.add_space(GAP);
+                    ui.label(RichText::new("Saved").color(GREEN).size(13.0));
                 }
                 ui.add_space(GAP);
                 let (txt, col) = if app.connected {
@@ -1385,16 +1389,10 @@ fn general_panel(app: &mut App, ui: &mut egui::Ui) {
                 &format!("{priv_count} actions need admin or are destructive (shutdown, restart, custom command). Off blocks them all."),
                 &mut app.allow_privileged,
             );
-            ui.add_space(GAP);
-            switch_row(ui, "Confirm destructive actions", "Require a confirm in HA before shutdown, restart, or log off.", &mut app.confirm_destructive);
         });
         ui.add_space(BLOCK);
 
         section(ui, "Behavior", |ui| {
-            switch_row(ui, "Show tray icon", "Off keeps the agent fully headless; relaunch the app to open this window.", &mut app.tray_enabled);
-            ui.add_space(GAP);
-            switch_row(ui, "Start with Windows", "Launch the agent automatically at login.", &mut app.autostart);
-            ui.add_space(GAP);
             switch_row(ui, "Beta updates", "Get pre-release builds.", &mut app.beta_updates);
         });
         ui.add_space(BLOCK);
