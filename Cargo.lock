@@ -2817,6 +2817,7 @@ dependencies = [
  "winresource",
  "wmi",
  "x11rb",
+ "zbus 5.16.0",
 ]
 
 [[package]]

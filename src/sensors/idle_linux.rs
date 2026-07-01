@@ -142,6 +142,11 @@ impl IdleSensor {
             return Some((ms / 1000) as i64);
         }
 
+        // Bundled D-Bus (GNOME Mutter / KDE) - covers Wayland with no tools.
+        if let Some(ms) = crate::linux_dbus::idle_millis() {
+            return Some((ms / 1000) as i64);
+        }
+
         // xprintidle (X11): idle time in milliseconds.
         if let Ok(output) = Command::new("xprintidle").output()
             && output.status.success()

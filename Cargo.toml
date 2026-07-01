@@ -78,6 +78,13 @@ x11rb = { version = "0.13", default-features = false, features = [
     "xtest",
 ] }
 
+# Pure-Rust D-Bus client for Wayland idle time (GNOME Mutter / KDE ScreenSaver
+# GetIdletime), so idle works on Wayland with no external tools.
+zbus = { version = "5", default-features = false, features = [
+    "blocking-api",
+    "async-io",
+] }
+
 
 
 # Windows registry
