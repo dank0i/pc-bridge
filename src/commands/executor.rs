@@ -248,9 +248,13 @@ impl CommandExecutor {
                 info!("Refreshing Steam game library...");
                 match SteamGameDiscovery::discover_async().await {
                     Some(discovery) => {
-                        let mut config = state.config.write().await;
-                        match config.merge_steam_games(&discovery) {
-                            Ok((added, removed)) if added > 0 || removed > 0 => {
+                        // Merge in memory under the lock, then release it before
+                        // the (blocking) disk save so we don't stall the runtime
+                        // or block every other task's config read.
+                        let snapshot = {
+                            let mut config = state.config.write().await;
+                            let (added, removed) = config.merge_steam_games(&discovery);
+                            if added > 0 || removed > 0 {
                                 info!(
                                     "Steam refresh: +{} added, -{} removed ({}ms{})",
                                     added,
@@ -258,19 +262,23 @@ impl CommandExecutor {
                                     discovery.build_time_ms,
                                     if discovery.from_cache { ", cached" } else { "" }
                                 );
-                                drop(config);
-                                // Notify game sensor to rebuild cached patterns
-                                let _ = state.config_generation.send(());
-                            }
-                            Ok(_) => {
+                                Some(config.clone())
+                            } else {
                                 info!(
                                     "Steam refresh: no changes ({}ms{})",
                                     discovery.build_time_ms,
                                     if discovery.from_cache { ", cached" } else { "" }
                                 );
+                                None
                             }
-                            Err(e) => {
-                                warn!("Steam refresh: failed to save games: {}", e);
+                        };
+                        if let Some(cfg) = snapshot {
+                            match tokio::task::spawn_blocking(move || cfg.save()).await {
+                                Ok(Ok(())) => {
+                                    let _ = state.config_generation.send(());
+                                }
+                                Ok(Err(e)) => warn!("Steam refresh: failed to save games: {e}"),
+                                Err(e) => warn!("Steam refresh: save task join error: {e}"),
                             }
                         }
                     }

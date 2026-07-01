@@ -811,10 +811,13 @@ impl Config {
     /// Adds newly installed games and removes auto-discovered games that are
     /// no longer in the Steam library. Manual entries are never removed.
     /// Returns (added, removed) counts.
+    /// Merge discovered Steam games into the config IN MEMORY, returning
+    /// `(added, removed)`. Does NOT persist: the caller saves after releasing the
+    /// config lock, so we never hold the lock across (blocking) disk I/O.
     pub fn merge_steam_games(
         &mut self,
         steam_games: &crate::steam::SteamGameDiscovery,
-    ) -> Result<(usize, usize)> {
+    ) -> (usize, usize) {
         let mut added = 0;
 
         for (exe_key, game) in &steam_games.games {
@@ -858,11 +861,7 @@ impl Config {
             }
         });
 
-        if added > 0 || removed > 0 {
-            self.save()?;
-        }
-
-        Ok((added, removed))
+        (added, removed)
     }
 
     /// Save current config to userConfig.json.

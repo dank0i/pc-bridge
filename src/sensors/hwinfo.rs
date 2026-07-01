@@ -640,8 +640,22 @@ mod win {
 
                         // Open detection: did pollTime actually advance?
                         if last_poll_time != Some(pt) {
-                            // Full parse + publish on new pollTime.
-                            match c.snapshot() {
+                            // Full parse off the single-threaded runtime (the
+                            // rule x reading match can be multi-ms on big setups).
+                            // Move the client in and back out of spawn_blocking.
+                            let Some(taken) = client.take() else { continue };
+                            let (taken, snap) = match tokio::task::spawn_blocking(move || {
+                                let r = taken.snapshot();
+                                (taken, r)
+                            })
+                            .await
+                            {
+                                Ok(pair) => pair,
+                                Err(_) => continue,
+                            };
+                            client = Some(taken);
+                            let c = client.as_ref().expect("client just restored");
+                            match snap {
                                 Ok(s) => {
                                     last_poll_time = Some(pt);
                                     latest_view_size = c.view_size_bytes();
