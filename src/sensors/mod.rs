@@ -9,6 +9,7 @@ mod network;
 mod now_playing;
 mod system;
 mod uptime;
+mod volume;
 
 pub mod hwinfo;
 
@@ -38,6 +39,7 @@ pub use network::NetworkSensor;
 pub use now_playing::NowPlayingSensor;
 pub use system::SystemSensor;
 pub use uptime::UptimeSensor;
+pub use volume::VolumeSensor;
 
 #[cfg(windows)]
 pub use games::GameSensor;

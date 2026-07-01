@@ -305,6 +305,13 @@ async fn run_agent() -> anyhow::Result<()> {
         info!("  Now playing (media session) sensor enabled");
     }
 
+    if config.features.volume {
+        use crate::sensors::VolumeSensor;
+        let sensor = VolumeSensor::new(Arc::clone(&state));
+        handles.push(tokio::spawn(sensor.run()));
+        info!("  Volume sensor enabled");
+    }
+
     if config.features.steam_updates {
         use crate::sensors::SteamSensor;
         let sensor = SteamSensor::new(Arc::clone(&state));

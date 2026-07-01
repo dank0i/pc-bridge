@@ -726,7 +726,9 @@ pub fn library_to_games(
 ) -> HashMap<String, GameConfig> {
     library
         .iter()
-        .filter(|g| !g.process.trim().is_empty())
+        // Drop incomplete rows: a blank process has no detection key, a blank
+        // name would derive an empty game_id.
+        .filter(|g| !g.process.trim().is_empty() && !g.name.trim().is_empty())
         .map(|g| {
             let launch_command = if g.appid != 0 || g.path.trim().is_empty() {
                 None
@@ -807,15 +809,22 @@ mod tests {
 
     #[test]
     fn test_library_drops_blank_process_rows() {
-        let lib = vec![Game {
-            name: "x".into(),
-            process: "   ".into(),
+        let row = |name: &str, process: &str| Game {
+            name: name.into(),
+            process: process.into(),
             path: String::new(),
             appid: 0,
             launcher: Launcher::Manual,
             status: GameStatus::Installed,
             exposed: true,
-        }];
+        };
+        // Blank process (no detection key) and blank name (empty game_id) both drop.
+        let lib = vec![row("x", "   "), row("  ", "game.exe")];
         assert!(library_to_games(&lib, &HashMap::new()).is_empty());
+        // A complete row survives.
+        assert_eq!(
+            library_to_games(&[row("Doom", "doom.exe")], &HashMap::new()).len(),
+            1
+        );
     }
 }
