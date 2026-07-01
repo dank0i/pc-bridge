@@ -57,8 +57,8 @@ impl PowerEventListener {
         reply.body().deserialize::<zbus::zvariant::OwnedFd>().ok()
     }
 
-    pub async fn run(self) {
-        let mut shutdown_rx = self.state.shutdown_tx.subscribe();
+    pub async fn run(self, shutdown: tokio::sync::broadcast::Sender<()>) {
+        let mut shutdown_rx = shutdown.subscribe();
 
         // Hold a delay-inhibitor so an externally initiated suspend (power
         // button, lid, auto-sleep) still gets "sleeping" on the wire before the

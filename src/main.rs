@@ -52,10 +52,8 @@ static ORIGINAL_CONSOLE_MODE: std::sync::OnceLock<(
 use crate::commands::CommandExecutor;
 use crate::config::Config;
 use crate::mqtt::MqttClient;
-use crate::power::PowerEventListener;
 #[cfg(windows)]
 use crate::sensors::ProcessWatcher;
-use crate::sensors::SystemSensor;
 
 /// Application state shared across tasks
 pub struct AppState {
@@ -302,40 +300,10 @@ async fn run_agent() -> anyhow::Result<()> {
         }));
     }
 
-    // Sensors with NO per-task OS thread are started/stopped live by the
-    // supervisor as their feature flags change (see its spawn below): gpu,
-    // network, disk, uptime, games, custom, steam, idle, volume, audio_device,
-    // capture. Sensors that hold long-lived OS threads stay startup-gated here.
-
-    // The power listener detects both sleep/wake and display on/off, so spawn
-    // it if either sensor is enabled. Each event's publish is gated by its own
-    // flag below and at the discovery layer.
-    if config.features.sleep_wake || config.features.display_state {
-        let listener = PowerEventListener::new(Arc::clone(&state));
-        handles.push(tokio::spawn(listener.run()));
-        info!("  Power events enabled");
-    }
-
-    if config.features.cpu_sensor || config.features.memory_sensor || config.features.active_window
-    {
-        let sensor = SystemSensor::new(Arc::clone(&state));
-        handles.push(tokio::spawn(sensor.run()));
-        info!("  System sensors enabled (CPU/memory polled, battery/active_window event-driven)");
-    }
-
-    if config.features.session_state {
-        use crate::sensors::SessionSensor;
-        let sensor = SessionSensor::new(Arc::clone(&state));
-        handles.push(tokio::spawn(sensor.run()));
-        info!("  Session lock/unlock sensor enabled");
-    }
-
-    if config.features.now_playing {
-        use crate::sensors::NowPlayingSensor;
-        let sensor = NowPlayingSensor::new(Arc::clone(&state));
-        handles.push(tokio::spawn(sensor.run()));
-        info!("  Now playing (media session) sensor enabled");
-    }
+    // All sensors except HWiNFO are now started/stopped live by the supervisor
+    // (see its spawn below) as their feature flags change - including the
+    // thread-holding ones (system, session, now_playing, power), which take a
+    // per-task shutdown into run(). Only HWiNFO (Windows-only) stays startup-gated.
 
     #[cfg(windows)]
     if config.features.hwinfo_sensor {

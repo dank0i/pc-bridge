@@ -22,10 +22,10 @@ impl SessionSensor {
         Self { state }
     }
 
-    pub async fn run(self) {
+    pub async fn run(self, shutdown: tokio::sync::broadcast::Sender<()>) {
         let mut tick = interval(Duration::from_secs(5));
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let mut shutdown_rx = self.state.shutdown_tx.subscribe();
+        let mut shutdown_rx = shutdown.subscribe();
         let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
         let mut prev: &'static str = "";
 

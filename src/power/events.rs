@@ -94,9 +94,9 @@ impl PowerEventListener {
         Self { state }
     }
 
-    pub async fn run(self) {
+    pub async fn run(self, shutdown: tokio::sync::broadcast::Sender<()>) {
         let (event_tx, mut event_rx) = mpsc::channel::<PowerEvent>(10);
-        let mut shutdown_rx = self.state.shutdown_tx.subscribe();
+        let mut shutdown_rx = shutdown.subscribe();
 
         // Build sync MQTT config for the power-events thread.
         // This lets wnd_proc publish the sleep message over a dedicated TCP

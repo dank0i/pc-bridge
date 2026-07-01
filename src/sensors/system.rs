@@ -54,7 +54,7 @@ impl SystemSensor {
         Self { state }
     }
 
-    pub async fn run(self) {
+    pub async fn run(self, shutdown: tokio::sync::broadcast::Sender<()>) {
         let config = self.state.config.read().await;
         let interval_secs = config.intervals.system_sensors.max(1);
         drop(config);
@@ -62,7 +62,7 @@ impl SystemSensor {
         let mut tick = interval(Duration::from_secs(interval_secs));
 
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let mut shutdown_rx = self.state.shutdown_tx.subscribe();
+        let mut shutdown_rx = shutdown.subscribe();
         let mut config_rx = self.state.config_generation.subscribe();
 
         // CPU calculation needs previous sample
@@ -81,7 +81,7 @@ impl SystemSensor {
         #[cfg(windows)]
         {
             let tx = event_tx.clone();
-            let shutdown = self.state.shutdown_tx.subscribe();
+            let shutdown = shutdown.subscribe();
             if let Some(h) = start_window_focus_monitor(tx, shutdown) {
                 shutdown_waiters.push(h);
             }
@@ -91,7 +91,7 @@ impl SystemSensor {
         #[cfg(windows)]
         {
             let tx = event_tx.clone();
-            let shutdown = self.state.shutdown_tx.subscribe();
+            let shutdown = shutdown.subscribe();
             if let Some(h) = start_battery_monitor(tx, shutdown) {
                 shutdown_waiters.push(h);
             }
@@ -102,7 +102,7 @@ impl SystemSensor {
         #[cfg(unix)]
         {
             let tx = event_tx.clone();
-            let shutdown = self.state.shutdown_tx.subscribe();
+            let shutdown = shutdown.subscribe();
             if let Some(h) = start_window_focus_monitor_linux(tx, shutdown) {
                 shutdown_waiters.push(h);
             }
@@ -110,7 +110,7 @@ impl SystemSensor {
         #[cfg(unix)]
         {
             let tx = event_tx.clone();
-            let shutdown = self.state.shutdown_tx.subscribe();
+            let shutdown = shutdown.subscribe();
             if let Some(h) = start_battery_monitor_linux(tx, shutdown) {
                 shutdown_waiters.push(h);
             }
