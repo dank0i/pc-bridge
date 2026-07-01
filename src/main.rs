@@ -328,9 +328,8 @@ async fn run_agent() -> anyhow::Result<()> {
         );
     }
 
-    // Runtime supervisor for the pure-async polling sensors: starts/stops them
-    // live as feature flags change (no restart), gpu/network/disk/uptime/games/
-    // custom.
+    // Runtime supervisor: starts/stops every sensor task live as feature flags
+    // change (no restart). Only HWiNFO stays startup-gated above.
     handles.push(tokio::spawn(
         supervisor::Supervisor::new(Arc::clone(&state)).run(),
     ));
