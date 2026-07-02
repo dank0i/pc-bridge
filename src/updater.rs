@@ -759,8 +759,11 @@ cS8yVMu/941m9iEXeSa/T6K+kerWtz+h/yjhdVGQMs4MccQmzxW1km/6/aOXbo4G0D5dvSk0AgzfVD8j
 
     #[test]
     fn test_current_version_is_valid_semver() {
-        let parts: Vec<&str> = CURRENT_VERSION.split('.').collect();
-        assert!(parts.len() >= 3, "Version must be x.y.z format");
+        // Strip any prerelease suffix (e.g. "3.0.0-rc2" -> "3.0.0") before checking
+        // the numeric x.y.z core.
+        let core = CURRENT_VERSION.split('-').next().unwrap_or(CURRENT_VERSION);
+        let parts: Vec<&str> = core.split('.').collect();
+        assert!(parts.len() >= 3, "Version core must be x.y.z: {CURRENT_VERSION}");
         for part in &parts {
             assert!(part.parse::<u64>().is_ok(), "Non-numeric segment: {part}");
         }
