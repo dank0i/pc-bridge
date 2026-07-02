@@ -54,6 +54,9 @@ pub struct App {
     /// Live view: subscribes to the broker for the agent's real state (running game,
     /// download %, availability), so the UI reflects reality, not the config.
     live: crate::ui::live::LiveView,
+    /// In-flight "Scan now" Steam-library scan (runs off the UI thread); its result
+    /// (the merged config) is applied in update().
+    scan_rx: Option<std::sync::mpsc::Receiver<Option<crate::config::Config>>>,
     /// The real on-disk config. Settings widgets read/write the App fields
     /// above; Save folds them back into this and persists.
     cfg: Config,
@@ -154,6 +157,7 @@ impl App {
             features,
             library: games_to_library(&cfg.games),
             live: crate::ui::live::start(&cfg),
+            scan_rx: None,
             cfg,
             load_error,
             save_error: None,
@@ -570,6 +574,20 @@ fn split_broker(broker: &str) -> (String, String) {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Collect a finished "Scan now" result: replace the library/config with the
+        // freshly-merged one. Rebaseline the auto-save signature so the reload isn't
+        // treated as a user edit.
+        if let Some(rx) = &self.scan_rx
+            && let Ok(result) = rx.try_recv()
+        {
+            if let Some(fresh) = result {
+                self.library = games_to_library(&fresh.games);
+                self.cfg = fresh;
+                self.toggle_sig = None;
+            }
+            self.scan_rx = None;
+        }
+
         // Apply the live MQTT view (running game, download %) to the games list, and
         // keep repainting so the subscriber thread's updates show promptly.
         self.apply_live_state();
@@ -1490,7 +1508,24 @@ fn library_view(app: &mut App, ui: &mut egui::Ui) {
                 game_id: String::new(),
             });
         }
-        let _ = ui.button("Scan now");
+        let scanning = app.scan_rx.is_some();
+        let label = if scanning { "Scanning..." } else { "Scan now" };
+        if ui
+            .add_enabled(!scanning, egui::Button::new(label))
+            .clicked()
+        {
+            // Save current edits first so the scan merges into them, then run the
+            // Steam discovery off the UI thread (it parses appinfo.vdf).
+            let _ = app.persist(true);
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let merged = crate::steam::SteamGameDiscovery::discover()
+                    .and_then(|d| crate::config::Config::refresh_steam_games(&d).ok())
+                    .map(|(fresh, _added, _removed)| fresh);
+                let _ = tx.send(merged);
+            });
+            app.scan_rx = Some(rx);
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
                 RichText::new(format!("{} games · {exposed} exposed", app.library.len()))
