@@ -561,10 +561,14 @@ fn top_bar(app: &App, ctx: &egui::Context) {
                 ui.add_space(GAP);
                 ui.label(RichText::new(&app.device).size(13.0).color(TEXT_DIM));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (txt, col) = if app.connected {
-                        ("Connected", GREEN)
+                    // The settings window is a separate process from the agent, so it
+                    // can't know the broker connection - but it CAN tell whether the
+                    // background agent is running (via the singleton probe). Show that
+                    // instead of a fake connection status.
+                    let (txt, col) = if crate::instance_already_running() {
+                        ("Agent running", GREEN)
                     } else {
-                        ("Disconnected", RED)
+                        ("Agent stopped", GREY)
                     };
                     ui.label(RichText::new(txt).color(col).size(13.0));
                     dot(ui, col, 4.5);

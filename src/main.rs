@@ -122,16 +122,17 @@ fn spawn_settings_window() -> std::io::Result<()> {
 }
 
 /// True if a headless agent is already running (it holds a named singleton). A
-/// non-owning probe, so it never affects the running agent.
+/// non-owning probe, so it never affects the running agent. Also used by the
+/// settings window to show whether the background agent is up.
 #[cfg(windows)]
-fn instance_already_running() -> bool {
+pub(crate) fn instance_already_running() -> bool {
     use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::OpenMutexW;
+    use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_ACCESS_RIGHTS};
     use windows::core::w;
     // SYNCHRONIZE access right (0x0010_0000); enough to probe the named mutex.
-    const SYNCHRONIZE: u32 = 0x0010_0000;
+    let access = SYNCHRONIZATION_ACCESS_RIGHTS(0x0010_0000);
     unsafe {
-        match OpenMutexW(SYNCHRONIZE, false, w!("Local\\pc-bridge-agent-singleton")) {
+        match OpenMutexW(access, false, w!("Local\\pc-bridge-agent-singleton")) {
             Ok(h) => {
                 let _ = CloseHandle(h);
                 true
@@ -142,7 +143,7 @@ fn instance_already_running() -> bool {
 }
 
 #[cfg(not(windows))]
-fn instance_already_running() -> bool {
+pub(crate) fn instance_already_running() -> bool {
     // Linux runs headless as a service; the open-settings-on-relaunch behavior is a
     // desktop nicety we only wire on Windows for now.
     false

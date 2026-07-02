@@ -127,14 +127,13 @@ pub(crate) fn global_scheme_blocked(config: &crate::config::Config, payload: &st
             !config.allow_global_launch && !is_configured_launch(config, payload)
         }
         "close" | "kill" => {
-            // Require the close_game feature at all: command auth otherwise keys off
-            // the command NAME, so a close:/kill: payload sent to the Launch topic
-            // would bypass a disabled close_game. Then require the target to be a
-            // configured game unless allow_global_close is on.
+            // Closing a CONFIGURED game is always allowed (HA closes games by
+            // publishing a close:<proc> payload to the Launch topic - the normal
+            // path, NOT a bypass). Only an UNCONFIGURED target needs the explicit
+            // allow_global_close opt-in. (Do not gate on the close_game feature
+            // here: that flag governs the CloseGame button, not close: payloads.)
             let target = target.trim().trim_end_matches(".exe");
-            !config.features.close_game
-                || (!config.allow_global_close
-                    && config.matching_game_processes([target]).is_empty())
+            !config.allow_global_close && config.matching_game_processes([target]).is_empty()
         }
         _ => false,
     }
@@ -163,12 +162,25 @@ mod tests {
         // Flip the permissions.
         cfg.allow_global_launch = false;
         assert!(global_scheme_blocked(&cfg, "steam:730")); // now blocked
-        // close/kill also require the close_game feature (not just the global flag),
-        // so a close: payload on the Launch topic can't bypass a disabled close_game.
+        // Turning global close on allows closing an unconfigured process too.
         cfg.allow_global_close = true;
-        assert!(global_scheme_blocked(&cfg, "kill:notepad")); // still blocked: close_game off
-        cfg.features.close_game = true;
         assert!(!global_scheme_blocked(&cfg, "kill:notepad")); // now allowed
+    }
+
+    #[test]
+    fn test_configured_game_close_always_allowed() {
+        // A close:/kill: on a CONFIGURED game must NOT be blocked even with the
+        // defaults (allow_global_close off), because that's how HA closes games.
+        use crate::config::GameConfig;
+        let mut cfg = crate::config::Config::default();
+        cfg.games.insert(
+            "marvelrivals".to_string(),
+            GameConfig::Simple("marvel".into()),
+        );
+        assert!(!global_scheme_blocked(&cfg, "close:marvelrivals"));
+        assert!(!global_scheme_blocked(&cfg, "kill:MarvelRivals.exe"));
+        // An unconfigured process is still gated.
+        assert!(global_scheme_blocked(&cfg, "kill:notepad"));
     }
 
     #[test]
