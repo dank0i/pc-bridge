@@ -22,6 +22,7 @@ mod process_watcher;
 #[cfg(windows)]
 mod session;
 mod steam;
+mod steam_downloads;
 
 #[cfg(unix)]
 mod games_linux;
@@ -50,6 +51,7 @@ pub use process_watcher::ProcessWatcher;
 #[cfg(windows)]
 pub use session::SessionSensor;
 pub use steam::SteamSensor;
+pub use steam_downloads::SteamDownloadsSensor;
 
 #[cfg(unix)]
 pub use games_linux::GameSensor;
