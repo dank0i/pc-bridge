@@ -293,6 +293,12 @@ pub struct FeatureConfig {
     pub media_controls: bool,
     #[serde(default)]
     pub steam_updates: bool,
+    /// Live Steam download PERCENTAGE via Steam's CEF debugger. Separate opt-in
+    /// (default off) from steam_updates because enabling it opens Steam's local
+    /// remote-debugging port (127.0.0.1:8080), which any local process could then
+    /// use to drive Steam. steam_updates (on/off, from .acf files) needs no port.
+    #[serde(default)]
+    pub steam_download_progress: bool,
     #[serde(default)]
     pub discord: bool,
     #[serde(default)]
@@ -336,6 +342,7 @@ impl Default for FeatureConfig {
             volume: false,
             media_controls: false,
             steam_updates: false,
+            steam_download_progress: false,
             discord: false,
             gpu_sensor: false,
             network_sensor: false,

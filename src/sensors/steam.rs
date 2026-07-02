@@ -391,6 +391,33 @@ fn is_updating(game: &GameUpdateState) -> bool {
     game.state_flags & STATE_UPDATE_MASK != 0
 }
 
+/// Cheap check (only small .acf reads, no DLL) for whether Steam is ACTIVELY
+/// downloading/updating any app right now. Used to gate the expensive isolated
+/// download-progress probe so it only spawns during a real download.
+pub(crate) fn download_in_progress() -> bool {
+    const ACTIVE: u32 = STATE_UPDATE_RUNNING | STATE_DOWNLOADING;
+    for folder in discover_library_folders_blocking() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("appmanifest_") || !name.ends_with(".acf") {
+                continue;
+            }
+            if let Some(state) = parse_acf_file(&path)
+                && state.state_flags & ACTIVE != 0
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 impl SteamSensor {
     async fn publish_state(&self) {
         let is_updating = !self.updating_games.is_empty();

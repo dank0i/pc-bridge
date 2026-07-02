@@ -47,9 +47,11 @@ env_logger = { version = "0.11", default-features = false, features = ["auto-col
 # Uses OS TLS (Schannel on Windows, Security.framework on macOS) - zero binary cost
 ureq = { version = "3", default-features = false, features = ["native-tls"] }
 
-# Plain-TCP WebSocket client for Steam's local CEF debugger (ws://127.0.0.1). No
-# TLS needed (loopback), so pull only the handshake, not any TLS backend.
-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+# Cross-platform dynamic loading of Steam's steamclient library, used ONLY in the
+# isolated `--steam-download-probe` subprocess to read live download progress via
+# IClientAppManager::GetUpdateInfo (read-only). A wrong vtable slot after a Steam
+# update is undefined behavior, so this never runs in the main agent process.
+libloading = "0.8"
 
 # SHA-256 for update integrity verification
 sha2 = "0.10"

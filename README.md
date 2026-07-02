@@ -40,7 +40,7 @@ PC Bridge runs on your PC and connects to Home Assistant over MQTT. It exposes y
 | **Display Wake** | Wakes display after WoL, dismisses screensaver |
 | **Remote Commands** | Lock, hibernate, restart, shutdown, sleep, screensaver |
 | **Notifications** | Native Windows toast notifications from Home Assistant |
-| **Steam Updates** | `steam_updating` (on/off) from `.acf` files, plus a live `steam_download` percentage (speed, app id) via Steam's CEF debugger |
+| **Steam Updates** | `steam_updating` (on/off) from `.acf` files; optional live `steam_download` percentage via Steam's private client interface (isolated helper, read-only, no ports) |
 | **Auto-Update** | Signed updates (minisign + anti-rollback) with stable/beta/disabled channels |
 | **Bridge Info** | Publishes version, OS, arch, and enabled features on connect |
 | **Hot-Reload** | Feature toggles, game mappings, and per-sensor poll intervals apply live, no restart |
@@ -207,15 +207,18 @@ Publishes are throttled per-sensor: power changes by 5W, temperatures by 1°C, c
 ### Steam Download Progress
 
 With the Steam feature on, `sensor.<device>_steam_updating` reports on/off from
-Steam's `.acf` files with no setup. For a **live download percentage**
-(`sensor.<device>_steam_download`, 0-100 with speed and app id in attributes),
-pc-bridge attaches to Steam's built-in CEF debugger:
+Steam's `.acf` files with no setup. For a **live download percentage** enable the
+separate opt-in `steam_download_progress` feature, which publishes
+`sensor.<device>_steam_download` (0-100, with the app id in attributes).
 
-1. pc-bridge drops an empty `.cef-enable-remote-debugging` file into your Steam
-   folder automatically (create it yourself if pc-bridge lacks write access there).
-2. **Restart Steam once.** It then exposes the debugger on `127.0.0.1:8080` and the
-   percentage starts flowing. The sensor reads `SteamClient.Downloads` over the
-   DevTools protocol; the raw overview is included in the sensor attributes.
+How it works: pc-bridge reads Steam's private client interface
+(`IClientAppManager::GetUpdateInfo`) in an **isolated helper subprocess**
+(`--steam-download-probe`). This is read-only, opens no ports, and never touches a
+game process, so it's not an anti-cheat concern. The helper is spawned only while a
+download is actually active. Because it relies on an unofficial interface, a Steam
+client update can occasionally break it; when that happens the sensor reports
+`unavailable` (it never crashes the agent) until pc-bridge is updated. No Steam
+restart or debug flag is required.
 
 ### Games Configuration
 

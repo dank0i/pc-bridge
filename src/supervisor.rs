@@ -95,8 +95,10 @@ const TASKS: &[TaskDef] = &[
         spawn: |s, c| tokio::spawn(cancelable(SteamSensor::new(s).run(), c.subscribe())),
     },
     TaskDef {
+        // Separate opt-in from steam_updates: this one reads Steam's private client
+        // interface (via an isolated probe), so it's gated on its own flag.
         name: "steam_downloads",
-        enabled: |c| c.features.steam_updates,
+        enabled: |c| c.features.steam_download_progress,
         spawn: |s, c| {
             tokio::spawn(cancelable(
                 SteamDownloadsSensor::new(s).run(),

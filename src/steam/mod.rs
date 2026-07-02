@@ -5,6 +5,7 @@
 
 mod appinfo;
 mod discovery;
+pub mod download_probe;
 pub(crate) mod vdf;
 
 use std::path::PathBuf;

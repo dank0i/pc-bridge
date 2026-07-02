@@ -90,6 +90,14 @@ fn restore_console_mode() {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Isolated Steam download-progress probe: loads the private steamclient library
+    // and prints one JSON line. Runs as a throwaway subprocess so a wrong vtable
+    // slot after a Steam update can't crash the agent. Handled before anything else.
+    if std::env::args().any(|a| a == "--steam-download-probe") {
+        steam::download_probe::run_and_print();
+        return Ok(());
+    }
+
     // The settings window runs in its own mode; the headless agent never loads egui.
     if std::env::args().any(|a| a == "--ui") {
         return ui::run();

@@ -271,10 +271,13 @@ impl MqttClient {
                 return;
             };
             self.publish_discovery(&topic, json).await;
+        }
 
-            // Live download percentage (CEF debugger). "idle"/"unavailable" when no
-            // active download; a 0-100 number while downloading. No availability so
-            // the last value persists like steam_updating.
+        // Live download percentage (read from Steam's private client interface in an
+        // isolated probe). Separate opt-in from steam_updates. 0-100 while
+        // downloading, "unavailable" if the probe can't reach the client. No
+        // availability so the last value persists like steam_updating.
+        if config.features.steam_download_progress {
             let dl = HADiscoveryPayload {
                 name: "Steam Download".to_string(),
                 unique_id: format!("{}_steam_download", self.device_id),
@@ -1114,7 +1117,7 @@ fn feature_entities(config: &Config) -> Vec<(&'static str, &'static str, bool)> 
         ("sensor", "battery_charging", system_any),
         ("sensor", "bridge_health", system_any),
         ("sensor", "steam_updating", f.steam_updates),
-        ("sensor", "steam_download", f.steam_updates),
+        ("sensor", "steam_download", f.steam_download_progress),
         ("sensor", "gpu_usage", f.gpu_sensor),
         ("sensor", "network_throughput", f.network_sensor),
         ("sensor", "disk_usage", f.disk_sensor),
