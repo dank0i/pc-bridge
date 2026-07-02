@@ -241,7 +241,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
         s(
             "steam_download_progress",
             "Steam Download %",
-            "Live download percentage (0-100) with app id.",
+            "Live download percentage (0-100).",
             Games,
             false,
             Running,
@@ -357,7 +357,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
         s(
             "hwinfo",
             "HWiNFO Bridge",
-            "CPU/GPU temps, power, clocks, fans, VRM & framerate from HWiNFO.",
+            "CPU/GPU temps, power, clocks & fans (HWiNFO).",
             Hardware,
             false,
             Running,
@@ -655,6 +655,10 @@ pub struct Game {
     pub launcher: Launcher,
     pub status: GameStatus,
     pub exposed: bool,
+    /// The agent's game id (matches the live `runninggames` sensor). Display-only;
+    /// derived from the config on save, so it isn't read back by `library_to_games`.
+    #[allow(clippy::struct_field_names)]
+    pub game_id: String,
 }
 
 /// Derive a stable game_id (snake_case, ascii-alphanumeric) from a display name.
@@ -697,6 +701,7 @@ pub fn games_to_library(games: &HashMap<String, GameConfig>) -> Vec<Game> {
                 },
                 status: GameStatus::Installed,
                 exposed: gc.is_exposed(),
+                game_id: gc.game_id().to_string(),
             }
         })
         .collect();
@@ -805,6 +810,7 @@ mod tests {
             launcher: Launcher::Manual,
             status: GameStatus::Installed,
             exposed: true,
+            game_id: String::new(),
         };
         // Blank process (no detection key) and blank name (empty game_id) both drop.
         let lib = vec![row("x", "   "), row("  ", "game.exe")];

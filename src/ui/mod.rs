@@ -4,6 +4,7 @@
 //! running agent.
 
 mod app;
+mod live;
 mod model;
 mod theme;
 

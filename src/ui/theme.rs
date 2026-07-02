@@ -119,7 +119,8 @@ pub fn kv(ui: &mut egui::Ui, key: &str, value: &str, color: Color32, mono: bool)
         if mono {
             t = t.monospace();
         }
-        ui.label(t);
+        // Wrap long values (e.g. the HWiNFO sensor list) instead of running off-screen.
+        ui.add(egui::Label::new(t).wrap());
     });
 }
 

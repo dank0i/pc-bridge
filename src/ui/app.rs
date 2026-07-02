@@ -30,7 +30,9 @@ pub struct App {
     mqtt_pass: String,
     ha_token: String,
     show_secrets: bool,
-    connected: bool,
+    /// Fingerprint of the discrete (non-text) settings. Auto-save fires whenever it
+    /// changes, so a toggle/interval/expose persists immediately with no Save click.
+    toggle_sig: Option<String>,
     beta_updates: bool,
     allow_privileged: bool,
     allow_global_launch: bool,
@@ -49,6 +51,9 @@ pub struct App {
     custom_commands: Vec<CustomCommand>,
     features: Vec<Feature>,
     library: Vec<Game>,
+    /// Live view: subscribes to the broker for the agent's real state (running game,
+    /// download %, availability), so the UI reflects reality, not the config.
+    live: crate::ui::live::LiveView,
     /// The real on-disk config. Settings widgets read/write the App fields
     /// above; Save folds them back into this and persists.
     cfg: Config,
@@ -131,7 +136,7 @@ impl App {
             mqtt_pass: cfg.mqtt.pass.clone(),
             ha_token: String::new(),
             show_secrets: false,
-            connected: false,
+            toggle_sig: None,
             beta_updates: cfg.update_channel == "beta",
             allow_privileged: cfg.custom_command_privileges_allowed,
             allow_global_launch: cfg.allow_global_launch,
@@ -148,6 +153,7 @@ impl App {
             custom_commands: cfg.custom_commands.clone(),
             features,
             library: games_to_library(&cfg.games),
+            live: crate::ui::live::start(&cfg),
             cfg,
             load_error,
             save_error: None,
@@ -159,7 +165,49 @@ impl App {
     }
 
     /// Fold the edited settings back into the config and persist them.
+    /// A fingerprint of the discrete (non-text) settings so auto-save fires only when
+    /// a toggle / interval / expose actually changes (not on text-field keystrokes).
+    fn toggle_signature(&self) -> String {
+        use std::fmt::Write;
+        let mut s = String::new();
+        for f in &self.features {
+            // Only fingerprint an interval that actually has a backing config field,
+            // so editing a non-persistable slider doesn't trigger a save that discards
+            // the value.
+            let interval = if feature_interval_field(f.id).is_some() {
+                f.interval
+            } else {
+                0
+            };
+            let _ = write!(s, "{}={},{};", f.id, f.enabled, interval);
+        }
+        for (i, g) in self.library.iter().enumerate() {
+            let _ = write!(s, "g{i}={};", g.exposed);
+        }
+        let _ = write!(
+            s,
+            "P{}L{}C{}T{}B{}A{}S{}",
+            self.allow_privileged,
+            self.allow_global_launch,
+            self.allow_global_close,
+            self.show_tray_icon,
+            self.beta_updates,
+            self.custom_actions_on,
+            self.custom_sensors_on
+        );
+        s
+    }
+
     fn save(&mut self) -> anyhow::Result<()> {
+        self.persist(true)
+    }
+
+    /// Persist the config. With `include_text=false` (used by the toggle auto-save)
+    /// the free-text fields - broker, credentials, device name, custom-entity bodies -
+    /// are NOT rewritten from the edit buffers, so a background save can't clobber a
+    /// half-typed password or re-encrypt the credential file on every toggle. Those
+    /// persist only via the explicit Save button (`include_text=true`).
+    fn persist(&mut self, include_text: bool) -> anyhow::Result<()> {
         if let Some(e) = &self.load_error {
             anyhow::bail!("refusing to overwrite a config that failed to load: {e}");
         }
@@ -188,14 +236,16 @@ impl App {
                 interval_field_set(&mut self.cfg.intervals, field, f.interval);
             }
         }
-        self.cfg.device_name = self.device.clone();
-        self.cfg.mqtt.broker = if self.mqtt_port.is_empty() {
-            self.mqtt_host.clone()
-        } else {
-            format!("{}:{}", self.mqtt_host, self.mqtt_port)
-        };
-        self.cfg.mqtt.user = self.mqtt_user.clone();
-        self.cfg.mqtt.pass = self.mqtt_pass.clone();
+        if include_text {
+            self.cfg.device_name = self.device.clone();
+            self.cfg.mqtt.broker = if self.mqtt_port.is_empty() {
+                self.mqtt_host.clone()
+            } else {
+                format!("{}:{}", self.mqtt_host, self.mqtt_port)
+            };
+            self.cfg.mqtt.user = self.mqtt_user.clone();
+            self.cfg.mqtt.pass = self.mqtt_pass.clone();
+        }
         self.cfg.custom_command_privileges_allowed = self.allow_privileged;
         self.cfg.allow_global_launch = self.allow_global_launch;
         self.cfg.allow_global_close = self.allow_global_close;
@@ -219,19 +269,22 @@ impl App {
         // Fold the edited game library back into the config map, preserving the
         // Steam auto-discovered flag for games already known to discovery.
         self.cfg.games = library_to_games(&self.library, &self.cfg.games);
-        // Persist edited custom entities, dropping rows with a blank name.
-        self.cfg.custom_sensors = self
-            .custom_sensors
-            .iter()
-            .filter(|s| !s.name.trim().is_empty())
-            .cloned()
-            .collect();
-        self.cfg.custom_commands = self
-            .custom_commands
-            .iter()
-            .filter(|c| !c.name.trim().is_empty())
-            .cloned()
-            .collect();
+        // Custom-entity bodies are free text -> explicit Save only (see include_text).
+        if include_text {
+            // Persist edited custom entities, dropping rows with a blank name.
+            self.cfg.custom_sensors = self
+                .custom_sensors
+                .iter()
+                .filter(|s| !s.name.trim().is_empty())
+                .cloned()
+                .collect();
+            self.cfg.custom_commands = self
+                .custom_commands
+                .iter()
+                .filter(|c| !c.name.trim().is_empty())
+                .cloned()
+                .collect();
+        }
         self.cfg.update_channel = if self.beta_updates {
             "beta".to_owned()
         } else if self.cfg.update_channel == "disabled" {
@@ -242,28 +295,32 @@ impl App {
         self.cfg.save()
     }
 
-    /// Best-effort reachability check: resolve the broker host and open a TCP
-    /// connection with a short timeout. Not a full MQTT handshake, but honest
-    /// (the previous button just claimed "connected" unconditionally).
-    fn test_connection(&self) -> bool {
-        use std::net::{TcpStream, ToSocketAddrs};
-        use std::time::Duration;
-
-        let host = self
-            .mqtt_host
-            .trim_start_matches("tcp://")
-            .trim_start_matches("ssl://")
-            .trim_start_matches("wss://")
-            .trim_start_matches("ws://");
-        let port = if self.mqtt_port.is_empty() {
-            "1883"
-        } else {
-            &self.mqtt_port
-        };
-        let Ok(mut addrs) = format!("{host}:{port}").to_socket_addrs() else {
-            return false;
-        };
-        addrs.any(|addr| TcpStream::connect_timeout(&addr, Duration::from_secs(3)).is_ok())
+    /// Fold the live MQTT view into the games list each frame: mark the running game
+    /// Running, the downloading game Downloading(%), everything else Installed.
+    fn apply_live_state(&mut self) {
+        let live = self.live.snapshot();
+        for g in &mut self.library {
+            // pct 0 means idle (the sensor publishes "0" when not downloading), so
+            // don't flash "Downloading 0%" as a finished download clears.
+            let dl = if g.appid != 0 && live.download_appid == Some(g.appid) {
+                live.download_pct.filter(|&p| p > 0)
+            } else {
+                None
+            };
+            // runninggames can be a comma-joined list when several are detected.
+            let running = !g.game_id.is_empty()
+                && live
+                    .running_game_id
+                    .as_deref()
+                    .is_some_and(|s| s.split(',').any(|id| id == g.game_id));
+            g.status = if let Some(p) = dl {
+                GameStatus::Downloading(p)
+            } else if running {
+                GameStatus::Running
+            } else {
+                GameStatus::Installed
+            };
+        }
     }
 
     fn master_on(&self, f: &Feature) -> bool {
@@ -500,6 +557,11 @@ fn split_broker(broker: &str) -> (String, String) {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Apply the live MQTT view (running game, download %) to the games list, and
+        // keep repainting so the subscriber thread's updates show promptly.
+        self.apply_live_state();
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+
         // Clear the "Saved" acknowledgement the moment the user edits anything, so
         // it never implies in-progress edits are already persisted. (Clicking Save
         // itself is a pointer press too, but save() re-sets `saved` afterward.)
@@ -547,6 +609,27 @@ impl eframe::App for App {
                     feature_panel(self, ui);
                 }
             });
+
+        // Auto-save the instant a toggle/interval/expose changes, so settings persist
+        // without a Save click. Runs after the panel render, so this frame's edits are
+        // already applied. Text fields (broker, credentials, game names) stay on
+        // explicit Save - they're excluded from the signature so we don't write the
+        // file + re-encrypt credentials on every keystroke.
+        let sig = self.toggle_signature();
+        match &self.toggle_sig {
+            None => self.toggle_sig = Some(sig),
+            Some(prev) if *prev != sig => match self.persist(false) {
+                Ok(()) => {
+                    self.save_error = None;
+                    self.toggle_sig = Some(sig);
+                }
+                // Keep the OLD baseline so we retry once the underlying problem (e.g.
+                // a duplicate game process) is fixed, rather than silently dropping the
+                // change and pretending it was saved.
+                Err(e) => self.save_error = Some(format!("{e:#}")),
+            },
+            _ => {}
+        }
     }
 }
 
@@ -562,6 +645,13 @@ fn top_bar(app: &App, ctx: &egui::Context) {
                 ui.label(RichText::new("pc-bridge").strong().size(18.0).color(TEXT));
                 ui.add_space(GAP);
                 ui.label(RichText::new(&app.device).size(13.0).color(TEXT_DIM));
+                // A save failure (e.g. duplicate game process) can originate on any
+                // tab, so surface it globally here, not just on General.
+                if let Some(e) = &app.save_error {
+                    ui.add_space(GAP);
+                    ui.label(RichText::new("· not saved").size(13.0).color(RED))
+                        .on_hover_text(e);
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // The settings window is a separate process from the agent, so it
                     // can't know the broker connection - but it CAN tell whether the
@@ -755,7 +845,8 @@ fn feature_panel(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if games_lib {
-                let _ = ui.button("Scan now");
+                // Games are managed in the library view below (Add game / Scan now);
+                // no duplicate control in the group header.
             } else if g == Group::Custom {
                 // Custom entities have no per-item toggle; the master gates them
                 // all, so show how many are defined instead of an All toggle.
@@ -1361,16 +1452,6 @@ fn legend_item(ui: &mut egui::Ui, color: Color32, label: &str) {
 }
 
 fn library_view(app: &mut App, ui: &mut egui::Ui) {
-    let dl = app
-        .library
-        .iter()
-        .filter(|g| matches!(g.status, GameStatus::Downloading(_)))
-        .count();
-    let upd = app
-        .library
-        .iter()
-        .filter(|g| g.status == GameStatus::UpdatePending)
-        .count();
     let exposed = app.library.iter().filter(|g| g.exposed).count();
 
     ui.horizontal(|ui| {
@@ -1383,17 +1464,15 @@ fn library_view(app: &mut App, ui: &mut egui::Ui) {
                 launcher: Launcher::Manual,
                 status: GameStatus::Installed,
                 exposed: false,
+                game_id: String::new(),
             });
         }
         let _ = ui.button("Scan now");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
-                RichText::new(format!(
-                    "{} games · {exposed} exposed · {dl} downloading · {upd} updates",
-                    app.library.len()
-                ))
-                .size(12.0)
-                .color(TEXT_DIM),
+                RichText::new(format!("{} games · {exposed} exposed", app.library.len()))
+                    .size(12.0)
+                    .color(TEXT_DIM),
             );
         });
     });
@@ -1610,18 +1689,24 @@ fn general_panel(app: &mut App, ui: &mut egui::Ui) {
                         }
                     }
                 });
-                if ui.button("Test connection").clicked() {
-                    app.connected = app.test_connection();
-                }
                 if app.saved && app.save_error.is_none() {
                     ui.add_space(GAP);
                     ui.label(RichText::new("Saved").color(GREEN).size(13.0));
                 }
                 ui.add_space(GAP);
-                let (txt, col) = if app.connected {
+                // Live status from the MQTT subscriber: is the broker reachable and is
+                // the agent actually connected + publishing.
+                let live = app.live.snapshot();
+                let (txt, col) = if !live.attempted {
+                    ("connecting...", GREY)
+                } else if !live.broker_connected {
+                    ("broker unreachable", RED)
+                } else if live.agent_online == Some(false) {
+                    ("agent offline", ORANGE)
+                } else if live.agent_online == Some(true) {
                     ("connected", GREEN)
                 } else {
-                    ("not connected", RED)
+                    ("broker up, agent unknown", AMBER)
                 };
                 dot(ui, col, 4.5);
                 ui.label(RichText::new(txt).color(col).size(13.0));
