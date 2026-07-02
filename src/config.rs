@@ -452,6 +452,9 @@ pub struct IntervalConfig {
     pub last_active: u64,
     #[serde(default = "default_steam_check")]
     pub steam_check: u64,
+    /// Poll interval for the live download-% probe (only spawns during a download).
+    #[serde(default = "default_steam_download")]
+    pub steam_download: u64,
     /// Legacy shared interval; cpu/memory/gpu/network/disk now each have their
     /// own field below. Kept for backward compatibility (nothing reads it now).
     #[serde(default = "default_system_sensors")]
@@ -476,6 +479,7 @@ impl Default for IntervalConfig {
             game_sensor: default_game_sensor(),
             last_active: default_last_active(),
             steam_check: default_steam_check(),
+            steam_download: default_steam_download(),
             system_sensors: default_system_sensors(),
             cpu: default_system_sensors(),
             memory: default_system_sensors(),
@@ -494,6 +498,9 @@ fn default_last_active() -> u64 {
 }
 fn default_steam_check() -> u64 {
     30
+}
+fn default_steam_download() -> u64 {
+    5
 }
 fn default_system_sensors() -> u64 {
     10

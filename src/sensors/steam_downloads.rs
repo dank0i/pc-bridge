@@ -30,7 +30,15 @@ impl SteamDownloadsSensor {
     pub async fn run(self) {
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
         let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
-        let mut tick = interval(Duration::from_secs(8));
+        let interval_secs = self
+            .state
+            .config
+            .read()
+            .await
+            .intervals
+            .steam_download
+            .max(1);
+        let mut tick = interval(Duration::from_secs(interval_secs));
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         debug!("Steam download sensor started (isolated probe)");
@@ -46,7 +54,11 @@ impl SteamDownloadsSensor {
                 Ok(()) = reconnect_rx.recv() => { prev.clear(); }
                 _ = tick.tick() => {
                     let (state_str, attrs) = self.poll().await;
-                    if state_str != prev {
+                    // Key on state + attributes so a change in app_id/bytes (even at
+                    // the same rounded percent) still republishes, and idle/unavailable
+                    // don't spam.
+                    let sig = format!("{state_str}|{attrs}");
+                    if sig != prev {
                         self.state
                             .mqtt
                             .publish_sensor_retained("steam_download", &state_str)
@@ -55,7 +67,7 @@ impl SteamDownloadsSensor {
                             .mqtt
                             .publish_sensor_attributes("steam_download", &attrs)
                             .await;
-                        prev = state_str;
+                        prev = sig;
                     }
                 }
             }

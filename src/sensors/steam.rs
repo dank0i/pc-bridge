@@ -395,7 +395,6 @@ fn is_updating(game: &GameUpdateState) -> bool {
 /// downloading/updating any app right now. Used to gate the expensive isolated
 /// download-progress probe so it only spawns during a real download.
 pub(crate) fn download_in_progress() -> bool {
-    const ACTIVE: u32 = STATE_UPDATE_RUNNING | STATE_DOWNLOADING;
     for folder in discover_library_folders_blocking() {
         let Ok(entries) = std::fs::read_dir(&folder) else {
             continue;
@@ -408,8 +407,11 @@ pub(crate) fn download_in_progress() -> bool {
             if !name.starts_with("appmanifest_") || !name.ends_with(".acf") {
                 continue;
             }
+            // Use the same inclusive mask as the steam_updating sensor: the exact
+            // StateFlags bit Steam sets during a download varies, so a narrow subset
+            // would miss real downloads and the probe would never spawn.
             if let Some(state) = parse_acf_file(&path)
-                && state.state_flags & ACTIVE != 0
+                && is_updating(&state)
             {
                 return true;
             }

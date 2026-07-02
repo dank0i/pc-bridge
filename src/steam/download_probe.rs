@@ -33,8 +33,8 @@ const SLOT_GET_ICLIENT_APP_MANAGER: usize = 36;
 const SLOT_GET_DOWNLOADING_APP_ID: usize = 30;
 const SLOT_GET_UPDATE_INFO: usize = 13;
 
-/// Mirrors Steam's `AppUpdateInfo_s`. `#[repr(C)]` reproduces the C padding (4 bytes
-/// after the leading u32 so the u64s are 8-aligned).
+/// Mirrors the LEADING fields of Steam's `AppUpdateInfo_s`. `#[repr(C)]` reproduces
+/// the C padding (4 bytes after the leading u32 so the u64s are 8-aligned).
 #[repr(C)]
 #[derive(Default)]
 struct AppUpdateInfo {
@@ -44,6 +44,18 @@ struct AppUpdateInfo {
     bytes_to_process: u64,
     bytes_processed: u64,
     unk: u32,
+}
+
+/// Receive buffer for `GetUpdateInfo`. The callee writes however large the CURRENT
+/// (private, undocumented) `AppUpdateInfo_s` is; if Steam appended fields, a 48-byte
+/// receiver would be overflowed (stack corruption -> wrong data or crash). Over-
+/// allocate generous 8-aligned headroom so any growth lands in `headroom`, and read
+/// only the leading fields we understand.
+#[repr(C)]
+struct AppUpdateInfoBuf {
+    info: AppUpdateInfo,
+    #[allow(dead_code)]
+    headroom: [u64; 24], // 192 spare bytes
 }
 
 type CreateInterfaceFn = unsafe extern "C" fn(*const c_char, *mut c_int) -> *mut c_void;
@@ -189,8 +201,11 @@ fn probe() -> Result<Option<Progress>, &'static str> {
         }
 
         let get_update_info: FnUpdateInfo = std::mem::transmute(vfn(appmgr, SLOT_GET_UPDATE_INFO));
-        let mut info = AppUpdateInfo::default();
-        get_update_info(appmgr, appid, &raw mut info);
+        // Over-allocated receiver (see AppUpdateInfoBuf): the callee may write more
+        // than our 48-byte view if the private struct grew; the extra lands in slack.
+        let mut buf: AppUpdateInfoBuf = std::mem::zeroed();
+        get_update_info(appmgr, appid, (&raw mut buf).cast::<AppUpdateInfo>());
+        let info = &buf.info;
 
         // Sanity-check before trusting a struct read through a private ABI.
         let sane_max = 10_u64 << 40; // 10 TB
