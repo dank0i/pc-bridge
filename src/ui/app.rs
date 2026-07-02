@@ -299,6 +299,14 @@ impl App {
     /// Running, the downloading game Downloading(%), everything else Installed.
     fn apply_live_state(&mut self) {
         let live = self.live.snapshot();
+        // Normalize names (lowercase, alphanumeric-only) so "KovaaK's" matches
+        // "KovaaKs" etc. when comparing the updating-games list to the library.
+        let norm = |s: &str| -> String {
+            s.chars()
+                .filter(char::is_ascii_alphanumeric)
+                .map(|c| c.to_ascii_lowercase())
+                .collect()
+        };
         for g in &mut self.library {
             // pct 0 means idle (the sensor publishes "0" when not downloading), so
             // don't flash "Downloading 0%" as a finished download clears.
@@ -313,10 +321,15 @@ impl App {
                     .running_game_id
                     .as_deref()
                     .is_some_and(|s| s.split(',').any(|id| id == g.game_id));
+            // steam_updating publishes updating games by display name.
+            let gn = norm(&g.name);
+            let updating = !gn.is_empty() && live.updating_games.iter().any(|n| norm(n) == gn);
             g.status = if let Some(p) = dl {
                 GameStatus::Downloading(p)
             } else if running {
                 GameStatus::Running
+            } else if updating {
+                GameStatus::UpdatePending
             } else {
                 GameStatus::Installed
             };
