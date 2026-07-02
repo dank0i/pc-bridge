@@ -241,4 +241,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
-        run: gh release edit "$TAG" --draft=false --repo "$REPO"
+        # A tag with a prerelease identifier (a hyphen, e.g. v3.0.0-rc2) is published
+        # as a prerelease so it stays off the stable /releases/latest channel; a plain
+        # vX.Y.Z tag publishes as a full release.
+        run: |
+          if [[ "$TAG" == *-* ]]; then
+            gh release edit "$TAG" --draft=false --prerelease --repo "$REPO"
+          else
+            gh release edit "$TAG" --draft=false --prerelease=false --repo "$REPO"
+          fi
