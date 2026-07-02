@@ -746,6 +746,19 @@ fn side_rail(app: &mut App, ctx: &egui::Context) {
                         .size(11.0)
                         .color(Color32::from_gray(0x44)),
                 );
+                ui.add_space(BLOCK);
+                let quit = ui
+                    .add_sized(
+                        egui::vec2(ui.available_width(), 30.0),
+                        egui::Button::new(RichText::new("Quit pc-bridge").size(13.0).color(RED))
+                            .fill(ROW_OFF)
+                            .rounding(Rounding::same(7.0)),
+                    )
+                    .on_hover_text("Stops the settings window and the background agent");
+                if quit.clicked() {
+                    crate::quit_signal::request_agent_quit();
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
             });
         });
 }

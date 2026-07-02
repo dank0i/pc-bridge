@@ -27,6 +27,7 @@ mod logging;
 mod mqtt;
 mod notification;
 mod power;
+mod quit_signal;
 mod sensors;
 mod setup;
 mod steam;
@@ -292,6 +293,9 @@ async fn run_agent() -> anyhow::Result<()> {
 
     // Create shutdown channel
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
+
+    // Let the settings window's Quit button stop the agent too (Windows).
+    quit_signal::watch_for_quit(shutdown_tx.clone());
 
     // Create MQTT client (conditionally registers discovery based on features)
     let (mqtt, command_rx) = MqttClient::new(&config, shutdown_tx.subscribe()).await?;
