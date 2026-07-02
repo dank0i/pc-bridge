@@ -763,7 +763,10 @@ cS8yVMu/941m9iEXeSa/T6K+kerWtz+h/yjhdVGQMs4MccQmzxW1km/6/aOXbo4G0D5dvSk0AgzfVD8j
         // the numeric x.y.z core.
         let core = CURRENT_VERSION.split('-').next().unwrap_or(CURRENT_VERSION);
         let parts: Vec<&str> = core.split('.').collect();
-        assert!(parts.len() >= 3, "Version core must be x.y.z: {CURRENT_VERSION}");
+        assert!(
+            parts.len() >= 3,
+            "Version core must be x.y.z: {CURRENT_VERSION}"
+        );
         for part in &parts {
             assert!(part.parse::<u64>().is_ok(), "Non-numeric segment: {part}");
         }
