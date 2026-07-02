@@ -124,6 +124,25 @@ pub fn steamclient_dir() -> Option<PathBuf> {
     steamclient_path().and_then(|p| p.parent().map(PathBuf::from))
 }
 
+/// Add the steamclient directory to this process's DLL search path so its sibling
+/// dependencies load regardless of cwd (also makes manual probe runs work anywhere).
+#[cfg(windows)]
+fn add_dll_dir(lib_path: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+    let Some(dir) = lib_path.parent() else { return };
+    let wide: Vec<u16> = dir
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: valid null-terminated wide path; SetDllDirectoryW just sets a search dir.
+    unsafe {
+        let _ = windows::Win32::System::LibraryLoader::SetDllDirectoryW(windows::core::PCWSTR(
+            wide.as_ptr(),
+        ));
+    }
+}
+
 /// Scan the library on disk for its current `CLIENTENGINE_INTERFACE_VERSION###`.
 /// Only used as a fallback when the default version doesn't resolve (Steam bumped
 /// it), so the common path never reads the whole (large) library.
@@ -150,21 +169,34 @@ struct Progress {
 /// client couldn't be reached at all.
 fn probe() -> Result<Option<Progress>, &'static str> {
     let lib_path = steamclient_path().ok_or("steamclient not found")?;
+    eprintln!("[probe] steamclient: {}", lib_path.display());
+    // On Windows, add the steamclient dir to the DLL search path so its sibling
+    // dependencies resolve no matter the cwd (helps manual runs too).
+    #[cfg(windows)]
+    add_dll_dir(&lib_path);
     // SAFETY: loading the platform's own steamclient; dependent libs resolve via the
-    // search path the parent set when spawning this probe.
+    // search path above / the env the parent set when spawning this probe.
     let lib = unsafe { libloading::Library::new(&lib_path) }.map_err(|_| "load failed")?;
+    eprintln!("[probe] loaded steamclient");
     let create_interface: libloading::Symbol<CreateInterfaceFn> =
         unsafe { lib.get(b"CreateInterface\0") }.map_err(|_| "no CreateInterface")?;
+    eprintln!("[probe] CreateInterface resolved");
 
     unsafe {
         // 1) IClientEngine (try the known version, else scan the DLL for the current).
         let default_ver = CString::new(DEFAULT_ENGINE_VERSION).unwrap();
         let mut engine = create_interface(default_ver.as_ptr(), std::ptr::null_mut());
+        let mut ver_used = DEFAULT_ENGINE_VERSION.to_string();
         if engine.is_null()
             && let Some(scanned) = scan_engine_version(&lib_path)
         {
+            ver_used = scanned.to_string_lossy().into_owned();
             engine = create_interface(scanned.as_ptr(), std::ptr::null_mut());
         }
+        eprintln!(
+            "[probe] engine ({ver_used}): {}",
+            if engine.is_null() { "NULL" } else { "ok" }
+        );
         if engine.is_null() {
             return Err("no client engine");
         }
@@ -172,11 +204,13 @@ fn probe() -> Result<Option<Progress>, &'static str> {
         // 2) Steam pipe + global user (early, stable slots).
         let create_pipe: FnPipe = std::mem::transmute(vfn(engine, SLOT_CREATE_STEAM_PIPE));
         let pipe = create_pipe(engine);
+        eprintln!("[probe] steam pipe: {pipe}");
         if pipe == 0 {
             return Err("no steam pipe");
         }
         let connect_user: FnConnect = std::mem::transmute(vfn(engine, SLOT_CONNECT_GLOBAL_USER));
         let user = connect_user(engine, pipe);
+        eprintln!("[probe] global user: {user}");
         if user == 0 {
             return Err("no global user (steam not running?)");
         }
@@ -188,6 +222,10 @@ fn probe() -> Result<Option<Progress>, &'static str> {
         let get_app_manager: FnGetAppMgr =
             std::mem::transmute(vfn(engine, SLOT_GET_ICLIENT_APP_MANAGER));
         let appmgr = get_app_manager(engine, user, pipe, appmgr_ver.as_ptr());
+        eprintln!(
+            "[probe] app manager (slot {SLOT_GET_ICLIENT_APP_MANAGER}) valid: {}",
+            looks_like_interface(appmgr)
+        );
         if !looks_like_interface(appmgr) {
             return Err("app manager slot invalid");
         }
@@ -196,6 +234,7 @@ fn probe() -> Result<Option<Progress>, &'static str> {
         let get_downloading: FnDownloadingId =
             std::mem::transmute(vfn(appmgr, SLOT_GET_DOWNLOADING_APP_ID));
         let appid = get_downloading(appmgr);
+        eprintln!("[probe] downloading appid: {appid}");
         if appid == 0 {
             return Ok(None); // connected, nothing downloading
         }
@@ -206,6 +245,10 @@ fn probe() -> Result<Option<Progress>, &'static str> {
         let mut buf: AppUpdateInfoBuf = std::mem::zeroed();
         get_update_info(appmgr, appid, (&raw mut buf).cast::<AppUpdateInfo>());
         let info = &buf.info;
+        eprintln!(
+            "[probe] appid {appid}: downloaded={} to_download={} to_process={}",
+            info.bytes_downloaded, info.bytes_to_download, info.bytes_to_process
+        );
 
         // Sanity-check before trusting a struct read through a private ABI.
         let sane_max = 10_u64 << 40; // 10 TB
@@ -234,6 +277,6 @@ pub fn run_and_print() {
             p.appid, p.downloaded, p.total
         ),
         Ok(None) => println!("{{\"idle\":true}}"),
-        Err(_) => {} // no output -> parent treats as unavailable
+        Err(e) => eprintln!("[probe] failed: {e}"), // stderr only; stdout stays empty
     }
 }

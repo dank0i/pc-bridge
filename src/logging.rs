@@ -135,7 +135,7 @@ fn log_file_path() -> io::Result<PathBuf> {
 
 /// Per-user log directory: `%LOCALAPPDATA%\pc-bridge` on Windows.
 #[cfg(windows)]
-fn log_dir() -> PathBuf {
+pub fn log_dir() -> PathBuf {
     if let Some(base) = std::env::var_os("LOCALAPPDATA") {
         return PathBuf::from(base).join("pc-bridge");
     }
@@ -145,7 +145,7 @@ fn log_dir() -> PathBuf {
 /// Per-user log directory on Unix: `$XDG_STATE_HOME/pc-bridge`, else
 /// `~/.local/state/pc-bridge`, else a temp directory.
 #[cfg(unix)]
-fn log_dir() -> PathBuf {
+pub fn log_dir() -> PathBuf {
     if let Some(base) = std::env::var_os("XDG_STATE_HOME") {
         return PathBuf::from(base).join("pc-bridge");
     }

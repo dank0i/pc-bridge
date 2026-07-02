@@ -365,7 +365,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             5,
             "sensor.dank0i_pc_hwinfo_*",
             "HWiNFO open with 'Shared Memory Support' enabled (Settings)",
-            "Publishes ~21 mapped sensors: cpu/gpu package+hotspot+memory temps, cpu/gpu/soc power, cpu/gpu core+memory clocks, cpu/gpu load, vram %, gpu+case fans, VRM temp, framerate. Reads HWiNFO's shared memory (not arbitrary sensors).",
+            "Publishes ~21 mapped sensors: cpu/gpu package+hotspot+memory temps, cpu/gpu/soc power, cpu/gpu core+memory clocks, cpu/gpu load, vram %, gpu+case fans, VRM temp, framerate. Reads HWiNFO's shared memory.",
         ),
         // Audio & Media (event-driven)
         s(
@@ -661,6 +661,42 @@ pub struct Game {
     pub game_id: String,
 }
 
+/// Strip a launcher scheme (`lnk:`/`exe:`/`url:`) so the UI shows just the raw path
+/// or URL. Other/no scheme is returned unchanged.
+fn strip_launch_scheme(s: &str) -> String {
+    let lower = s.to_ascii_lowercase();
+    for scheme in ["lnk:", "exe:", "url:"] {
+        if lower.starts_with(scheme) {
+            return s[scheme.len()..].to_string();
+        }
+    }
+    s.to_string()
+}
+
+/// Re-apply the launcher scheme when folding a manual game's edited path back into
+/// the config: a URL gets `url:`, a `.lnk` gets `lnk:`, anything else `exe:`. If the
+/// user already typed a scheme, it's left as-is.
+fn add_launch_scheme(path: &str) -> String {
+    let p = path.trim();
+    if p.is_empty() {
+        return String::new();
+    }
+    let lower = p.to_ascii_lowercase();
+    if ["lnk:", "exe:", "url:", "steam:", "epic:"]
+        .iter()
+        .any(|s| lower.starts_with(s))
+    {
+        return p.to_string();
+    }
+    if p.contains("://") {
+        format!("url:{p}")
+    } else if lower.ends_with(".lnk") {
+        format!("lnk:{p}")
+    } else {
+        format!("exe:{p}")
+    }
+}
+
 /// Derive a stable game_id (snake_case, ascii-alphanumeric) from a display name.
 fn game_id_from_name(name: &str) -> String {
     let mut id: String = name
@@ -691,7 +727,9 @@ pub fn games_to_library(games: &HashMap<String, GameConfig>) -> Vec<Game> {
                 path: if appid != 0 {
                     String::new()
                 } else {
-                    gc.launch_command().unwrap_or_default()
+                    // Show just the path/URL; the lnk:/exe:/url: scheme is re-added
+                    // on save (see library_to_games).
+                    strip_launch_scheme(&gc.launch_command().unwrap_or_default())
                 },
                 appid,
                 launcher: if appid != 0 {
@@ -726,7 +764,8 @@ pub fn library_to_games(
             let launch_command = if g.appid != 0 || g.path.trim().is_empty() {
                 None
             } else {
-                Some(g.path.trim().to_string())
+                // The UI shows the bare path; re-apply the lnk:/exe:/url: scheme.
+                Some(add_launch_scheme(g.path.trim()))
             };
             let auto_discovered = prev
                 .get(&g.process)
@@ -785,7 +824,8 @@ mod tests {
         assert_eq!(lib[0].appid, 2_807_960);
         assert!(matches!(lib[0].launcher, Launcher::Steam));
         assert_eq!(lib[1].name, "My Game");
-        assert_eq!(lib[1].path, "exe:C:/game.exe");
+        // Path is shown without the scheme; library_to_games re-adds exe:/lnk:/url:.
+        assert_eq!(lib[1].path, "C:/game.exe");
         assert!(!lib[1].exposed);
 
         let back = library_to_games(&lib, &games);

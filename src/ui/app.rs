@@ -646,6 +646,16 @@ impl eframe::App for App {
     }
 }
 
+/// Open a folder/file path or URL with the OS default handler.
+fn os_open(target: &str) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer").arg(target).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(target).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(target).spawn();
+}
+
 fn top_bar(app: &App, ctx: &egui::Context) {
     egui::TopBottomPanel::top("top")
         .frame(
@@ -1762,9 +1772,18 @@ fn general_panel(app: &mut App, ui: &mut egui::Ui) {
 
         section(ui, "About", |ui| {
             ui.horizontal(|ui| {
-                let _ = ui.button("View logs");
-                let _ = ui.button("Open config folder");
-                let _ = ui.button("Check for updates");
+                if ui.button("View logs").clicked() {
+                    os_open(&crate::logging::log_dir().to_string_lossy());
+                }
+                if ui.button("Open config folder").clicked()
+                    && let Ok(p) = crate::config::Config::config_path()
+                    && let Some(dir) = p.parent()
+                {
+                    os_open(&dir.to_string_lossy());
+                }
+                if ui.button("Check for updates").clicked() {
+                    os_open("https://github.com/dank0i/pc-bridge/releases");
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         RichText::new(concat!("pc-bridge v", env!("CARGO_PKG_VERSION")))
