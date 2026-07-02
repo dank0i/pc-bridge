@@ -17,6 +17,12 @@ ignore = [
     # anyhow: unsoundness only when calling Error::downcast_mut() on a
     # context-wrapped error. pc-bridge never does that. Revisit when anyhow ships a fix.
     "RUSTSEC-2026-0190",
+    # quick-xml DoS-on-malicious-XML advisories. pc-bridge only pulls quick-xml
+    # transitively via wayland-scanner, a BUILD-TIME proc-macro that parses the
+    # bundled, trusted Wayland protocol XML - never attacker-controlled runtime
+    # input - so neither DoS is reachable.
+    "RUSTSEC-2026-0194", # quick-xml quadratic runtime on duplicate attributes
+    "RUSTSEC-2026-0195", # quick-xml unbounded namespace-declaration allocation
 ]
 
 [licenses]
