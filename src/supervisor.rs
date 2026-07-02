@@ -27,8 +27,8 @@ use crate::config::Config;
 use crate::power::PowerEventListener;
 use crate::sensors::{
     ActiveWindowSensor, AudioDeviceSensor, CaptureSensor, CustomSensorManager, DiskSensor,
-    GameSensor, GpuSensor, IdleSensor, NetworkSensor, NowPlayingSensor, SessionSensor,
-    SteamDownloadsSensor, SteamSensor, SystemSensor, UptimeSensor, VolumeSensor,
+    GameSensor, GpuSensor, IdleSensor, NetworkSensor, NowPlayingSensor, SessionSensor, SteamSensor,
+    SystemSensor, UptimeSensor, VolumeSensor,
 };
 
 /// Run `fut` until it finishes on its own (global shutdown, handled inside the
@@ -93,18 +93,6 @@ const TASKS: &[TaskDef] = &[
         name: "steam",
         enabled: |c| c.features.steam_updates,
         spawn: |s, c| tokio::spawn(cancelable(SteamSensor::new(s).run(), c.subscribe())),
-    },
-    TaskDef {
-        // Separate opt-in from steam_updates: this one reads Steam's private client
-        // interface (via an isolated probe), so it's gated on its own flag.
-        name: "steam_downloads",
-        enabled: |c| c.features.steam_download_progress,
-        spawn: |s, c| {
-            tokio::spawn(cancelable(
-                SteamDownloadsSensor::new(s).run(),
-                c.subscribe(),
-            ))
-        },
     },
     TaskDef {
         name: "idle",

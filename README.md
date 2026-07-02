@@ -40,7 +40,7 @@ PC Bridge runs on your PC and connects to Home Assistant over MQTT. It exposes y
 | **Display Wake** | Wakes display after WoL, dismisses screensaver |
 | **Remote Commands** | Lock, hibernate, restart, shutdown, sleep, screensaver |
 | **Notifications** | Native Windows toast notifications from Home Assistant |
-| **Steam Updates** | `steam_updating` (on/off) from `.acf` files; optional live `steam_download` percentage via Steam's private client interface (isolated helper, read-only, no ports) |
+| **Steam Updates** | `steam_updating` (on/off) from `.acf` files, plus the names of games currently downloading/updating |
 | **Auto-Update** | Signed updates (minisign + anti-rollback) with stable/beta/disabled channels |
 | **Bridge Info** | Publishes version, OS, arch, and enabled features on connect |
 | **Hot-Reload** | Feature toggles, game mappings, and per-sensor poll intervals apply live, no restart |
@@ -204,21 +204,13 @@ Sensors are matched by name patterns and tolerate vendor differences (Intel/AMD 
 
 Publishes are throttled per-sensor: power changes by 5W, temperatures by 1°C, clocks by 50MHz, with a 30-second heartbeat so HA always has a recent value. The producer task only reads 8 bytes of shared memory between updates, so the CPU cost is negligible.
 
-### Steam Download Progress
+### Steam Updates
 
 With the Steam feature on, `sensor.<device>_steam_updating` reports on/off from
-Steam's `.acf` files with no setup. For a **live download percentage** enable the
-separate opt-in `steam_download_progress` feature, which publishes
-`sensor.<device>_steam_download` (0-100, with the app id in attributes).
-
-How it works: pc-bridge reads Steam's private client interface
-(`IClientAppManager::GetUpdateInfo`) in an **isolated helper subprocess**
-(`--steam-download-probe`). This is read-only, opens no ports, and never touches a
-game process, so it's not an anti-cheat concern. The helper is spawned only while a
-download is actually active. Because it relies on an unofficial interface, a Steam
-client update can occasionally break it; when that happens the sensor reports
-`unavailable` (it never crashes the agent) until pc-bridge is updated. No Steam
-restart or debug flag is required.
+Steam's `.acf` files (no setup, no ports), and its attributes list the names of the
+games currently downloading or updating. A live download *percentage* is not exposed:
+Steam only makes that available in-process (via its CEF debug port or DLL injection),
+both of which are security/stability tradeoffs pc-bridge deliberately avoids.
 
 ### Games Configuration
 

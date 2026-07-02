@@ -1,6 +1,6 @@
 [package]
 name = "pc-bridge"
-version = "3.0.0-rc6"
+version = "3.0.0"
 edition = "2024"
 authors = ["dank0i"]
 description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
@@ -46,12 +46,6 @@ env_logger = { version = "0.11", default-features = false, features = ["auto-col
 # Native HTTP client (replaces curl subprocess for updates)
 # Uses OS TLS (Schannel on Windows, Security.framework on macOS) - zero binary cost
 ureq = { version = "3", default-features = false, features = ["native-tls"] }
-
-# Cross-platform dynamic loading of Steam's steamclient library, used ONLY in the
-# isolated `--steam-download-probe` subprocess to read live download progress via
-# IClientAppManager::GetUpdateInfo (read-only). A wrong vtable slot after a Steam
-# update is undefined behavior, so this never runs in the main agent process.
-libloading = "0.8"
 
 # SHA-256 for update integrity verification
 sha2 = "0.10"
@@ -126,7 +120,6 @@ windows = { version = "0.58", features = [
     "implement",
     "Win32_Foundation",
     "Win32_System_Threading",
-    "Win32_System_LibraryLoader",
     "Win32_System_ProcessStatus",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Power",

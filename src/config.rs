@@ -293,12 +293,6 @@ pub struct FeatureConfig {
     pub media_controls: bool,
     #[serde(default)]
     pub steam_updates: bool,
-    /// Live Steam download PERCENTAGE via Steam's CEF debugger. Separate opt-in
-    /// (default off) from steam_updates because enabling it opens Steam's local
-    /// remote-debugging port (127.0.0.1:8080), which any local process could then
-    /// use to drive Steam. steam_updates (on/off, from .acf files) needs no port.
-    #[serde(default)]
-    pub steam_download_progress: bool,
     #[serde(default)]
     pub discord: bool,
     #[serde(default)]
@@ -342,7 +336,6 @@ impl Default for FeatureConfig {
             volume: false,
             media_controls: false,
             steam_updates: false,
-            steam_download_progress: false,
             discord: false,
             gpu_sensor: false,
             network_sensor: false,
@@ -452,9 +445,6 @@ pub struct IntervalConfig {
     pub last_active: u64,
     #[serde(default = "default_steam_check")]
     pub steam_check: u64,
-    /// Poll interval for the live download-% probe (only spawns during a download).
-    #[serde(default = "default_steam_download")]
-    pub steam_download: u64,
     /// Legacy shared interval; cpu/memory/gpu/network/disk now each have their
     /// own field below. Kept for backward compatibility (nothing reads it now).
     #[serde(default = "default_system_sensors")]
@@ -479,7 +469,6 @@ impl Default for IntervalConfig {
             game_sensor: default_game_sensor(),
             last_active: default_last_active(),
             steam_check: default_steam_check(),
-            steam_download: default_steam_download(),
             system_sensors: default_system_sensors(),
             cpu: default_system_sensors(),
             memory: default_system_sensors(),
@@ -498,9 +487,6 @@ fn default_last_active() -> u64 {
 }
 fn default_steam_check() -> u64 {
     30
-}
-fn default_steam_download() -> u64 {
-    5
 }
 fn default_system_sensors() -> u64 {
     10

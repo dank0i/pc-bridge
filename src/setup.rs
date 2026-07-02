@@ -428,8 +428,6 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
             volume: config.audio_control,
             media_controls: config.audio_control,
             steam_updates: config.steam_updates,
-            // Advanced opt-in (private Steam interface); off unless enabled in settings.
-            steam_download_progress: false,
             discord: config.discord,
             gpu_sensor: false,
             network_sensor: false,

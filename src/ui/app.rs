@@ -300,7 +300,7 @@ impl App {
     }
 
     /// Fold the live MQTT view into the games list each frame: mark the running game
-    /// Running, the downloading game Downloading(%), everything else Installed.
+    /// Running, updating games Update, everything else Installed.
     fn apply_live_state(&mut self) {
         let live = self.live.snapshot();
         // Normalize names (lowercase, alphanumeric-only) so "KovaaK's" matches
@@ -312,13 +312,6 @@ impl App {
                 .collect()
         };
         for g in &mut self.library {
-            // pct 0 means idle (the sensor publishes "0" when not downloading), so
-            // don't flash "Downloading 0%" as a finished download clears.
-            let dl = if g.appid != 0 && live.download_appid == Some(g.appid) {
-                live.download_pct.filter(|&p| p > 0)
-            } else {
-                None
-            };
             // runninggames can be a comma-joined list when several are detected.
             let running = !g.game_id.is_empty()
                 && live
@@ -328,9 +321,7 @@ impl App {
             // steam_updating publishes updating games by display name.
             let gn = norm(&g.name);
             let updating = !gn.is_empty() && live.updating_games.iter().any(|n| norm(n) == gn);
-            g.status = if let Some(p) = dl {
-                GameStatus::Downloading(p)
-            } else if running {
+            g.status = if running {
                 GameStatus::Running
             } else if updating {
                 GameStatus::UpdatePending
@@ -494,7 +485,6 @@ fn flag_get(f: &FeatureConfig, id: &str) -> Option<bool> {
         "volume" => f.volume,
         "media_controls" => f.media_controls,
         "steam_downloads" => f.steam_updates,
-        "steam_download_progress" => f.steam_download_progress,
         "notifications" => f.notifications,
         "sleep_wake" => f.sleep_wake,
         "display_state" => f.display_state,
@@ -532,7 +522,6 @@ fn flag_set(f: &mut FeatureConfig, id: &str, v: bool) {
         "volume" => f.volume = v,
         "media_controls" => f.media_controls = v,
         "steam_downloads" => f.steam_updates = v,
-        "steam_download_progress" => f.steam_download_progress = v,
         "notifications" => f.notifications = v,
         "sleep_wake" => f.sleep_wake = v,
         "display_state" => f.display_state = v,
@@ -1539,7 +1528,6 @@ fn library_view(app: &mut App, ui: &mut egui::Ui) {
     // legend / column hint
     ui.horizontal(|ui| {
         legend_item(ui, GREEN, "Running");
-        legend_item(ui, ACCENT, "Downloading");
         legend_item(ui, ORANGE, "Update");
         legend_item(ui, TEXT_DIM, "Installed");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1555,7 +1543,6 @@ fn library_view(app: &mut App, ui: &mut egui::Ui) {
             for (i, game) in app.library.iter_mut().enumerate() {
                 let (stext, scol) = match game.status {
                     GameStatus::Running => ("Running".to_owned(), GREEN),
-                    GameStatus::Downloading(p) => (format!("Downloading {p}%"), ACCENT),
                     GameStatus::UpdatePending => ("Update".to_owned(), ORANGE),
                     GameStatus::Installed => ("Installed".to_owned(), TEXT_DIM),
                 };

@@ -238,19 +238,6 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             "",
             "Reads Steam's .acf files. No debug port, no restart needed.",
         ),
-        s(
-            "steam_download_progress",
-            "Steam Download %",
-            "Live download percentage (0-100).",
-            Games,
-            false,
-            Running,
-            "76%",
-            0,
-            "sensor.dank0i_pc_steam_download",
-            "Steam running",
-            "Reads Steam's private client interface (IClientAppManager) in an isolated helper process - read-only, opens no ports, not an anti-cheat concern. Because it uses an unofficial interface, a Steam update can occasionally break it until pc-bridge is updated; it fails safe to 'unavailable', never crashes the agent.",
-        ),
         a(
             "launch_game",
             "Launch Game",
@@ -642,7 +629,6 @@ impl Launcher {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GameStatus {
     Running,
-    Downloading(u8),
     UpdatePending,
     Installed,
 }

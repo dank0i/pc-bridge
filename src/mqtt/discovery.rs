@@ -273,32 +273,6 @@ impl MqttClient {
             self.publish_discovery(&topic, json).await;
         }
 
-        // Live download percentage (read from Steam's private client interface in an
-        // isolated probe). Separate opt-in from steam_updates. 0-100 while
-        // downloading, "unavailable" if the probe can't reach the client. No
-        // availability so the last value persists like steam_updating.
-        if config.features.steam_download_progress {
-            let dl = HADiscoveryPayload {
-                name: "Steam Download".to_string(),
-                unique_id: format!("{}_steam_download", self.device_id),
-                state_topic: Some(self.sensor_topic("steam_download")),
-                command_topic: None,
-                availability_topic: None,
-                availability: None,
-                availability_mode: None,
-                json_attributes_topic: Some(self.sensor_attributes_topic("steam_download")),
-                device: Arc::clone(device),
-                icon: Some("mdi:download".to_string()),
-                device_class: None,
-                unit_of_measurement: Some("%".to_string()),
-                state_class: None,
-            };
-            let dl_topic = self.config_topic("sensor", "steam_download");
-            if let Ok(json) = serde_json::to_string(&dl) {
-                self.publish_discovery(&dl_topic, json).await;
-            }
-        }
-
         // GPU sensor
         if config.features.gpu_sensor {
             self.register_sensor(
@@ -1117,7 +1091,6 @@ fn feature_entities(config: &Config) -> Vec<(&'static str, &'static str, bool)> 
         ("sensor", "battery_charging", system_any),
         ("sensor", "bridge_health", system_any),
         ("sensor", "steam_updating", f.steam_updates),
-        ("sensor", "steam_download", f.steam_download_progress),
         ("sensor", "gpu_usage", f.gpu_sensor),
         ("sensor", "network_throughput", f.network_sensor),
         ("sensor", "disk_usage", f.disk_sensor),

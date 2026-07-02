@@ -25,10 +25,6 @@ pub struct LiveState {
     pub agent_online: Option<bool>,
     /// Currently-running game id (agent's `runninggames` sensor), if any.
     pub running_game_id: Option<String>,
-    /// App id of the game Steam is downloading, from `steam_download` attributes.
-    pub download_appid: Option<u32>,
-    /// Live download percent (0-100), from `steam_download` state.
-    pub download_pct: Option<u8>,
     /// Display names of games Steam is updating (from `steam_updating` attributes).
     pub updating_games: Vec<String>,
 }
@@ -56,12 +52,10 @@ pub fn start(cfg: &Config) -> LiveView {
     LiveView { state }
 }
 
-fn sub_topics(dev: &str) -> [String; 5] {
+fn sub_topics(dev: &str) -> [String; 3] {
     [
         format!("homeassistant/sensor/{dev}/availability"),
         format!("homeassistant/sensor/{dev}/runninggames/state"),
-        format!("homeassistant/sensor/{dev}/steam_download/state"),
-        format!("homeassistant/sensor/{dev}/steam_download/attributes"),
         format!("homeassistant/sensor/{dev}/steam_updating/attributes"),
     ]
 }
@@ -113,13 +107,6 @@ fn run(broker: String, user: String, pass: String, dev: String, state: Arc<Mutex
                         "" | "none" | "None" | "unavailable" | "unknown" => None,
                         v => Some(v.to_string()),
                     };
-                } else if p.topic.ends_with("/steam_download/state") {
-                    s.download_pct = val.parse::<u8>().ok();
-                } else if p.topic.ends_with("/steam_download/attributes") {
-                    s.download_appid = serde_json::from_str::<serde_json::Value>(&payload)
-                        .ok()
-                        .and_then(|v| v.get("app_id").and_then(serde_json::Value::as_u64))
-                        .map(|n| n as u32);
                 } else if p.topic.ends_with("/steam_updating/attributes") {
                     s.updating_games = serde_json::from_str::<serde_json::Value>(&payload)
                         .ok()
