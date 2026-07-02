@@ -40,19 +40,22 @@ PC Bridge runs on your PC and connects to Home Assistant over MQTT. It exposes y
 | **Display Wake** | Wakes display after WoL, dismisses screensaver |
 | **Remote Commands** | Lock, hibernate, restart, shutdown, sleep, screensaver |
 | **Notifications** | Native Windows toast notifications from Home Assistant |
-| **Steam Updates** | Detect when Steam games are updating |
-| **Auto-Update** | Checks for new versions with stable/beta/disabled channels |
+| **Steam Updates** | `steam_updating` (on/off) from `.acf` files, plus a live `steam_download` percentage (speed, app id) via Steam's CEF debugger |
+| **Auto-Update** | Signed updates (minisign + anti-rollback) with stable/beta/disabled channels |
 | **Bridge Info** | Publishes version, OS, arch, and enabled features on connect |
-| **Hot-Reload** | Updates game mappings without restart |
-| **First-Run Wizard** | Interactive setup for MQTT and feature selection |
+| **Hot-Reload** | Feature toggles, game mappings, and per-sensor poll intervals apply live, no restart |
+| **Settings Window** | Native `--ui` window (egui) for config; launching the app while it's running opens it |
+| **System Tray** | Toggleable tray icon with Open Settings / Quit (Windows) |
+| **Command Permissions** | `allow_global_launch` (default on) and `allow_global_close` (default off) gate reaching beyond configured games |
+| **First-Run Wizard** | Settings window on first run (terminal wizard as headless fallback) |
 
 ### Supported Platforms
 
 | Platform | Status |
 |----------|--------|
 | Windows 10/11 | Full support |
-| Linux (X11) | Full support |
-| Linux (Wayland) | Partial (idle tracking requires qdbus) |
+| Linux (X11) | Full support (bundled x11rb, no external tools needed) |
+| Linux (Wayland) | Idle/active-window/display via bundled wlroots (`ext-idle-notify`) and GNOME/KDE D-Bus, no external tools |
 | macOS | Build supported, limited features |
 
 ---
@@ -70,12 +73,17 @@ Grab the latest release from [**GitHub Releases**](https://github.com/dank0i/pc-
 
 ### First Run
 
-1. **Run the binary** - the setup wizard will guide you through:
+1. **Run the binary** - the native settings window opens (a terminal wizard is used
+   only on a headless host) to guide you through:
    - MQTT broker connection
    - Device name
    - Feature selection (all opt-in)
 2. Configuration is saved to `userConfig.json`
 3. PC Bridge connects and auto-discovers with Home Assistant
+
+After setup the agent runs headless. To reopen the settings window later, launch the
+app again (it opens the window instead of starting a second agent), use the tray
+icon's **Open Settings**, or run it with `--ui`.
 
 ---
 
@@ -163,6 +171,11 @@ granular flags automatically on first load.
 |---------|---------|-------------|
 | `update_channel` | `"stable"` | Update channel: `"stable"`, `"beta"`, or `"disabled"` |
 | `disk_sensor_paths` | `[]` | Paths to check for disk usage (e.g. `["C:\\", "D:\\"]` or `["/", "/home"]`) |
+| `show_tray_icon` | `true` | Show the Windows system tray icon (Open Settings / Quit); toggles live |
+| `allow_global_launch` | `true` | Let launch commands start titles that aren't in your configured games |
+| `allow_global_close` | `false` | Let close/kill commands target processes that aren't configured games |
+| `allow_raw_commands` | `false` | Run arbitrary `exe:`/`lnk:`/`url:` payloads not matching a configured game |
+| `intervals` | per-sensor | Poll intervals (seconds) per sensor: `cpu`, `memory`, `gpu`, `network`, `disk`, ... |
 
 > **Note:** Missing fields are automatically added with their defaults when upgrading.
 
@@ -190,6 +203,19 @@ HWiNFO must be running for the sensors to publish. Entities become `unavailable`
 Sensors are matched by name patterns and tolerate vendor differences (Intel/AMD CPUs, NVIDIA/AMD GPUs, various motherboard sensor naming). Anything that doesn't match on your specific hardware shows up in the `hwinfo_diagnostic` attributes so you can see what's missing.
 
 Publishes are throttled per-sensor: power changes by 5W, temperatures by 1°C, clocks by 50MHz, with a 30-second heartbeat so HA always has a recent value. The producer task only reads 8 bytes of shared memory between updates, so the CPU cost is negligible.
+
+### Steam Download Progress
+
+With the Steam feature on, `sensor.<device>_steam_updating` reports on/off from
+Steam's `.acf` files with no setup. For a **live download percentage**
+(`sensor.<device>_steam_download`, 0-100 with speed and app id in attributes),
+pc-bridge attaches to Steam's built-in CEF debugger:
+
+1. pc-bridge drops an empty `.cef-enable-remote-debugging` file into your Steam
+   folder automatically (create it yourself if pc-bridge lacks write access there).
+2. **Restart Steam once.** It then exposes the debugger on `127.0.0.1:8080` and the
+   percentage starts flowing. The sensor reads `SteamClient.Downloads` over the
+   DevTools protocol; the raw overview is included in the sensor attributes.
 
 ### Games Configuration
 
@@ -578,27 +604,20 @@ Where `<device>` is your configured `device_name` with dashes replaced by unders
 
 ## Linux Requirements
 
-For full functionality on Linux, install these optional dependencies:
-
-```bash
-# Debian/Ubuntu
-sudo apt install xdotool xprintidle xdg-utils libxdo-dev libgtk-3-dev libayatana-appindicator3-dev
-
-# Fedora
-sudo dnf install xdotool xprintidle xdg-utils libxdo-devel gtk3-devel libappindicator-gtk3-devel
-
-# Arch
-sudo pacman -S xdotool xprintidle xdg-utils libxdo gtk3 libappindicator-gtk3
-```
+Idle time, active window, display power, and display wake are handled by bundled
+pure-Rust backends (x11rb on X11; `ext-idle-notify` / wlr and GNOME/KDE D-Bus on
+Wayland), so **no external tools are required** for those anymore. A few things
+still shell out to system utilities that are usually already installed:
 
 | Package | Purpose |
 |---------|---------|
-| `xdotool` | Screensaver/display wake, media keys |
-| `xprintidle` | Idle time tracking (X11) |
-| `xdg-utils` | Screensaver activation |
-| `pactl` | Audio control (usually pre-installed with PulseAudio/PipeWire) |
-| `dbus-monitor` | Display on/off detection (usually pre-installed with D-Bus) |
-| `gdbus` | Sleep/wake detection (usually pre-installed with GLib) |
+| `pactl` | Audio control (ships with PulseAudio/PipeWire) |
+| `gdbus` | Sleep/wake detection (ships with GLib) |
+| `playerctl` | Now-playing / media info (optional) |
+| `xdotool` / `xprintidle` | Optional fallbacks only if the bundled X11 backend can't attach |
+
+Building the `--ui` settings window on Linux needs GTK dev headers for the file
+dialog (`libgtk-3-dev` / `gtk3-devel` / `gtk3`); the headless agent does not.
 
 ---
 
