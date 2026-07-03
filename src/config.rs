@@ -73,6 +73,25 @@ pub struct Config {
     pub custom_sensors: Vec<CustomSensor>,
     #[serde(default)]
     pub custom_commands: Vec<CustomCommand>,
+
+    /// Steam-discovered games the user removed in the settings window. Kept so a
+    /// still-installed title isn't re-added on the next library scan. The settings
+    /// UI lists these under "Removed"; restoring one drops it from here so the next
+    /// scan re-adds the game.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_games: Vec<RemovedGame>,
+}
+
+/// A Steam-discovered game the user removed from the library. Suppressed from
+/// re-discovery until restored. Carries the display name so the "Removed" view can
+/// show a friendly label rather than the bare process key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemovedGame {
+    /// Process key (matches the games-map key Steam discovery uses, e.g. "cs2").
+    pub process: String,
+    /// Display name captured at removal time.
+    #[serde(default)]
+    pub name: String,
 }
 
 impl Default for Config {
@@ -100,6 +119,7 @@ impl Default for Config {
             disk_sensor_paths: Vec::new(),
             custom_sensors: Vec::new(),
             custom_commands: Vec::new(),
+            removed_games: Vec::new(),
         }
     }
 }
@@ -911,9 +931,25 @@ impl Config {
     ) -> (usize, usize) {
         let mut added = 0;
 
+        // Manual entries may key on the full filename ("cs2.exe") while Steam keys
+        // on the stripped, lowercased exe ("cs2"); normalize existing keys the same
+        // way so a manual entry and its Steam twin don't both land in the map.
+        let normalize = |k: &str| k.trim().trim_end_matches(".exe").to_ascii_lowercase();
+        let existing: std::collections::HashSet<String> =
+            self.games.keys().map(|k| normalize(k)).collect();
+        // Titles the user explicitly removed: don't resurrect them while installed.
+        let suppressed: std::collections::HashSet<&str> = self
+            .removed_games
+            .iter()
+            .map(|r| r.process.as_str())
+            .collect();
+
         for (exe_key, game) in &steam_games.games {
             // exe_key is already lowercase, no extension (e.g., "cs2")
-            if self.games.contains_key(exe_key) {
+            if self.games.contains_key(exe_key)
+                || existing.contains(exe_key.as_str())
+                || suppressed.contains(exe_key.as_str())
+            {
                 continue;
             }
 
@@ -1526,6 +1562,7 @@ mod tests {
             discord_keybind: None,
             custom_sensors: vec![],
             custom_commands: vec![],
+            removed_games: Vec::new(),
             update_channel: default_update_channel(),
             disk_sensor_paths: Vec::new(),
         }
@@ -1660,6 +1697,65 @@ mod tests {
             } => assert!(auto_discovered),
             _ => panic!("Expected Full variant"),
         }
+    }
+
+    fn steam_discovery(entries: &[(&str, u32, &str)]) -> crate::steam::SteamGameDiscovery {
+        let games: HashMap<String, crate::steam::discovery::SteamGame> = entries
+            .iter()
+            .map(|(key, app_id, name)| {
+                (
+                    key.to_string(),
+                    crate::steam::discovery::SteamGame {
+                        app_id: *app_id,
+                        name: name.to_string(),
+                        executable: format!("{key}.exe"),
+                        install_path: std::path::PathBuf::new(),
+                    },
+                )
+            })
+            .collect();
+        let game_count = games.len();
+        crate::steam::SteamGameDiscovery {
+            games,
+            build_time_ms: 0,
+            game_count,
+            from_cache: false,
+        }
+    }
+
+    #[test]
+    fn test_merge_skips_manual_exe_keyed_twin() {
+        // A manual entry keyed on the full filename ("cs2.exe") must not gain a
+        // duplicate when Steam discovers the same game under the stripped key.
+        let mut cfg = Config::default();
+        cfg.games
+            .insert("cs2.exe".to_string(), GameConfig::Simple("cs2".into()));
+        let (added, _removed) = cfg.merge_steam_games(&steam_discovery(&[("cs2", 730, "CS2")]));
+        assert_eq!(
+            added, 0,
+            "Steam twin of a manual .exe key must not be added"
+        );
+        assert_eq!(cfg.games.len(), 1);
+    }
+
+    #[test]
+    fn test_merge_suppresses_removed_game() {
+        // A game the user removed stays gone on the next scan even while installed.
+        let mut cfg = Config::default();
+        cfg.removed_games.push(RemovedGame {
+            process: "cs2".to_string(),
+            name: "CS2".to_string(),
+        });
+        let (added, _removed) = cfg.merge_steam_games(&steam_discovery(&[("cs2", 730, "CS2")]));
+        assert_eq!(added, 0, "removed game must not resurrect");
+        assert!(!cfg.games.contains_key("cs2"));
+        // A different installed game is still discovered normally.
+        let (added, _) = cfg.merge_steam_games(&steam_discovery(&[
+            ("cs2", 730, "CS2"),
+            ("dota2", 570, "Dota 2"),
+        ]));
+        assert_eq!(added, 1);
+        assert!(cfg.games.contains_key("dota2"));
     }
 
     // ===== GameConfig JSON serialization tests =====

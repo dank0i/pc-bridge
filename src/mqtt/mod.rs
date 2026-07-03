@@ -607,6 +607,7 @@ mod tests {
             custom_commands: Vec::new(),
             update_channel: crate::config::default_update_channel(),
             disk_sensor_paths: Vec::new(),
+            removed_games: Vec::new(),
         }
     }
 
@@ -1919,6 +1920,7 @@ mod tests {
                 custom_commands: Vec::new(),
                 update_channel: crate::config::default_update_channel(),
                 disk_sensor_paths: Vec::new(),
+                removed_games: Vec::new(),
             }
         }
 

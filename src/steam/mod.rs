@@ -4,7 +4,7 @@
 //! Uses memory-mapped I/O and cached indexing for minimal overhead.
 
 mod appinfo;
-mod discovery;
+pub(crate) mod discovery;
 pub(crate) mod vdf;
 
 use std::path::PathBuf;

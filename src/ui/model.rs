@@ -784,6 +784,37 @@ pub fn library_to_games(
         .collect()
 }
 
+/// Merge an externally-updated on-disk config into the one this window is about to
+/// save, so a settings save doesn't clobber a change the agent made while the
+/// window was open - chiefly a Steam scan triggered from Home Assistant.
+///
+/// `baseline_keys` are the game keys this window knew about (its in-memory config
+/// before folding the edited library). A fresh game key we never had is re-added;
+/// the user's edits to games they could actually see still win. Fields the UI
+/// never edits are taken from disk so an external change to them survives.
+pub fn reconcile_with_disk(
+    cfg: &mut crate::config::Config,
+    fresh: crate::config::Config,
+    baseline_keys: &std::collections::HashSet<String>,
+) {
+    // Fields the settings UI never writes: keep the on-disk values.
+    cfg.disk_sensor_paths = fresh.disk_sensor_paths;
+    cfg.discord_keybind = fresh.discord_keybind;
+    cfg.allow_raw_commands = fresh.allow_raw_commands;
+    cfg.mqtt.client_id = fresh.mqtt.client_id;
+    // Re-add games discovered externally since this window loaded (keys we never
+    // had). `or_insert` never overwrites a game the user is actively editing.
+    for (key, gc) in fresh.games {
+        if !baseline_keys.contains(&key) {
+            cfg.games.entry(key).or_insert(gc);
+        }
+    }
+    // NOTE: `removed_games` is intentionally NOT reconciled from disk. The settings
+    // UI is its sole writer (the agent's Steam refresh only reads the suppression,
+    // never adds to it), so the in-memory list is authoritative. Unioning the disk
+    // copy back in would re-suppress a game the user just restored.
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,6 +937,71 @@ mod tests {
         assert_eq!(
             library_to_games(&[row("Doom", "doom.exe")], &HashMap::new()).len(),
             1
+        );
+    }
+
+    #[test]
+    fn test_reconcile_with_disk_preserves_external_changes() {
+        use crate::config::Config;
+        // The window loaded knowing only "doom". While it was open the agent's Steam
+        // scan added "cs2" and set a disk path. Our stale save must not wipe those.
+        let baseline: std::collections::HashSet<String> =
+            ["doom".to_string()].into_iter().collect();
+
+        let mut ours = Config::default();
+        ours.games
+            .insert("doom".to_string(), GameConfig::Simple("doom".into()));
+
+        let mut fresh = Config::default();
+        fresh
+            .games
+            .insert("doom".to_string(), GameConfig::Simple("doom".into()));
+        fresh.games.insert(
+            "cs2".to_string(),
+            GameConfig::from_steam("cs2".into(), 730, "CS2".into()),
+        );
+        fresh.disk_sensor_paths = vec!["C:\\".to_string()];
+        // The disk copy of removed_games must be IGNORED (UI is the sole owner), or
+        // a game the user just restored (dropped from the in-memory list) would be
+        // re-suppressed from the stale disk copy.
+        fresh.removed_games = vec![crate::config::RemovedGame {
+            process: "old_game".to_string(),
+            name: "Old Game".to_string(),
+        }];
+
+        reconcile_with_disk(&mut ours, fresh, &baseline);
+
+        // Externally-added game survived; our known game untouched.
+        assert!(ours.games.contains_key("cs2"), "external scan must survive");
+        assert!(ours.games.contains_key("doom"));
+        // UI-untouched field adopted from disk.
+        assert_eq!(ours.disk_sensor_paths, vec!["C:\\".to_string()]);
+        // Suppression list is UI-owned: the disk copy is not merged in.
+        assert!(
+            ours.removed_games.is_empty(),
+            "removed_games must not be pulled from disk"
+        );
+    }
+
+    #[test]
+    fn test_reconcile_does_not_revive_user_removed_game() {
+        use crate::config::Config;
+        // A game the user just removed IS in the baseline (the window knew it), so a
+        // fresh copy still on disk must NOT be re-added over the removal.
+        let baseline: std::collections::HashSet<String> = ["doom".to_string(), "cs2".to_string()]
+            .into_iter()
+            .collect();
+
+        let mut ours = Config::default(); // user removed both; empty games
+        let mut fresh = Config::default();
+        fresh
+            .games
+            .insert("cs2".to_string(), GameConfig::Simple("cs2".into()));
+
+        reconcile_with_disk(&mut ours, fresh, &baseline);
+        assert!(
+            !ours.games.contains_key("cs2"),
+            "a removal of a known game must not be undone by the reconcile"
         );
     }
 }

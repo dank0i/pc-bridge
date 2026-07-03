@@ -14,12 +14,20 @@ use crate::config::{
 
 use super::model::{
     Feature, Game, GameStatus, Group, Kind, Launcher, Status, Transport, games_to_library,
-    library_to_games, registry,
+    library_to_games, reconcile_with_disk, registry,
 };
 use super::theme::{
     ACCENT, AMBER, BG, BLOCK, GAP, GREEN, GREY, ORANGE, PAD_X, PAD_Y, PANEL, PURPLE, RED, ROW,
     ROW_HOVER, ROW_OFF, TEXT, TEXT_DIM, TIGHT, badge, dot, kv, labeled, section, toggle,
 };
+
+/// Which view the Games tab is showing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GamesView {
+    Features,
+    Library,
+    Removed,
+}
 
 pub struct App {
     device: String,
@@ -40,7 +48,7 @@ pub struct App {
     show_tray_icon: bool,
     selected: Group,
     search: String,
-    show_library: bool,
+    games_view: GamesView,
     custom_tab: Kind,
     group_on: [bool; 8],
     custom_actions_on: bool,
@@ -147,7 +155,7 @@ impl App {
             show_tray_icon: cfg.show_tray_icon,
             selected: Group::Games,
             search: String::new(),
-            show_library: false,
+            games_view: GamesView::Features,
             custom_tab: Kind::Action,
             group_on: [true; 8],
             custom_actions_on: cfg.custom_commands_enabled,
@@ -270,6 +278,46 @@ impl App {
                 }
             }
         }
+        // Snapshot the game keys this window knew about (before folding the edited
+        // library) so the disk reconcile below can tell an agent-added game apart
+        // from one the user removed.
+        let baseline_keys: std::collections::HashSet<String> =
+            self.cfg.games.keys().cloned().collect();
+        // Track auto-discovered Steam games the user removed, so the next scan won't
+        // resurrect a still-installed title. A key present as auto-discovered but no
+        // longer in the edited library was removed by hand; a key back in the library
+        // is no longer suppressed.
+        let lib_keys: std::collections::HashSet<String> = self
+            .library
+            .iter()
+            .map(|g| g.process.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .collect();
+        let newly_removed: Vec<crate::config::RemovedGame> = self
+            .cfg
+            .games
+            .iter()
+            .filter(|(key, gc)| gc.is_auto_discovered() && !lib_keys.contains(*key))
+            .map(|(key, gc)| crate::config::RemovedGame {
+                process: key.clone(),
+                name: gc.display_name(),
+            })
+            .collect();
+        for rg in newly_removed {
+            if !self
+                .cfg
+                .removed_games
+                .iter()
+                .any(|r| r.process == rg.process)
+            {
+                self.cfg.removed_games.push(rg);
+            }
+        }
+        // A key back in the library (restored, or re-added by hand) is no longer
+        // suppressed.
+        self.cfg
+            .removed_games
+            .retain(|r| !lib_keys.contains(&r.process));
         // Fold the edited game library back into the config map, preserving the
         // Steam auto-discovered flag for games already known to discovery.
         self.cfg.games = library_to_games(&self.library, &self.cfg.games);
@@ -296,6 +344,13 @@ impl App {
         } else {
             "stable".to_owned()
         };
+        // Reconcile against the on-disk config so this save doesn't clobber a change
+        // the agent made while the window was open (chiefly a Steam scan triggered
+        // from HA). On any read error, fall back to writing our own state rather than
+        // blocking the save.
+        if let Ok(fresh) = Config::load() {
+            reconcile_with_disk(&mut self.cfg, fresh, &baseline_keys);
+        }
         self.cfg.save()
     }
 
@@ -839,7 +894,9 @@ fn feature_panel(app: &mut App, ui: &mut egui::Ui) {
             .iter()
             .filter(|f| in_view(f, g, ct))
             .all(|f| f.enabled);
-    let games_lib = g == Group::Games && app.show_library;
+    // True whenever the Games tab is in a management view (Library or Removed), not
+    // the feature list; used to drop the group header's bulk "All" control there.
+    let games_lib = g == Group::Games && app.games_view != GamesView::Features;
 
     // The Custom title follows its active tab so it isn't ambiguous.
     let (title, blurb): (&str, &str) = if g == Group::Custom {
@@ -925,18 +982,43 @@ fn feature_panel(app: &mut App, ui: &mut egui::Ui) {
 
     // ---- tabs ----
     if g == Group::Games {
+        let removed_count = app.cfg.removed_games.len();
         ui.horizontal(|ui| {
-            if ui.selectable_label(!app.show_library, "Features").clicked() {
-                app.show_library = false;
+            if ui
+                .selectable_label(app.games_view == GamesView::Features, "Features")
+                .clicked()
+            {
+                app.games_view = GamesView::Features;
             }
-            if ui.selectable_label(app.show_library, "Library").clicked() {
-                app.show_library = true;
+            if ui
+                .selectable_label(app.games_view == GamesView::Library, "Library")
+                .clicked()
+            {
+                app.games_view = GamesView::Library;
+            }
+            let removed_label = if removed_count > 0 {
+                format!("Removed ({removed_count})")
+            } else {
+                "Removed".to_owned()
+            };
+            if ui
+                .selectable_label(app.games_view == GamesView::Removed, removed_label)
+                .clicked()
+            {
+                app.games_view = GamesView::Removed;
             }
         });
         ui.add_space(GAP);
-        if app.show_library {
-            library_view(app, ui);
-            return;
+        match app.games_view {
+            GamesView::Library => {
+                library_view(app, ui);
+                return;
+            }
+            GamesView::Removed => {
+                removed_view(app, ui);
+                return;
+            }
+            GamesView::Features => {}
         }
     } else if g == Group::Custom {
         ui.horizontal(|ui| {
@@ -1516,17 +1598,7 @@ fn library_view(app: &mut App, ui: &mut egui::Ui) {
             .add_enabled(!scanning, egui::Button::new(label))
             .clicked()
         {
-            // Save current edits first so the scan merges into them, then run the
-            // Steam discovery off the UI thread (it parses appinfo.vdf).
-            let _ = app.persist(true);
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let merged = crate::steam::SteamGameDiscovery::discover()
-                    .and_then(|d| crate::config::Config::refresh_steam_games(&d).ok())
-                    .map(|(fresh, _added, _removed)| fresh);
-                let _ = tx.send(merged);
-            });
-            app.scan_rx = Some(rx);
+            spawn_steam_scan(app);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
@@ -1644,6 +1716,93 @@ fn library_view(app: &mut App, ui: &mut egui::Ui) {
         });
     if let Some(i) = remove {
         app.library.remove(i);
+    }
+}
+
+/// Persist current edits, then run Steam discovery off the UI thread; the merged
+/// result is applied in `update()`. Shared by the library "Scan now" button and the
+/// Removed view's Restore (which un-suppresses a game, then rescans to re-add it).
+fn spawn_steam_scan(app: &mut App) {
+    // Save current edits first so the scan merges into them. This also flushes any
+    // just-changed suppression list to disk before the scan reads it back.
+    let _ = app.persist(true);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let merged = crate::steam::SteamGameDiscovery::discover()
+            .and_then(|d| crate::config::Config::refresh_steam_games(&d).ok())
+            .map(|(fresh, _added, _removed)| fresh);
+        let _ = tx.send(merged);
+    });
+    app.scan_rx = Some(rx);
+}
+
+/// The "Removed" view of the Games tab: Steam-discovered games the user removed,
+/// each with a Restore that un-suppresses it so the next scan re-adds it.
+fn removed_view(app: &mut App, ui: &mut egui::Ui) {
+    ui.label(
+        RichText::new(
+            "Games you removed from the library. They stay hidden so a Steam scan \
+             won't re-add them. Restore brings one back on the next scan.",
+        )
+        .size(13.0)
+        .color(TEXT_DIM),
+    );
+    ui.add_space(BLOCK);
+
+    if app.cfg.removed_games.is_empty() {
+        ui.label(RichText::new("Nothing removed.").size(13.0).color(GREY));
+        return;
+    }
+
+    let scanning = app.scan_rx.is_some();
+    let mut restore: Option<usize> = None;
+    egui::ScrollArea::vertical()
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            for (i, rg) in app.cfg.removed_games.iter().enumerate() {
+                let name = if rg.name.trim().is_empty() {
+                    rg.process.clone()
+                } else {
+                    rg.name.clone()
+                };
+                egui::Frame::none()
+                    .fill(ROW)
+                    .rounding(9.0)
+                    .inner_margin(egui::Margin::symmetric(PAD_X, PAD_Y))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new(name).size(14.0).color(TEXT));
+                                ui.add_space(TIGHT);
+                                ui.label(
+                                    RichText::new(&rg.process)
+                                        .size(11.0)
+                                        .color(GREY)
+                                        .monospace(),
+                                );
+                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let label = if scanning { "Scanning..." } else { "Restore" };
+                                    if ui
+                                        .add_enabled(!scanning, egui::Button::new(label))
+                                        .clicked()
+                                    {
+                                        restore = Some(i);
+                                    }
+                                },
+                            );
+                        });
+                    });
+                ui.add_space(GAP);
+            }
+        });
+    if let Some(i) = restore {
+        // Drop it from the suppression list, then persist + rescan so a still-
+        // installed game reappears in the library right away.
+        app.cfg.removed_games.remove(i);
+        spawn_steam_scan(app);
     }
 }
 

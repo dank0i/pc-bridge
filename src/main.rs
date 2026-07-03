@@ -158,12 +158,15 @@ fn hold_singleton() {
     use windows::Win32::System::Threading::CreateMutexW;
     use windows::core::w;
     unsafe {
-        // Keep the handle alive for the whole process; leaking it is intentional (it
-        // is closed by the OS on exit). If another handle to the name exists (an old
-        // instance mid-exit), we still get a valid handle and become the sole owner
-        // once it closes.
+        // Keep the handle alive for the whole process; the OS closes it on exit,
+        // which is what makes the next launch's probe see the name gone. The
+        // windows-rs `HANDLE` is a Copy pointer wrapper with no Drop, so simply
+        // dropping `h` never calls CloseHandle - the handle already lives until
+        // process exit. (mem::forget here was a no-op: forgetting a Copy type does
+        // nothing.) If another handle to the name exists (an old instance mid-exit),
+        // we still get a valid handle and become the sole owner once it closes.
         if let Ok(h) = CreateMutexW(None, false, w!("Local\\pc-bridge-agent-singleton")) {
-            std::mem::forget(h);
+            let _ = h;
         }
     }
 }
@@ -331,9 +334,13 @@ async fn run_agent() -> anyhow::Result<()> {
     // Collect task handles for cleanup
     let mut handles: Vec<TaskHandle> = Vec::new();
 
-    // Start event-driven process watcher if game detection or idle tracking is enabled
+    // The process watcher feeds the shared process list the game and idle sensors
+    // read. Those sensors are started and stopped live by the supervisor, so the
+    // watcher must run unconditionally: gating it on the startup flags meant that
+    // enabling game detection or idle tracking at runtime read an empty list until
+    // the next restart.
     #[cfg(windows)]
-    if config.features.running_game || config.features.idle_tracking {
+    {
         let poll_interval = Duration::from_secs(config.intervals.game_sensor.max(5));
         state
             .process_watcher

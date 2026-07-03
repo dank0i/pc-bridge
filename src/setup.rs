@@ -450,6 +450,7 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
         },
         custom_sensors: Vec::new(),
         custom_commands: Vec::new(),
+        removed_games: Vec::new(),
         update_channel: crate::config::default_update_channel(),
         disk_sensor_paths: Vec::new(),
     };
