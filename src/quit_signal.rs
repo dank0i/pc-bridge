@@ -14,6 +14,7 @@ const QUIT_EVENT: windows::core::PCWSTR = windows::core::w!("Local\\pc-bridge-ag
 /// so it never blocks the runtime's own shutdown.
 #[cfg(windows)]
 pub fn watch_for_quit(shutdown_tx: tokio::sync::broadcast::Sender<()>) {
+    use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
     std::thread::spawn(move || unsafe {
         // Manual-reset event so a single SetEvent reliably wakes the wait.
@@ -25,6 +26,7 @@ pub fn watch_for_quit(shutdown_tx: tokio::sync::broadcast::Sender<()>) {
             log::info!("Quit requested from settings window; shutting down");
             let _ = shutdown_tx.send(());
         }
+        let _ = CloseHandle(event);
     });
 }
 

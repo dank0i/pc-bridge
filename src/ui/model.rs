@@ -685,17 +685,9 @@ fn add_launch_scheme(path: &str) -> String {
 
 /// Derive a stable game_id (snake_case, ascii-alphanumeric) from a display name.
 fn game_id_from_name(name: &str) -> String {
-    let mut id: String = name
-        .trim()
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    // Collapse repeated underscores and trim edges for a clean entity id.
-    while id.contains("__") {
-        id = id.replace("__", "_");
-    }
-    id.trim_matches('_').to_string()
+    // Delegate to the single canonical slug (config::slugify_game_id) so the UI
+    // and Steam discovery can never diverge again.
+    crate::config::slugify_game_id(name)
 }
 
 /// Build the editable library view from the real `games` config map.
@@ -753,12 +745,34 @@ pub fn library_to_games(
                 // The UI shows the bare path; re-apply the lnk:/exe:/url: scheme.
                 Some(add_launch_scheme(g.path.trim()))
             };
-            let auto_discovered = prev
-                .get(&g.process)
-                .map(GameConfig::is_auto_discovered)
-                .unwrap_or(false);
+            // One lookup on the trimmed process (the map's key) for both fields.
+            let prev_gc = prev.get(g.process.trim());
+            let auto_discovered = prev_gc.map(GameConfig::is_auto_discovered).unwrap_or(false);
+            // Keep the stored game_id stable across edits: it is the HA entity id
+            // (and its HomeKit accessory + Live Activity state). Re-deriving it from
+            // the name on every save churned entities whenever the two slug rules
+            // disagreed on punctuation ("Baldur's Gate 3" -> baldurs_gate_3 from Steam
+            // discovery vs baldur_s_gate_3 here). Only derive an id for a NEW row.
+            let game_id = prev_gc
+                .map(|gc| gc.game_id().to_string())
+                .unwrap_or_else(|| {
+                    // New row: derive from the name, but fall back to the process (the
+                    // non-empty map key) so an all-punctuation name can't yield a blank
+                    // id, matching merge_steam_games' empty-slug guard.
+                    let id = game_id_from_name(&g.name);
+                    if id.is_empty() {
+                        let from_proc = game_id_from_name(&g.process);
+                        if from_proc.is_empty() {
+                            "game".to_string()
+                        } else {
+                            from_proc
+                        }
+                    } else {
+                        id
+                    }
+                });
             let gc = GameConfig::Full {
-                game_id: game_id_from_name(&g.name),
+                game_id,
                 app_id: if g.appid != 0 { Some(g.appid) } else { None },
                 name: Some(g.name.trim().to_string()),
                 launch_command,
@@ -782,6 +796,53 @@ mod tests {
             "the_witcher_3_wild_hunt"
         );
         assert_eq!(game_id_from_name("  Spaced  Out  "), "spaced_out");
+    }
+
+    #[test]
+    fn test_library_to_games_preserves_stored_id() {
+        // The stored id and what the slug derives from the name differ here: Steam
+        // discovery historically stripped punctuation ("baldurs_gate_3"); the slug
+        // now yields "baldur_s_gate_3". Editing in the UI must NOT re-slug it.
+        assert_ne!(game_id_from_name("Baldur's Gate 3"), "baldurs_gate_3");
+
+        let mut prev = HashMap::new();
+        prev.insert(
+            "bg3.exe".to_string(),
+            GameConfig::Full {
+                game_id: "baldurs_gate_3".to_string(),
+                app_id: Some(1_086_940),
+                name: Some("Baldur's Gate 3".to_string()),
+                launch_command: None,
+                auto_discovered: true,
+                exposed: true,
+            },
+        );
+
+        // Round-trip through the editable library and back preserves the id.
+        let out = library_to_games(&games_to_library(&prev), &prev);
+        let gc = out.get("bg3.exe").expect("game preserved by process key");
+        assert_eq!(
+            gc.game_id(),
+            "baldurs_gate_3",
+            "stored id must survive an edit"
+        );
+        assert!(gc.is_auto_discovered(), "auto_discovered must survive too");
+
+        // A brand-new row (absent from prev) still derives its id from the name.
+        let mut fresh = HashMap::new();
+        fresh.insert(
+            "new.exe".to_string(),
+            GameConfig::Full {
+                game_id: "ignored".to_string(),
+                app_id: None,
+                name: Some("New Game".to_string()),
+                launch_command: None,
+                auto_discovered: false,
+                exposed: true,
+            },
+        );
+        let new_out = library_to_games(&games_to_library(&fresh), &HashMap::new());
+        assert_eq!(new_out.get("new.exe").unwrap().game_id(), "new_game");
     }
 
     #[test]

@@ -318,8 +318,12 @@ impl AppInfoReader {
                             && !exe.contains("linux")
                             && !exe.contains("osx")
                         {
-                            // Found a Windows executable
-                            if exe.ends_with(".exe") || !exe.contains('.') {
+                            // Found a Windows executable. Accept `.exe`, or an
+                            // extensionless launcher - checking the file NAME, not
+                            // the whole path, so a dot in a directory component
+                            // ("bin/v1.5/game") isn't mistaken for an extension.
+                            let file = exe.rsplit(['/', '\\']).next().unwrap_or(&exe);
+                            if exe.ends_with(".exe") || !file.contains('.') {
                                 return Some(exe);
                             }
                         }

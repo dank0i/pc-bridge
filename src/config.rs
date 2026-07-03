@@ -232,6 +232,24 @@ impl GameConfig {
     }
 }
 
+/// Canonical `game_id` slug from a display name: lowercase, every non-alphanumeric
+/// character to `_`, collapsed and edge-trimmed. This is the SINGLE source of truth
+/// so Steam discovery (`merge_steam_games`) and the settings-UI library derive
+/// identical ids - previously they disagreed on punctuation, which churned HA
+/// entities. May be empty for a fully non-ASCII name; callers supply a fallback.
+pub(crate) fn slugify_game_id(name: &str) -> String {
+    let mut id: String = name
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    while id.contains("__") {
+        id = id.replace("__", "_");
+    }
+    id.trim_matches('_').to_string()
+}
+
 /// Feature toggles
 ///
 /// All features default to `false` (opt-in) except the power features
@@ -899,22 +917,10 @@ impl Config {
                 continue;
             }
 
-            // Generate game_id from name - only allow ASCII alphanumeric and underscore
-            let game_id: String = game
-                .name
-                .to_lowercase()
-                .chars()
-                .filter_map(|c| {
-                    if c.is_ascii_alphanumeric() {
-                        Some(c)
-                    } else if c == ' ' || c == '-' {
-                        Some('_')
-                    } else {
-                        None // Strip ™, ®, :, ', etc.
-                    }
-                })
-                .collect();
-            // A fully non-ASCII name (e.g. a CJK-only title) filters to "", which
+            // Use the ONE canonical slug so a UI edit later never re-derives a
+            // different id (that mismatch was the game_id churn bug).
+            let game_id = slugify_game_id(&game.name);
+            // A fully non-ASCII name (e.g. a CJK-only title) slugs to "", which
             // would make a blank entity id. Fall back to the app id, which is
             // stable and unique.
             let game_id = if game_id.is_empty() {

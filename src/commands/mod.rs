@@ -61,6 +61,10 @@ pub(crate) fn is_native_command(name: &str) -> bool {
             | "MediaPrevious"
             | "MediaStop"
             | "VolumeMute"
+            // The executor also dispatches these before custom commands, so a
+            // same-named custom command would be silently shadowed - reject it.
+            | "VolumeSet"
+            | "notification"
     )
 }
 

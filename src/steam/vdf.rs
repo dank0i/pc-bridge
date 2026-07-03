@@ -82,14 +82,13 @@ pub fn extract_library_info(content: &str) -> Vec<(String, Vec<u32>)> {
                 debug!("  End apps block, got {} app_ids", current_apps.len());
                 in_apps_block = false;
             } else if in_library_block && brace_depth == 1 {
-                // End of library block - save it
+                // End of library block - save it. Always clear current_apps, even
+                // when this block had no `path`, or its app_ids would leak into the
+                // next library block (wrong install_path for the manifest fallback).
+                let apps = std::mem::take(&mut current_apps);
                 if let Some(path) = current_path.take() {
-                    debug!(
-                        "  Library block end: path={}, apps={}",
-                        path,
-                        current_apps.len()
-                    );
-                    libraries.push((path, std::mem::take(&mut current_apps)));
+                    debug!("  Library block end: path={}, apps={}", path, apps.len());
+                    libraries.push((path, apps));
                 }
                 in_library_block = false;
             }

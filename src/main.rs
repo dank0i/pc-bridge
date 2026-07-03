@@ -474,12 +474,18 @@ async fn run_agent() -> anyhow::Result<()> {
 
     #[cfg(windows)]
     {
+        let mut shutdown_rx = shutdown_tx.subscribe();
         if console_attached {
-            // Terminal mode: wait for Ctrl+C via tokio's signal handler
-            tokio::signal::ctrl_c().await.ok();
+            // Terminal mode: Ctrl+C OR the global shutdown broadcast (tray Quit /
+            // settings-window Quit). Without the broadcast arm a Quit would stop
+            // every task but leave main parked on ctrl_c, orphaning the process
+            // (it keeps the singleton, so relaunch only reopens settings).
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = shutdown_rx.recv() => {}
+            }
         } else {
-            // Background mode (no console): wait for broadcast shutdown
-            let mut shutdown_rx = shutdown_tx.subscribe();
+            // Background mode (no console): wait for the broadcast shutdown.
             let _ = shutdown_rx.recv().await;
         }
     }
