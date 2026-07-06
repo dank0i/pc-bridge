@@ -6,13 +6,17 @@
 //! Mirrors the hidden-window + message-pump idiom used by the session/power
 //! sensors, so it needs no extra crate.
 #![cfg(windows)]
+// clippy 1.91 false-positives `duplicated_attributes` on the single load-bearing
+// `#![cfg(windows)]` above (`mod tray;` is declared ungated in main.rs).
+#![allow(clippy::duplicated_attributes)]
 
 use std::sync::Arc;
 
 use log::{debug, error, info};
 use tokio::sync::broadcast;
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
@@ -24,6 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_DESTROY, WM_LBUTTONDBLCLK,
     WM_RBUTTONUP, WM_USER, WNDCLASSEXW,
 };
+use windows::core::PCWSTR;
 
 use crate::AppState;
 
@@ -96,6 +101,18 @@ fn stop_tray(hwnd: isize) {
     }
 }
 
+/// Load the application's embedded icon (winresource stores the app icon as
+/// resource id 1). Returns None if the module handle or icon can't be resolved.
+fn load_app_icon() -> Option<HICON> {
+    unsafe {
+        let hmodule = GetModuleHandleW(PCWSTR::null()).ok()?;
+        // MAKEINTRESOURCE(1): the icon is resource id 1, encoded as the pointer's
+        // numeric value (not a real pointer to dereference).
+        let name = PCWSTR(std::ptr::without_provenance::<u16>(1));
+        LoadIconW(HINSTANCE(hmodule.0), name).ok()
+    }
+}
+
 fn tray_thread(shutdown_tx: &broadcast::Sender<()>, hwnd_tx: tokio::sync::oneshot::Sender<isize>) {
     unsafe {
         let class_name = windows::core::w!("PCAgentTray");
@@ -135,8 +152,11 @@ fn tray_thread(shutdown_tx: &broadcast::Sender<()>, hwnd_tx: tokio::sync::onesho
         let ctx_ptr = Box::into_raw(ctx);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, ctx_ptr as isize);
 
-        // Add the tray icon.
-        let hicon: HICON = LoadIconW(None, IDI_APPLICATION).unwrap_or_default();
+        // Add the tray icon (the app's embedded icon, falling back to the
+        // generic Windows icon if the resource lookup fails).
+        let hicon: HICON = load_app_icon()
+            .or_else(|| LoadIconW(None, IDI_APPLICATION).ok())
+            .unwrap_or_default();
         let mut nid = NOTIFYICONDATAW {
             cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: hwnd,
