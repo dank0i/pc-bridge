@@ -13,43 +13,48 @@ use tokio::sync::mpsc;
 /// Avoids re-creating the same `serde_json::Value` every publish cycle.
 static IDLE_STEAM_ATTRS: LazyLock<serde_json::Value> =
     LazyLock::new(|| serde_json::json!({"updating_games": [], "count": 0}));
-use tokio::time::{Duration, Instant};
+use tokio::time::Duration;
 
 use crate::AppState;
 
-// Steam appmanifest StateFlags bits indicating an install/update/download is in
-// progress. NOTE: appmanifest StateFlags observed in the wild do NOT map cleanly
-// onto SteamKit's EAppState enum - a real updating game has been seen with 0x404,
-// where SteamKit would call 0x400 "Uninstalling". So this mask is deliberately
-// INCLUSIVE: a rare false "updating" during an uninstall/backup is far better
-// than missing an actual download. Only FullyInstalled (0x4) and AppRunning
-// (0x40) are excluded, so a merely-running/installed game is never flagged.
-const STATE_UPDATE_RUNNING: u32 = 0x400;
-const STATE_UPDATE_PAUSED: u32 = 0x800;
-const STATE_DOWNLOADING: u32 = 0x8_0000;
-#[allow(dead_code)] // documents the installed bit; used in tests
+// Steam appmanifest StateFlags bits (Valve EAppState; canonical values from the
+// reverse-engineered open-steamworks AppsCommon.h). A game is settled/current
+// iff StateFlags == FullyInstalled (0x4); any bit in STATE_UPDATE_MASK below
+// means an install/update/download/verify is pending or in progress.
+#[allow(dead_code)] // documents the settled bit; used in tests
 const STATE_FULLY_INSTALLED: u32 = 0x4;
+const STATE_UPDATE_REQUIRED: u32 = 0x2;
+const STATE_UPDATE_RUNNING: u32 = 0x100;
+const STATE_UPDATE_PAUSED: u32 = 0x200;
+const STATE_UPDATE_STARTED: u32 = 0x400;
+const STATE_DOWNLOADING: u32 = 0x10_0000;
+#[allow(dead_code)] // documents the uninstall bit, deliberately EXCLUDED from the mask
+const STATE_UNINSTALLING: u32 = 0x800;
 
-const STATE_UPDATE_MASK: u32 = 0x2      // UpdateRequired
-    | 0x20      // FilesMissing
-    | 0x80      // FilesCorrupt
-    | 0x100     // UpdateRunning (SteamKit)
-    | 0x200     // UpdateStarted
-    | STATE_UPDATE_RUNNING // 0x400
-    | STATE_UPDATE_PAUSED  // 0x800
-    | 0x1_0000  // Reconfiguring
-    | 0x2_0000  // Validating
-    | 0x4_0000  // AddingFiles
-    | STATE_DOWNLOADING // 0x8_0000
-    | 0x10_0000 // Downloading
-    | 0x20_0000 // Staging
-    | 0x40_0000; // Committing
+// Uninstalling (0x800), BackupRunning (0x1000), AppRunning (0x2000), and
+// FullyInstalled (0x4) are intentionally excluded so a game that is merely
+// installed, running, backing up, or uninstalling is never flagged "updating".
+const STATE_UPDATE_MASK: u32 = STATE_UPDATE_REQUIRED // 0x2       UpdateRequired
+    | 0x20                  // FilesMissing (needs repair download)
+    | 0x80                  // FilesCorrupt (needs repair download)
+    | STATE_UPDATE_RUNNING  // 0x100     UpdateRunning
+    | STATE_UPDATE_PAUSED   // 0x200     UpdatePaused
+    | STATE_UPDATE_STARTED  // 0x400     UpdateStarted
+    | 0x1_0000              // Reconfiguring
+    | 0x2_0000              // Validating
+    | 0x4_0000              // AddingFiles
+    | 0x8_0000              // Preallocating
+    | STATE_DOWNLOADING     // 0x10_0000 Downloading
+    | 0x20_0000             // Staging
+    | 0x40_0000             // Committing
+    | 0x80_0000; // UpdateStopping
 
 #[derive(Debug, Clone)]
 struct GameUpdateState {
     app_id: String,
     name: String,
     state_flags: u32,
+    #[allow(dead_code)] // source manifest path; kept for diagnostics/future rescans
     manifest_path: PathBuf,
 }
 
@@ -57,7 +62,6 @@ pub struct SteamSensor {
     state: Arc<AppState>,
     library_folders: Vec<PathBuf>,
     updating_games: HashMap<String, GameUpdateState>,
-    last_full_scan: Instant,
     /// Cache of ACF file paths → (mtime, parsed state) to skip unchanged files
     acf_cache: HashMap<PathBuf, (std::time::SystemTime, Option<GameUpdateState>)>,
 }
@@ -68,9 +72,21 @@ impl SteamSensor {
             state,
             library_folders: Vec::new(),
             updating_games: HashMap::new(),
-            last_full_scan: Instant::now(),
             acf_cache: HashMap::new(),
         }
+    }
+
+    /// Stable signature of the current updating set (sorted (app_id, name)
+    /// pairs), used to publish only when the observable state changes. Includes
+    /// the name so a manifest that gains its real name mid-update republishes.
+    fn updating_signature(&self) -> Vec<(String, String)> {
+        let mut sig: Vec<(String, String)> = self
+            .updating_games
+            .values()
+            .map(|g| (g.app_id.clone(), g.name.clone()))
+            .collect();
+        sig.sort();
+        sig
     }
 
     pub async fn run(mut self) {
@@ -79,6 +95,7 @@ impl SteamSensor {
         drop(config);
 
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
+        let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
 
         // Discover Steam library folders (blocking registry/file I/O - off-runtime)
         self.library_folders = tokio::task::spawn_blocking(discover_library_folders_blocking)
@@ -100,57 +117,70 @@ impl SteamSensor {
             self.library_folders.len()
         );
 
-        // Set up filesystem watcher for ACF changes
+        // Steam writes the appmanifest only on download STATE TRANSITIONS
+        // (start/pause/resume/complete/verify), and does so atomically (temp file
+        // + rename), so a directory watch catches every transition as a discrete
+        // event. We stay fully event-driven; the timer branch below is only a
+        // fallback for when the watcher can't be created at all. We do NOT tie the
+        // watch to steam.exe lifetime because steamservice.exe/steamcmd.exe can
+        // rewrite manifests independently.
         let (fs_tx, mut fs_rx) = mpsc::channel::<()>(16);
+        // Held for its lifetime (dropping it stops the watch); read once below.
         let watcher = self.setup_fs_watcher(&fs_tx);
         let using_watcher = watcher.is_some();
 
         if using_watcher {
-            info!("Steam sensor using filesystem watcher (instant detection)");
+            info!("Steam sensor using filesystem watcher (event-driven)");
         } else {
-            warn!("Steam sensor falling back to polling ({}s)", base_interval);
+            warn!(
+                "Steam sensor: watcher unavailable, falling back to polling every {}s",
+                base_interval
+            );
         }
 
-        // Publish initial state
+        // Initial scan + unconditional publish to seed the retained state.
         self.do_full_scan().await;
-        self.last_full_scan = Instant::now();
+        self.publish_state().await;
+        let mut last_sig = self.updating_signature();
 
         loop {
-            // When updates are active, also poll at 5s for progress tracking
-            // (ACF files may not trigger fs events on every byte written)
-            let sleep_duration = if !self.updating_games.is_empty() {
-                Duration::from_secs(5)
-            } else if using_watcher {
-                // With fs watcher, only do periodic reconciliation scans
-                Duration::from_secs(base_interval)
-            } else {
-                // Polling fallback
-                Duration::from_secs(base_interval)
-            };
-
             tokio::select! {
                 biased;
                 _ = shutdown_rx.recv() => {
                     debug!("Steam sensor shutting down");
                     break;
                 }
-                Some(()) = fs_rx.recv() => {
-                    // ACF file changed - re-scan immediately
-                    debug!("ACF file change detected, scanning");
-                    self.do_full_scan().await;
-                    self.last_full_scan = Instant::now();
-                }
-                () = tokio::time::sleep(sleep_duration) => {
-                    if self.updating_games.is_empty() {
+                // MQTT reconnect: force one republish (a broker restart can drop
+                // the retained state). Treat Lagged like a reconnect.
+                r = reconnect_rx.recv() => {
+                    if matches!(
+                        r,
+                        Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                    ) {
                         self.do_full_scan().await;
-                        self.last_full_scan = Instant::now();
-                    } else {
-                        self.do_targeted_scan().await;
-
-                        if self.last_full_scan.elapsed() > Duration::from_mins(5) {
-                            self.do_full_scan().await;
-                            self.last_full_scan = Instant::now();
-                        }
+                        self.publish_state().await;
+                        last_sig = self.updating_signature();
+                    }
+                }
+                // ACF change: re-read ground truth, publish only if the updating
+                // set actually changed (skip the redundant retained republish).
+                Some(()) = fs_rx.recv() => {
+                    debug!("ACF change detected, scanning");
+                    self.do_full_scan().await;
+                    let sig = self.updating_signature();
+                    if sig != last_sig {
+                        self.publish_state().await;
+                        last_sig = sig;
+                    }
+                }
+                // Fallback poll: only ever fires when the watcher couldn't be
+                // created (the `if` disables this branch when a watcher is live).
+                () = tokio::time::sleep(Duration::from_secs(base_interval)), if !using_watcher => {
+                    self.do_full_scan().await;
+                    let sig = self.updating_signature();
+                    if sig != last_sig {
+                        self.publish_state().await;
+                        last_sig = sig;
                     }
                 }
             }
@@ -291,42 +321,6 @@ impl SteamSensor {
         }
 
         self.updating_games = new_updating;
-        self.publish_state().await;
-    }
-
-    async fn do_targeted_scan(&mut self) {
-        // Move blocking filesystem I/O off the async runtime
-        let updating_snapshot: Vec<(String, GameUpdateState)> = self
-            .updating_games
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        let still_updating = tokio::task::spawn_blocking(move || {
-            let mut result: HashMap<String, GameUpdateState> = HashMap::new();
-            for (app_id, game_state) in &updating_snapshot {
-                if let Some(new_state) = parse_acf_file(&game_state.manifest_path) {
-                    if is_updating(&new_state) {
-                        result.insert(app_id.clone(), new_state);
-                    } else {
-                        info!("Steam game finished updating: {}", game_state.name);
-                    }
-                }
-            }
-            result
-        })
-        .await
-        .unwrap_or_else(|e| {
-            warn!("Steam targeted scan task panicked: {e}");
-            HashMap::default()
-        });
-
-        let changed = still_updating.len() != self.updating_games.len();
-        self.updating_games = still_updating;
-
-        if changed {
-            self.publish_state().await;
-        }
     }
 }
 
@@ -564,6 +558,25 @@ mod tests {
         assert!(!is_updating(&make_game(64)));
         // Encrypted(8) / Locked(16) alone are not updates either.
         assert!(!is_updating(&make_game(8)));
+    }
+
+    #[test]
+    fn test_is_updating_uninstalling_excluded() {
+        // Uninstalling (0x800) must NOT read as "updating". The old mask wrongly
+        // included this bit (it was mislabeled as UpdatePaused).
+        assert!(!is_updating(&make_game(STATE_UNINSTALLING)));
+        assert!(!is_updating(&make_game(
+            STATE_FULLY_INSTALLED | STATE_UNINSTALLING
+        )));
+    }
+
+    #[test]
+    fn test_is_updating_paused_download() {
+        // A started-but-paused update (0x602 = UpdateStarted|UpdatePaused|
+        // UpdateRequired) still counts as updating.
+        assert!(is_updating(&make_game(
+            STATE_UPDATE_STARTED | STATE_UPDATE_PAUSED | STATE_UPDATE_REQUIRED
+        )));
     }
 
     // -- parse_acf_content tests --
