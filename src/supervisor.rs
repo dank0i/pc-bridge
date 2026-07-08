@@ -86,7 +86,7 @@ const TASKS: &[TaskDef] = &[
         spawn: |s, c| tokio::spawn(cancelable(CustomSensorManager::new(s).run(), c.subscribe())),
     },
     // These hold no per-task OS thread either: steam's fs-watcher is dropped with
-    // the future; volume/audio_device/capture/idle poll via spawn_blocking. (Their
+    // the future; volume/audio_device/idle poll via spawn_blocking. (Their
     // process-wide COM listener / ext-idle-notify helper is idempotent and
     // harmless if it lingers while disabled - a later pass can tear those down.)
     TaskDef {
@@ -109,13 +109,14 @@ const TASKS: &[TaskDef] = &[
         enabled: |c| c.features.audio_device,
         spawn: |s, c| tokio::spawn(cancelable(AudioDeviceSensor::new(s).run(), c.subscribe())),
     },
+    // Thread-holding sensors: run() takes the per-task shutdown SENDER and uses it
+    // (loop + OS threads) instead of state.shutdown_tx, so firing it stops them.
+    // (capture holds a registry-notification thread on Windows.)
     TaskDef {
         name: "capture",
         enabled: |c| c.features.mic || c.features.webcam,
-        spawn: |s, c| tokio::spawn(cancelable(CaptureSensor::new(s).run(), c.subscribe())),
+        spawn: |s, c| tokio::spawn(CaptureSensor::new(s).run(c)),
     },
-    // Thread-holding sensors: run() takes the per-task shutdown SENDER and uses it
-    // (loop + OS threads) instead of state.shutdown_tx, so firing it stops them.
     TaskDef {
         name: "system",
         enabled: |c| c.features.cpu_sensor || c.features.memory_sensor || c.features.active_window,
