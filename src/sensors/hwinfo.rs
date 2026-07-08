@@ -680,13 +680,37 @@ mod win {
                             // rule x reading match can be multi-ms on big setups).
                             // Move the client in and back out of spawn_blocking.
                             let Some(taken) = client.take() else { continue };
-                            let (taken, snap) = match tokio::task::spawn_blocking(move || {
+                            // Parse AND match off the single-threaded runtime. The
+                            // O(rules x readings) match scan used to run back on the
+                            // async worker after the parse returned; doing it inside
+                            // the blocking task keeps the runtime thread free. The
+                            // closure returns the ~20 matched readings alongside the
+                            // snapshot so the async side only publishes (no re-scan);
+                            // the snapshot still comes back for the diagnostic below.
+                            let (taken, snap, matched) = match tokio::task::spawn_blocking(move || {
                                 let r = taken.snapshot();
-                                (taken, r)
+                                let matched = r.as_ref().ok().map(|s| {
+                                    let mut hits: Vec<(&'static str, Reading)> = Vec::new();
+                                    let mut misses: Vec<&'static str> = Vec::new();
+                                    for rule in MATCH_RULES {
+                                        match match_reading(
+                                            &s.readings,
+                                            rule.sensor_substrings,
+                                            rule.label_substrings,
+                                            rule.label_excludes,
+                                            rule.unit_suffix,
+                                        ) {
+                                            Some(reading) => hits.push((rule.key, reading.clone())),
+                                            None => misses.push(rule.key),
+                                        }
+                                    }
+                                    (hits, misses)
+                                });
+                                (taken, r, matched)
                             })
                             .await
                             {
-                                Ok(pair) => pair,
+                                Ok(triple) => triple,
                                 Err(_) => {
                                     // The parse task panicked (e.g. the mapping went
                                     // invalid) and the client was dropped in the
@@ -708,44 +732,32 @@ mod win {
                                     latest_error = None;
 
                                     let now = Instant::now();
-                                    let mut matched: Vec<&'static str> = Vec::new();
-                                    let mut unmatched: Vec<&'static str> = Vec::new();
-                                    for rule in MATCH_RULES {
-                                        let Some(reading) = match_reading(
-                                            &s.readings,
-                                            rule.sensor_substrings,
-                                            rule.label_substrings,
-                                            rule.label_excludes,
-                                            rule.unit_suffix,
-                                        ) else {
-                                            debug!(
-                                                "HWiNFO: no match for sensor key '{}'",
-                                                rule.key
-                                            );
-                                            unmatched.push(rule.key);
-                                            continue;
-                                        };
-                                        matched.push(rule.key);
-
+                                    // Matching already ran in the blocking task; here
+                                    // we only publish the (few) matched readings.
+                                    let (hits, misses) =
+                                        matched.expect("matched is Some when snapshot is Ok");
+                                    let mut matched: Vec<&'static str> =
+                                        Vec::with_capacity(hits.len());
+                                    for &(key, ref reading) in &hits {
+                                        matched.push(key);
                                         if !self.should_publish(
-                                            rule.key,
+                                            key,
                                             reading.value,
                                             now,
                                             &last_published,
                                         ) {
                                             continue;
                                         }
-                                        self.publish_one(
-                                            rule.key,
-                                            reading,
-                                            &mut last_published_attrs,
-                                        )
-                                        .await;
-                                        last_published.insert(rule.key, (reading.value, now));
+                                        self.publish_one(key, reading, &mut last_published_attrs)
+                                            .await;
+                                        last_published.insert(key, (reading.value, now));
+                                    }
+                                    for &key in &misses {
+                                        debug!("HWiNFO: no match for sensor key '{}'", key);
                                     }
 
                                     latest_matched = matched;
-                                    latest_unmatched = unmatched;
+                                    latest_unmatched = misses;
                                     latest_snapshot = Some(s);
                                 }
                                 Err(e) => {
