@@ -943,12 +943,23 @@ impl Config {
             .iter()
             .map(|r| r.process.as_str())
             .collect();
+        // App ids already present in the config (under ANY process key). A manual
+        // override that re-keyed a Steam game - e.g. Warframe moved off the
+        // "launcher" exe to "warframe.x64" so it detects the running game instead
+        // of the brief launcher - shares the app_id, so we treat it as the SAME
+        // game: don't re-add the discovered launcher-keyed duplicate, and (below)
+        // don't prune the override as "uninstalled" just because its key differs.
+        let existing_app_ids: std::collections::HashSet<u32> =
+            self.games.values().filter_map(|gc| gc.app_id()).collect();
+        let discovered_app_ids: std::collections::HashSet<u32> =
+            steam_games.games.values().map(|g| g.app_id).collect();
 
         for (exe_key, game) in &steam_games.games {
             // exe_key is already lowercase, no extension (e.g., "cs2")
             if self.games.contains_key(exe_key)
                 || existing.contains(exe_key.as_str())
                 || suppressed.contains(exe_key.as_str())
+                || existing_app_ids.contains(&game.app_id)
             {
                 continue;
             }
@@ -972,15 +983,24 @@ impl Config {
             added += 1;
         }
 
-        // Remove auto-discovered games no longer in Steam library (single-pass, zero alloc)
+        // Remove auto-discovered games no longer in the Steam library. Match on
+        // app_id when known (rather than the process key) so a re-keyed manual
+        // override is not pruned while the game is still installed.
         let mut removed = 0usize;
         self.games.retain(|key, gc| {
-            if gc.is_auto_discovered() && !steam_games.games.contains_key(key.as_str()) {
+            if !gc.is_auto_discovered() {
+                return true;
+            }
+            let still_installed = match gc.app_id() {
+                Some(id) => discovered_app_ids.contains(&id),
+                None => steam_games.games.contains_key(key.as_str()),
+            };
+            if still_installed {
+                true
+            } else {
                 info!("Removing uninstalled Steam game: {}", key);
                 removed += 1;
                 false
-            } else {
-                true
             }
         });
 
@@ -1756,6 +1776,37 @@ mod tests {
         ]));
         assert_eq!(added, 1);
         assert!(cfg.games.contains_key("dota2"));
+    }
+
+    #[test]
+    fn test_merge_app_id_dedup_preserves_rekeyed_override() {
+        // A manual override that re-keyed a Steam game off its launcher exe
+        // ("launcher" -> "warframe.x64") shares the app_id, so a rescan must
+        // neither re-add the launcher-keyed duplicate nor prune the override -
+        // even though it is still flagged auto_discovered and its key no longer
+        // matches what discovery reports.
+        let mut cfg = Config::default();
+        cfg.games.insert(
+            "warframe.x64".to_string(),
+            GameConfig::Full {
+                game_id: "warframe".to_string(),
+                app_id: Some(230410),
+                name: Some("Warframe".to_string()),
+                launch_command: None,
+                auto_discovered: true,
+                exposed: true,
+            },
+        );
+        let (added, removed) =
+            cfg.merge_steam_games(&steam_discovery(&[("launcher", 230410, "Warframe")]));
+        assert_eq!(
+            added, 0,
+            "launcher twin with the same app_id must not re-add"
+        );
+        assert_eq!(removed, 0, "the re-keyed override must not be pruned");
+        assert!(cfg.games.contains_key("warframe.x64"));
+        assert!(!cfg.games.contains_key("launcher"));
+        assert_eq!(cfg.games.len(), 1);
     }
 
     // ===== GameConfig JSON serialization tests =====
