@@ -14,7 +14,7 @@ use crate::config::{
 
 use super::model::{
     Feature, Game, GameStatus, Group, Kind, Launcher, Status, Transport, games_to_library,
-    library_to_games, reconcile_with_disk, registry,
+    library_to_games, reconcile_with_disk, registry, strip_launch_scheme,
 };
 use super::theme::{
     ACCENT, AMBER, BG, BLOCK, GAP, GREEN, GREY, ORANGE, PAD_X, PAD_Y, PANEL, PURPLE, RED, ROW,
@@ -75,6 +75,9 @@ pub struct App {
     /// Set to the reason when the last Save failed (e.g. validation rejected the
     /// device name), so the user sees why instead of a silent no-op.
     save_error: Option<String>,
+    /// Result of the most recent per-game Save on the Games tab: (game_id, ok,
+    /// message). Shown inline on that game's row and cleared on the next keystroke.
+    game_save_msg: Option<(String, bool, String)>,
     /// True after a successful Save, for a "Saved" acknowledgment (distinct from
     /// the broker "connected" status).
     saved: bool,
@@ -169,6 +172,7 @@ impl App {
             cfg,
             load_error,
             save_error: None,
+            game_save_msg: None,
             saved: false,
             unsupported,
             unsupported_alert,
@@ -1622,6 +1626,19 @@ fn library_view(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(GAP);
 
     let mut remove: Option<usize> = None;
+    // Per-game save: a row's Save button sets this and we persist ONLY that game
+    // (loading the on-disk config fresh and changing just its entry), so saving one
+    // game never commits another row's in-progress edits. Any keystroke clears the
+    // last save's inline message.
+    let mut save_idx: Option<usize> = None;
+    let mut clear_feedback = false;
+    let feedback = app.game_save_msg.clone();
+    // A row's Save button shows only when that game differs from its saved state.
+    let dirty: Vec<bool> = app
+        .library
+        .iter()
+        .map(|g| game_row_dirty(g, &app.cfg))
+        .collect();
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
@@ -1641,10 +1658,15 @@ fn library_view(app: &mut App, ui: &mut egui::Ui) {
                             ui.add_space(GAP);
                             ui.vertical(|ui| {
                                 ui.horizontal(|ui| {
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut game.name)
-                                            .desired_width(190.0),
-                                    );
+                                    if ui
+                                        .add(
+                                            egui::TextEdit::singleline(&mut game.name)
+                                                .desired_width(190.0),
+                                        )
+                                        .changed()
+                                    {
+                                        clear_feedback = true;
+                                    }
                                     ui.add_space(TIGHT);
                                     badge(ui, game.launcher.tag(), launcher_color(game.launcher));
                                     ui.add_space(TIGHT);
@@ -1663,11 +1685,16 @@ fn library_view(app: &mut App, ui: &mut egui::Ui) {
                                             RichText::new("process").size(11.0).color(GREY),
                                         ),
                                     );
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut game.process)
-                                            .desired_width(190.0)
-                                            .font(egui::TextStyle::Monospace),
-                                    );
+                                    if ui
+                                        .add(
+                                            egui::TextEdit::singleline(&mut game.process)
+                                                .desired_width(190.0)
+                                                .font(egui::TextStyle::Monospace),
+                                        )
+                                        .changed()
+                                    {
+                                        clear_feedback = true;
+                                    }
                                 });
                                 ui.add_space(TIGHT);
                                 ui.horizontal(|ui| {
@@ -1677,21 +1704,43 @@ fn library_view(app: &mut App, ui: &mut egui::Ui) {
                                             RichText::new("path").size(11.0).color(GREY),
                                         ),
                                     );
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut game.path)
-                                            .desired_width(280.0)
-                                            .font(egui::TextStyle::Monospace),
-                                    );
+                                    if ui
+                                        .add(
+                                            egui::TextEdit::singleline(&mut game.path)
+                                                .desired_width(280.0)
+                                                .font(egui::TextStyle::Monospace),
+                                        )
+                                        .changed()
+                                    {
+                                        clear_feedback = true;
+                                    }
                                     if ui.button("Browse").clicked()
                                         && let Some(p) = rfd::FileDialog::new().pick_folder()
                                     {
                                         game.path = p.display().to_string();
+                                        clear_feedback = true;
                                     }
                                 });
                             });
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
+                                    if dirty[i] && ui.button("Save").clicked() {
+                                        save_idx = Some(i);
+                                    }
+                                    // Inline result of THIS game's last save.
+                                    if let Some((gid, ok, msg)) = &feedback
+                                        && !gid.is_empty()
+                                        && gid.as_str() == game.game_id.as_str()
+                                    {
+                                        ui.add_space(TIGHT);
+                                        ui.label(RichText::new(msg).size(11.0).color(if *ok {
+                                            GREEN
+                                        } else {
+                                            RED
+                                        }));
+                                    }
+                                    ui.add_space(GAP);
                                     if ui
                                         .add(
                                             egui::Button::new(
@@ -1717,6 +1766,127 @@ fn library_view(app: &mut App, ui: &mut egui::Ui) {
     if let Some(i) = remove {
         app.library.remove(i);
     }
+    if clear_feedback {
+        app.game_save_msg = None;
+    }
+    if let Some(i) = save_idx {
+        save_one_game(app, i);
+    }
+}
+
+/// True when a game row has an unsaved edit relative to the loaded config (a new row
+/// with no config entry is always dirty). Mirrors how `games_to_library` derives a
+/// row from a `GameConfig`, so an untouched row reads clean. `exposed` is excluded:
+/// it auto-saves on toggle, so it never gates the per-game Save button.
+fn game_row_dirty(row: &Game, cfg: &Config) -> bool {
+    if row.game_id.trim().is_empty() {
+        return true;
+    }
+    let Some((key, gc)) = cfg
+        .games
+        .iter()
+        .find(|(_, g)| g.game_id() == row.game_id.as_str())
+    else {
+        return true;
+    };
+    let cfg_path = if gc.app_id().is_some_and(|a| a != 0) {
+        String::new()
+    } else {
+        strip_launch_scheme(&gc.launch_command().unwrap_or_default())
+    };
+    row.name.trim() != gc.display_name().as_str()
+        || row.process.trim() != key.as_str()
+        || row.path.trim() != cfg_path.trim()
+}
+
+/// Persist a SINGLE game to disk without folding the rest of the edited library, so
+/// saving one game never commits another row's in-progress edits. The on-disk entry
+/// is located by the row's stable `game_id` (so a process rename updates the right
+/// entry instead of creating a duplicate). Result goes to `app.game_save_msg` for
+/// inline feedback on the row.
+fn save_one_game(app: &mut App, i: usize) {
+    let Some(row) = app.library.get(i).cloned() else {
+        return;
+    };
+    let err_gid = row.game_id.clone();
+    let set_err = |app: &mut App, msg: String| {
+        app.game_save_msg = Some((err_gid.clone(), false, msg));
+    };
+
+    if row.process.trim().is_empty() || row.name.trim().is_empty() {
+        set_err(app, "Name and process are required".into());
+        return;
+    }
+
+    // Start from the current on-disk config so only this game is changed.
+    let mut fresh = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            set_err(app, format!("Could not read config: {e:#}"));
+            return;
+        }
+    };
+
+    // Find this game's existing entry by stable game_id (survives a rename).
+    let old_key = if row.game_id.trim().is_empty() {
+        None
+    } else {
+        fresh
+            .games
+            .iter()
+            .find(|(_, gc)| gc.game_id() == row.game_id.as_str())
+            .map(|(k, _)| k.clone())
+    };
+
+    // Reject a process key already used by a DIFFERENT game.
+    let new_key = row.process.trim().to_string();
+    if let Some(existing) = fresh.games.get(&new_key)
+        && old_key.as_deref() != Some(new_key.as_str())
+        && existing.game_id() != row.game_id.as_str()
+    {
+        set_err(
+            app,
+            format!("Another game already uses process '{new_key}'"),
+        );
+        return;
+    }
+
+    // Build the entry through the shared folder, seeding prev (keyed on the NEW
+    // process) with the existing entry so game_id + auto_discovered are preserved.
+    let mut prev = std::collections::HashMap::new();
+    if let Some(k) = &old_key
+        && let Some(gc) = fresh.games.get(k)
+    {
+        prev.insert(new_key.clone(), gc.clone());
+    }
+    let Some((key, gc)) = library_to_games(std::slice::from_ref(&row), &prev)
+        .into_iter()
+        .next()
+    else {
+        set_err(app, "Name and process are required".into());
+        return;
+    };
+
+    if let Some(k) = &old_key {
+        fresh.games.remove(k);
+    }
+    fresh.games.insert(key.clone(), gc.clone());
+
+    if let Err(e) = fresh.save() {
+        set_err(app, format!("{e:#}"));
+        return;
+    }
+
+    // Mirror into the in-memory config and this row; other rows are untouched.
+    if let Some(k) = &old_key {
+        app.cfg.games.remove(k);
+    }
+    app.cfg.games.insert(key.clone(), gc.clone());
+    if let Some(r) = app.library.get_mut(i) {
+        r.process = key;
+        r.game_id = gc.game_id().to_string();
+    }
+    app.game_save_msg = Some((gc.game_id().to_string(), true, "Saved".into()));
 }
 
 /// Persist current edits, then run Steam discovery off the UI thread; the merged

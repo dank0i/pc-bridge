@@ -633,6 +633,7 @@ pub enum GameStatus {
     Installed,
 }
 
+#[derive(Clone)]
 pub struct Game {
     pub name: String,
     pub process: String,
@@ -649,7 +650,7 @@ pub struct Game {
 
 /// Strip a launcher scheme (`lnk:`/`exe:`/`url:`) so the UI shows just the raw path
 /// or URL. Other/no scheme is returned unchanged.
-fn strip_launch_scheme(s: &str) -> String {
+pub(crate) fn strip_launch_scheme(s: &str) -> String {
     let lower = s.to_ascii_lowercase();
     for scheme in ["lnk:", "exe:", "url:"] {
         if lower.starts_with(scheme) {
