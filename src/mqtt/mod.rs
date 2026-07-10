@@ -145,8 +145,8 @@ impl MqttClient {
         let availability_topic_for_eventloop = availability_topic.clone();
 
         // Pre-compute prefixes for hot path (avoid format!() per message)
-        let button_prefix = format!("{}/button/{}/", DISCOVERY_PREFIX, &device_name);
-        let notify_topic_match = format!("pc-bridge/notifications/{}", &device_name);
+        let button_prefix = format!("{}/button/{}/", DISCOVERY_PREFIX, device_name);
+        let notify_topic_match = format!("pc-bridge/notifications/{}", device_name);
 
         // Pre-compute birth message for ConnAck (Feature H).
         //
@@ -155,11 +155,11 @@ impl MqttClient {
         // unknown). Everything else goes to the attributes topic.
         let birth_topic = format!(
             "{}/sensor/{}/bridge_info/state",
-            DISCOVERY_PREFIX, &device_name
+            DISCOVERY_PREFIX, device_name
         );
         let birth_attrs_topic = format!(
             "{}/sensor/{}/bridge_info/attributes",
-            DISCOVERY_PREFIX, &device_name
+            DISCOVERY_PREFIX, device_name
         );
         let birth_payload = VERSION.to_string();
         let birth_attrs_payload = serde_json::json!({

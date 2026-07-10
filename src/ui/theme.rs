@@ -35,7 +35,7 @@ pub fn setup_style(ctx: &egui::Context) {
     v.extreme_bg_color = Color32::from_rgb(0x0e, 0x0f, 0x12);
     v.faint_bg_color = ROW;
     v.selection.bg_fill = ACCENT.linear_multiply(0.35);
-    v.selection.stroke = Stroke::new(1.0, ACCENT);
+    v.selection.stroke = Stroke::new(1.0_f32, ACCENT);
     v.widgets.hovered.bg_fill = ROW_HOVER;
     v.widgets.inactive.bg_fill = ROW;
     v.widgets.active.bg_fill = ACCENT;

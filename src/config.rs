@@ -1554,9 +1554,9 @@ mod tests {
         let mut cfg = Config::default();
         cfg.games
             .insert("cs".to_string(), GameConfig::Simple("cs".into()));
-        assert!(
-            cfg.matching_game_processes(["csrss.exe", "cs.exe"].iter().copied())
-                == vec!["cs.exe".to_string()]
+        assert_eq!(
+            cfg.matching_game_processes(["csrss.exe", "cs.exe"].iter().copied()),
+            vec!["cs.exe".to_string()]
         );
     }
 
