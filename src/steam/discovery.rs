@@ -163,23 +163,40 @@ impl SteamGameDiscovery {
                 continue;
             }
 
-            // Try appinfo.vdf first (fast), when it opened.
-            if let Some(reader) = appinfo.as_mut()
-                && let Some((name, executable)) = reader.get_game_info(app_id)
-                && let Some(_key) =
-                    Self::add_game(&mut games, app_id, name, executable, &library_path)
+            // Try appinfo.vdf first (fast), when it opened. Returns an owned
+            // (name, exe) so the mutable borrow is released before we scan disk.
+            let appinfo_info = appinfo.as_mut().and_then(|r| r.get_game_info(app_id));
+
+            // Fast path: appinfo gave a real game exe (not a launcher/anti-cheat
+            // wrapper). Use it directly and skip the slower folder scan.
+            if let Some((name, executable)) = &appinfo_info
+                && !super::is_non_game_exe(executable)
+                && Self::add_game(
+                    &mut games,
+                    app_id,
+                    name.clone(),
+                    executable.clone(),
+                    &library_path,
+                )
+                .is_some()
             {
                 from_appinfo += 1;
                 continue;
             }
 
-            // Fallback: read appmanifest_<appid>.acf directly
+            // Either appinfo had nothing, or it returned a wrapper that just
+            // bootstraps the real game (so it is useless for process monitoring).
+            // Resolve the install dir from the manifest and scan the folder for
+            // the real executable.
             let manifest_path = library_path
                 .join("steamapps")
                 .join(format!("appmanifest_{}.acf", app_id));
 
+            let mut disk_match: Option<String> = None; // real exe found on disk
+            let mut disk_guess: Option<String> = None; // folder-name fallback guess
+            let mut manifest_name: Option<String> = None;
             if let Ok(content) = fs::read_to_string(&manifest_path)
-                && let Some((_, name, installdir)) = vdf::extract_appmanifest_fields(&content)
+                && let Some((_, mname, installdir)) = vdf::extract_appmanifest_fields(&content)
                 // installdir must be a single folder name: reject path separators
                 // and traversal so a crafted .acf can't redirect the exe scan
                 // outside steamapps/common.
@@ -187,15 +204,45 @@ impl SteamGameDiscovery {
                 && !installdir.contains(['/', '\\'])
                 && !installdir.contains("..")
             {
-                // Try to find executable in game folder
+                manifest_name = Some(mname);
                 let game_path = library_path
                     .join("steamapps")
                     .join("common")
                     .join(&installdir);
+                match Self::find_game_executable(&game_path) {
+                    Some((exe, true)) => disk_match = Some(exe),
+                    Some((exe, false)) => disk_guess = Some(exe),
+                    None => {}
+                }
+            }
 
-                if let Some(exe) = Self::find_game_executable(&game_path)
-                    && Self::add_game(&mut games, app_id, name, exe, &library_path).is_some()
-                {
+            // Resolve the exe by priority:
+            //   1. a real exe found on disk (upgrades a genuine wrapper);
+            //   2. the appinfo-declared exe, even if it tripped the blacklist - it
+            //      is Steam's own launch target, so it beats a folder-name guess
+            //      and rescues a real exe that merely contains a blacklist word
+            //      (e.g. a dedicated-server "PalServer.exe");
+            //   3. the folder-name guess, only when appinfo gave us nothing.
+            let name = appinfo_info
+                .as_ref()
+                .map(|(n, _)| n.clone())
+                .or(manifest_name);
+            let appinfo_exe = appinfo_info.map(|(_, e)| e);
+
+            let (exe, from_appinfo_source) = if let Some(exe) = disk_match {
+                (Some(exe), false)
+            } else if let Some(exe) = appinfo_exe {
+                (Some(exe), true)
+            } else {
+                (disk_guess, false)
+            };
+
+            if let (Some(exe), Some(name)) = (exe, name)
+                && Self::add_game(&mut games, app_id, name, exe, &library_path).is_some()
+            {
+                if from_appinfo_source {
+                    from_appinfo += 1;
+                } else {
                     from_manifest += 1;
                 }
             }
@@ -255,10 +302,14 @@ impl SteamGameDiscovery {
         Some(key)
     }
 
-    /// Find the main executable in a game folder
+    /// Find the main executable in a game folder.
     ///
-    /// Strategy: find exe that matches folder name, or largest exe that looks like a game
-    fn find_game_executable(game_path: &Path) -> Option<String> {
+    /// Strategy: find exe that matches folder name, or largest exe that looks
+    /// like a game. Returns `(exe, confident)`: `confident` is true when a real
+    /// on-disk exe was matched, false when we fell back to a `<folder>.exe`
+    /// guess (no real match). Callers prefer a confident match over an
+    /// appinfo-declared exe, and an appinfo exe over a non-confident guess.
+    fn find_game_executable(game_path: &Path) -> Option<(String, bool)> {
         if !game_path.is_dir() {
             return None;
         }
@@ -341,15 +392,16 @@ impl SteamGameDiscovery {
             b.1.cmp(&a.1)
         });
 
-        // Return best candidate if one was found
+        // Return best candidate if one was found (confident on-disk match).
         if let Some((name, _, _)) = candidates.first() {
-            return Some(name.clone());
+            return Some((name.clone(), true));
         }
 
-        // Fallback: use folder name as exe name (e.g., "3DMark" -> "3DMark.exe")
-        // This works even if the exe is deeply nested or not found
+        // Fallback: use folder name as exe name (e.g., "3DMark" -> "3DMark.exe").
+        // This works even if the exe is deeply nested or not found, but it is a
+        // guess - flagged non-confident so callers can prefer a real appinfo exe.
         let folder_name = game_path.file_name()?.to_str()?;
-        Some(format!("{}.exe", folder_name))
+        Some((format!("{}.exe", folder_name), false))
     }
 
     /// Scan a directory for game executables
@@ -384,41 +436,8 @@ impl SteamGameDiscovery {
             let lower = name.to_lowercase();
             let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
 
-            // Skip common non-game executables
-            if lower.contains("unins")
-                || lower.contains("crash")
-                || lower.contains("report")
-                || lower.contains("redis")
-                || lower.contains("launcher")
-                || lower.contains("setup")
-                || lower.contains("install")
-                || lower.contains("update")
-                || lower.contains("helper")
-                || lower.contains("anticheat")
-                || lower.contains("easyanticheat")
-                || lower.contains("battleye")
-                || lower.contains("capture")
-                || lower.contains("message")
-                || lower.contains("systeminfo")
-                || lower.contains("console")
-                || lower.contains("vconsole")
-                || lower.contains("diagnos")
-                || lower.contains("upload")
-                || lower.contains("profile")
-                || lower.contains("protected")
-                || lower.contains("server")
-                || lower.contains("dedicated")
-                || lower.starts_with("vc_")
-                || lower.starts_with("vcredist")
-                || lower.starts_with("dotnet")
-                || lower.starts_with("directx")
-                || lower.starts_with("dxsetup")
-                || lower.starts_with("physx")
-                || lower.starts_with("uplay")
-                || lower.starts_with("ubi")
-                || lower.starts_with("client_")
-                || lower.starts_with("start_")
-            {
+            // Skip launchers, anti-cheat wrappers, installers, and other helpers.
+            if super::is_non_game_exe(&lower) {
                 continue;
             }
 
@@ -941,5 +960,44 @@ mod tests {
             from_cache: false,
         };
         assert!(discovery.lookup("nonexistent.exe").is_none());
+    }
+
+    // -- find_game_executable confidence flag --
+
+    #[test]
+    fn test_find_game_executable_confident_on_real_match() {
+        // A real exe that fuzzy-matches the folder name is a confident match.
+        let dir = tempfile::tempdir().unwrap();
+        let game_dir = dir.path().join("Celeste");
+        fs::create_dir(&game_dir).unwrap();
+        fs::write(game_dir.join("Celeste.exe"), b"x").unwrap();
+
+        let (exe, confident) =
+            SteamGameDiscovery::find_game_executable(&game_dir).expect("should resolve");
+        assert_eq!(exe, "Celeste.exe");
+        assert!(confident, "a real on-disk match must be confident");
+    }
+
+    #[test]
+    fn test_find_game_executable_guess_when_only_blacklisted_exe() {
+        // Folder holds only a blacklisted exe (dedicated-server style name): the
+        // scanner rejects it, so we fall back to the folder-name guess flagged
+        // NON-confident, letting discovery prefer the real appinfo exe instead.
+        let dir = tempfile::tempdir().unwrap();
+        let game_dir = dir.path().join("Palworld");
+        fs::create_dir(&game_dir).unwrap();
+        fs::write(game_dir.join("PalServer.exe"), b"x").unwrap();
+
+        let (exe, confident) =
+            SteamGameDiscovery::find_game_executable(&game_dir).expect("should resolve");
+        assert_eq!(exe, "Palworld.exe", "falls back to folder-name guess");
+        assert!(!confident, "a folder-name guess must not be confident");
+    }
+
+    #[test]
+    fn test_find_game_executable_none_for_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does_not_exist");
+        assert!(SteamGameDiscovery::find_game_executable(&missing).is_none());
     }
 }

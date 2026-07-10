@@ -11,6 +11,53 @@ use std::path::PathBuf;
 
 pub use discovery::SteamGameDiscovery;
 
+/// True if an executable name looks like a launcher, anti-cheat wrapper,
+/// installer, or other non-game helper that we should not monitor as the
+/// game's own process.
+///
+/// Accepts a bare name or a full path (`start_protected_game.exe`,
+/// `EasyAntiCheat/EACLauncher.exe`); matching is case-insensitive and ignores
+/// the directory and `.exe` suffix. Shared by appinfo launch-config selection
+/// and the on-disk folder scan so both agree on what "not the game" means.
+pub(crate) fn is_non_game_exe(exe: &str) -> bool {
+    /// Substrings that mark an exe as a non-game helper.
+    const CONTAINS: &[&str] = &[
+        "unins",
+        "crash",
+        "report",
+        "redis",
+        "launcher",
+        "setup",
+        "install",
+        "update",
+        "helper",
+        "anticheat",
+        "easyanticheat",
+        "battleye",
+        "capture",
+        "message",
+        "systeminfo",
+        "console",
+        "vconsole",
+        "diagnos",
+        "upload",
+        "profile",
+        "protected",
+        "server",
+        "dedicated",
+    ];
+    /// Prefixes that mark an exe as a redistributable/launcher.
+    const STARTS_WITH: &[&str] = &[
+        "vc_", "vcredist", "dotnet", "directx", "dxsetup", "physx", "uplay", "ubi", "client_",
+        "start_",
+    ];
+
+    let file = exe.rsplit(['/', '\\']).next().unwrap_or(exe).to_lowercase();
+    let stem = file.strip_suffix(".exe").unwrap_or(&file);
+
+    CONTAINS.iter().any(|p| stem.contains(p)) || STARTS_WITH.iter().any(|p| stem.starts_with(p))
+}
+
 /// Find Steam installation path (shared across modules).
 ///
 /// Checks (in order): HKCU registry, HKLM registry, common paths (Windows)

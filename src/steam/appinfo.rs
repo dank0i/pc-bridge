@@ -275,11 +275,11 @@ impl AppInfoReader {
         // Navigate to "launch" block for executable
         reader.reset_to_root();
         let exe = if reader.find_block("launch") {
-            Self::find_windows_executable(&mut reader)
+            Self::find_windows_executable(&mut reader, name.as_deref())
         } else {
             reader.reset_to_root();
             if reader.find_nested_block(&["config", "launch"]) {
-                Self::find_windows_executable(&mut reader)
+                Self::find_windows_executable(&mut reader, name.as_deref())
             } else {
                 None
             }
@@ -288,12 +288,20 @@ impl AppInfoReader {
         Some((name?, exe?))
     }
 
-    fn find_windows_executable(reader: &mut BinaryVdfReader) -> Option<String> {
+    fn find_windows_executable(
+        reader: &mut BinaryVdfReader,
+        game_name: Option<&str>,
+    ) -> Option<String> {
         // Iterate through launch configs (0, 1, 2, ...)
         let mut depth = 0;
         let mut current_exe: Option<String> = None;
         let mut is_windows = false;
         let mut is_default = true; // Assume default unless specified otherwise
+        // Collect EVERY valid Windows launch exe (in launch-config order) rather
+        // than taking the first: protected games list the anti-cheat/launcher
+        // wrapper (e.g. `start_protected_game.exe`) as launch config 0 and the
+        // real game as a later entry, so we must see them all to choose well.
+        let mut candidates: Vec<String> = Vec::new();
 
         while let Some((key, value)) = reader.next_kv() {
             match value {
@@ -324,7 +332,7 @@ impl AppInfoReader {
                             // ("bin/v1.5/game") isn't mistaken for an extension.
                             let file = exe.rsplit(['/', '\\']).next().unwrap_or(&exe);
                             if exe.ends_with(".exe") || !file.contains('.') {
-                                return Some(exe);
+                                candidates.push(exe);
                             }
                         }
                     } else if depth < 0 {
@@ -344,7 +352,56 @@ impl AppInfoReader {
             }
         }
 
-        None
+        Self::pick_best_executable(candidates, game_name)
+    }
+
+    /// Choose the best launch executable from the collected candidates.
+    ///
+    /// Prefers a real game exe over a launcher/anti-cheat wrapper, and among the
+    /// real ones prefers a name that resembles the game title. Falls back to a
+    /// wrapper only when nothing else exists, so the game is still discovered
+    /// (discovery then upgrades a wrapper via an on-disk folder scan).
+    fn pick_best_executable(candidates: Vec<String>, game_name: Option<&str>) -> Option<String> {
+        if candidates.is_empty() {
+            return None;
+        }
+
+        // Filename part, lowercased, `.exe` stripped.
+        let stem = |exe: &str| -> String {
+            let file = exe.rsplit(['/', '\\']).next().unwrap_or(exe).to_lowercase();
+            file.strip_suffix(".exe").unwrap_or(&file).to_string()
+        };
+
+        // Split real-game exes from launcher/anti-cheat wrappers, preserving
+        // launch-config order within each group.
+        let (real, wrappers): (Vec<String>, Vec<String>) = candidates
+            .into_iter()
+            .partition(|exe| !super::is_non_game_exe(exe));
+
+        // Only fall back to wrappers if there is no real candidate at all.
+        let pool = if real.is_empty() { wrappers } else { real };
+
+        // Among the pool, prefer a candidate whose name resembles the game title
+        // (handles a real entry buried after an editor/benchmark, etc.).
+        if let Some(name) = game_name {
+            let name_clean: String = name
+                .to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect();
+            if !name_clean.is_empty()
+                && let Some(best) = pool.iter().find(|exe| {
+                    let exe_clean: String =
+                        stem(exe).chars().filter(|c| c.is_alphanumeric()).collect();
+                    !exe_clean.is_empty()
+                        && (name_clean.contains(&exe_clean) || exe_clean.contains(&name_clean))
+                })
+            {
+                return Some(best.clone());
+            }
+        }
+
+        pool.into_iter().next()
     }
 
     /// Number of indexed apps
@@ -613,6 +670,107 @@ mod tests {
         be(&mut d);
         be(&mut d);
         be(&mut d);
+        be(&mut d); // end appinfo
+
+        let (name, exe) =
+            AppInfoReader::parse_game_info(&d, &table, true).expect("should parse wrapped blob");
+        assert_eq!(name, "TestGame");
+        assert_eq!(exe, "game.exe");
+    }
+
+    #[test]
+    fn test_pick_best_prefers_real_over_wrapper() {
+        // Protected games list the anti-cheat wrapper first; we must skip it.
+        let candidates = vec![
+            "start_protected_game.exe".to_string(),
+            "cod.exe".to_string(),
+        ];
+        let best = AppInfoReader::pick_best_executable(candidates, Some("Call of Duty"));
+        assert_eq!(best.as_deref(), Some("cod.exe"));
+    }
+
+    #[test]
+    fn test_pick_best_wrapper_only_last_resort() {
+        // If a wrapper is the only candidate, still return it so the game is not
+        // dropped - discovery upgrades it via an on-disk folder scan.
+        let candidates = vec!["EACLauncher.exe".to_string()];
+        let best = AppInfoReader::pick_best_executable(candidates, Some("Some Game"));
+        assert_eq!(best.as_deref(), Some("EACLauncher.exe"));
+    }
+
+    #[test]
+    fn test_pick_best_name_fuzzy_tiebreak() {
+        // Among real candidates, prefer the one resembling the title over an
+        // editor/benchmark that shipped in the same launch block.
+        let candidates = vec!["Benchmark.exe".to_string(), "Cyberpunk2077.exe".to_string()];
+        let best = AppInfoReader::pick_best_executable(candidates, Some("Cyberpunk 2077"));
+        assert_eq!(best.as_deref(), Some("Cyberpunk2077.exe"));
+    }
+
+    #[test]
+    fn test_pick_best_no_name_takes_first_real() {
+        // With no title to match, keep Steam's launch-config order among reals.
+        let candidates = vec!["editor.exe".to_string(), "game.exe".to_string()];
+        let best = AppInfoReader::pick_best_executable(candidates, None);
+        assert_eq!(best.as_deref(), Some("editor.exe"));
+    }
+
+    #[test]
+    fn test_pick_best_empty_is_none() {
+        assert_eq!(
+            AppInfoReader::pick_best_executable(Vec::new(), Some("X")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_parse_game_info_skips_wrapper_launch_entry() {
+        // launch { 0 -> start_protected_game.exe, 1 -> game.exe }: the first-match
+        // behaviour used to return the wrapper; selection must now pick the game.
+        let table: Vec<String> = [
+            "appinfo",
+            "common",
+            "name",
+            "config",
+            "launch",
+            "0",
+            "executable",
+            "oslist",
+            "1",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+
+        let bs = |d: &mut Vec<u8>, idx: u32| {
+            d.push(TYPE_BLOCK_START);
+            d.extend_from_slice(&idx.to_le_bytes());
+        };
+        let be = |d: &mut Vec<u8>| d.push(TYPE_BLOCK_END);
+        let st = |d: &mut Vec<u8>, idx: u32, val: &str| {
+            d.push(TYPE_STRING);
+            d.extend_from_slice(&idx.to_le_bytes());
+            d.extend_from_slice(val.as_bytes());
+            d.push(0);
+        };
+
+        let mut d = Vec::new();
+        bs(&mut d, 0); // appinfo (root wrapper)
+        bs(&mut d, 1); // common
+        st(&mut d, 2, "TestGame"); // name
+        be(&mut d);
+        bs(&mut d, 3); // config
+        bs(&mut d, 4); // launch
+        bs(&mut d, 5); // "0"
+        st(&mut d, 6, "start_protected_game.exe"); // wrapper executable
+        st(&mut d, 7, "windows"); // oslist
+        be(&mut d);
+        bs(&mut d, 8); // "1"
+        st(&mut d, 6, "game.exe"); // real executable
+        st(&mut d, 7, "windows"); // oslist
+        be(&mut d);
+        be(&mut d); // end launch
+        be(&mut d); // end config
         be(&mut d); // end appinfo
 
         let (name, exe) =
