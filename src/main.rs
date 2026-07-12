@@ -375,7 +375,13 @@ async fn run_agent() -> anyhow::Result<()> {
                         // entities.
                         Ok(())
                         | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            let config = state.config.read().await;
+                            // Snapshot + drop the read lock BEFORE publishing.
+                            // register_discovery does dozens of publish awaits into the
+                            // bounded request channel; during a broker outage that channel
+                            // fills and a held guard would block, and tokio's
+                            // write-preferring RwLock then blocks every later read
+                            // (including the executor's feature gate): an agent-wide stall.
+                            let config = state.config.read().await.clone();
                             // Re-register only. We do NOT re-run clear_disabled_entities
                             // here: re-registration alone restores any config a broker
                             // restart dropped, and the disabled entities were already

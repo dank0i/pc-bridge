@@ -1495,12 +1495,18 @@ async fn reload_hot_config(state: &AppState) {
         // just disabled, so a feature toggle takes effect in HA on hot-reload
         // (not only at restart), mirroring what the reconnect handler does.
         {
-            let config = state.config.read().await;
-            state.mqtt.register_discovery(&config).await;
-            state.mqtt.clear_disabled_entities(&config).await;
+            // Snapshot + drop the read lock BEFORE publishing: register_discovery /
+            // clear_disabled_entities perform dozens of publish awaits into the
+            // bounded request channel. During a broker outage the channel fills and
+            // a held read guard would block, and tokio's write-preferring RwLock
+            // then blocks every later read (including the executor's feature gate):
+            // an agent-wide stall. Config is Clone (games.rs uses the same pattern).
+            let snapshot = state.config.read().await.clone();
+            state.mqtt.register_discovery(&snapshot).await;
+            state.mqtt.clear_disabled_entities(&snapshot).await;
             // Reconcile the live subscription set so a feature/custom command just
             // enabled actually receives its button presses this session.
-            state.mqtt.refresh_subscriptions(&config).await;
+            state.mqtt.refresh_subscriptions(&snapshot).await;
         }
 
         // Log security-relevant changes (using captured locals - no lock needed)
