@@ -87,11 +87,26 @@ pub fn expand_launcher_shortcut(cmd: &str) -> Option<String> {
                 warn!("Invalid process name: {}", arg);
                 return None;
             }
-            info!("Closing process: {}", arg);
-            // -x matches the exact process name (not the full command line, which
-            // `-f` does): `-f 'steam'` would also SIGTERM a log tailer, an editor
-            // with that path open, or pc-bridge itself.
-            Some(format!("pkill -x '{}'", process_name))
+            // kill: SIGKILL, close: SIGTERM.
+            let signal = if launcher == "kill" { "-KILL" } else { "-TERM" };
+            // Resolve to owned PIDs via the shared /proc helper. pkill -x cannot
+            // match a Proton game (comm "GTA5.exe") or any comm truncated to 15
+            // chars; the helper resolves those (and guards ownership + pid>1).
+            let pids = crate::sensors::proc_linux::owned_pids_by_name(
+                std::path::Path::new("/proc"),
+                process_name,
+            );
+            if pids.is_empty() {
+                // Fall back to pkill -x (name-exact best effort). -x matches the
+                // exact name (not the full command line, which -f does): -f 'steam'
+                // would also signal a log tailer or pc-bridge itself.
+                info!("Closing process (pkill fallback): {}", arg);
+                Some(format!("pkill {} -x '{}'", signal, process_name))
+            } else {
+                let pid_args: Vec<String> = pids.iter().map(u32::to_string).collect();
+                info!("Closing process by PID: {} -> {:?}", arg, pids);
+                Some(format!("kill {} {}", signal, pid_args.join(" ")))
+            }
         }
 
         // lnk: is Windows-only (.lnk shortcuts), skip on Linux
@@ -237,16 +252,34 @@ mod tests {
         assert_eq!(result, Some("'/opt/games/game' --fullscreen".to_string()));
     }
 
+    // These use a process name that cannot be running so the PID resolver finds
+    // nothing and the deterministic pkill fallback fires on any host (with or
+    // without /proc). close: sends SIGTERM, kill: sends SIGKILL.
     #[test]
-    fn test_close_shortcut() {
-        let result = expand_launcher_shortcut("close:firefox");
-        assert_eq!(result, Some("pkill -x 'firefox'".to_string()));
+    fn test_close_shortcut_falls_back_to_pkill() {
+        let result = expand_launcher_shortcut("close:pcbridgeNoSuchProcXYZ");
+        assert_eq!(
+            result,
+            Some("pkill -TERM -x 'pcbridgeNoSuchProcXYZ'".to_string())
+        );
+    }
+
+    #[test]
+    fn test_kill_shortcut_uses_sigkill() {
+        let result = expand_launcher_shortcut("kill:pcbridgeNoSuchProcXYZ");
+        assert_eq!(
+            result,
+            Some("pkill -KILL -x 'pcbridgeNoSuchProcXYZ'".to_string())
+        );
     }
 
     #[test]
     fn test_close_strips_exe_extension() {
-        let result = expand_launcher_shortcut("close:notepad.exe");
-        assert_eq!(result, Some("pkill -x 'notepad'".to_string()));
+        let result = expand_launcher_shortcut("close:pcbridgeNoSuchProcXYZ.exe");
+        assert_eq!(
+            result,
+            Some("pkill -TERM -x 'pcbridgeNoSuchProcXYZ'".to_string())
+        );
     }
 
     #[test]

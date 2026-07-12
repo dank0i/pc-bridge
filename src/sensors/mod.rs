@@ -28,6 +28,8 @@ mod games_linux;
 #[cfg(unix)]
 mod idle_linux;
 #[cfg(unix)]
+pub(crate) mod proc_linux;
+#[cfg(unix)]
 mod session_linux;
 
 pub use audio_device::AudioDeviceSensor;

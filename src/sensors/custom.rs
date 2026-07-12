@@ -218,23 +218,14 @@ impl CustomSensorManager {
             .ok_or_else(|| "no process".to_string())?;
 
         tokio::task::spawn_blocking(move || {
-            // Scan /proc/*/comm directly - no subprocess spawn needed
-            let entries = std::fs::read_dir("/proc").map_err(|e| e.to_string())?;
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let Some(name_str) = name.to_str() else {
-                    continue;
-                };
-                if !name_str.bytes().all(|b| b.is_ascii_digit()) {
-                    continue;
-                }
-                if let Ok(comm) = std::fs::read_to_string(entry.path().join("comm"))
-                    && comm.trim().eq_ignore_ascii_case(&process)
-                {
-                    return Ok("on".to_string());
-                }
-            }
-            Ok("off".to_string())
+            // Use the shared /proc resolver so this matches Proton games (comm
+            // "GTA5.exe") and >15-char comms - which raw comm equality misses -
+            // and matches Windows semantics (eq / eq-without-.exe / substring).
+            let exists =
+                crate::sensors::proc_linux::resolve_processes(std::path::Path::new("/proc"))
+                    .iter()
+                    .any(|p| crate::sensors::proc_linux::name_matches(&p.name, &process));
+            Ok(if exists { "on" } else { "off" }.to_string())
         })
         .await
         .map_err(|e| e.to_string())?

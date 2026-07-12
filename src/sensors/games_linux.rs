@@ -9,7 +9,6 @@
 use log::{debug, error, info};
 use serde::Serialize;
 use std::collections::HashSet;
-use std::fs;
 use std::sync::Arc;
 use tokio::time::{Duration, interval};
 
@@ -217,46 +216,14 @@ impl GameSensor {
     }
 
     fn get_process_names_blocking() -> anyhow::Result<Vec<String>> {
-        let mut names = Vec::new();
-
-        // Read /proc to enumerate processes
-        for entry in fs::read_dir("/proc")? {
-            let entry = entry?;
-            let path = entry.path();
-
-            // Only process numeric directories (PIDs)
-            if let Some(name) = path.file_name()
-                && let Some(name_str) = name.to_str()
-                && name_str.chars().all(|c| c.is_ascii_digit())
-            {
-                // /proc/<pid>/comm is truncated to 15 bytes (TASK_COMM_LEN-1), so a
-                // game with a longer executable name (e.g. MarvelRivals_Shipping)
-                // would never match. When comm is at the truncation length, prefer
-                // the untruncated basename from cmdline.
-                let comm = fs::read_to_string(path.join("comm"))
-                    .map(|s| s.trim().to_string())
-                    .unwrap_or_default();
-                let name = if comm.len() >= 15 {
-                    fs::read_to_string(path.join("cmdline"))
-                        .ok()
-                        .and_then(|cl| {
-                            cl.split('\0')
-                                .next()
-                                .filter(|a| !a.is_empty())
-                                .map(|a0| a0.rsplit(['/', '\\']).next().unwrap_or(a0).to_string())
-                        })
-                        .filter(|b| !b.is_empty())
-                        .unwrap_or(comm)
-                } else {
-                    comm
-                };
-                if !name.is_empty() {
-                    names.push(name);
-                }
-            }
-        }
-
-        Ok(names)
+        // Name resolution (incl. the 15-char comm-truncation fallback) is shared
+        // with the custom ProcessExists sensor and the close/kill command path.
+        Ok(
+            crate::sensors::proc_linux::resolve_processes(std::path::Path::new("/proc"))
+                .into_iter()
+                .map(|e| e.name)
+                .collect(),
+        )
     }
 }
 
