@@ -963,14 +963,9 @@ impl MqttClient {
             };
             self.publish_discovery(&topic, json).await;
 
-            // Subscribe to command topic
-            let cmd_topic = self.command_topic(&cmd.name);
-            if let Err(e) = self.client.subscribe(&cmd_topic, QoS::AtLeastOnce).await {
-                error!(
-                    "Failed to subscribe to custom command {}: {:?}",
-                    cmd.name, e
-                );
-            }
+            // Subscription is owned solely by mqtt/mod.rs (subscribe_commands at
+            // startup, refresh_subscriptions on hot-reload); registering discovery
+            // here must not also subscribe or the two authorities drift.
 
             debug!("Registered custom command: {}", cmd.name);
         }

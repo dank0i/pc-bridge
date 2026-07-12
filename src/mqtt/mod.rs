@@ -2,7 +2,7 @@
 
 use log::{debug, error, info, warn};
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 
@@ -34,6 +34,11 @@ pub struct MqttClient {
     /// Broadcast channel notifying subscribers when MQTT reconnects (ConnAck).
     /// Sensors listen on this to republish retained state after broker/network recovery.
     reconnect_tx: broadcast::Sender<()>,
+    /// Live command-subscription set, shared with the ConnAck resubscribe task so
+    /// a runtime hot-reload (a feature toggled on) is reflected on the next
+    /// reconnect too. `refresh_subscriptions` is the single writer. std RwLock is
+    /// fine: writers are rare and the guard is never held across an await.
+    subscribe_topics: Arc<RwLock<Vec<String>>>,
 }
 
 mod discovery;
@@ -137,8 +142,14 @@ impl MqttClient {
         let (reconnect_tx, _) = broadcast::channel(4);
         let reconnect_tx_for_eventloop = reconnect_tx.clone();
 
-        // Build list of topics to subscribe to (for reconnection)
-        let subscribe_topics = Self::build_subscribe_topics(&config.device_name, config);
+        // Build list of topics to subscribe to (for reconnection). Shared with the
+        // ConnAck task so a hot-reload that adds/removes topics is honored on the
+        // next reconnect, not frozen at startup.
+        let subscribe_topics = Arc::new(RwLock::new(Self::build_subscribe_topics(
+            &config.device_name,
+            config,
+        )));
+        let subscribe_topics_for_eventloop = Arc::clone(&subscribe_topics);
 
         // Clone client for event loop to publish availability on reconnect
         let client_for_eventloop = client.clone();
@@ -266,7 +277,9 @@ impl MqttClient {
                         // the task stay sequential, so subscribes still hit the wire
                         // before the availability publish (TCP order), which HA needs.
                         let client = client_for_eventloop.clone();
-                        let topics = subscribe_topics.clone();
+                        // Snapshot the current set (guard released before the task's
+                        // awaits; never held across .await).
+                        let topics = subscribe_topics_for_eventloop.read().unwrap().clone();
                         let avail = availability_topic_for_eventloop.clone();
                         let state_topic = birth_topic.clone();
                         let state_body = birth_payload.clone();
@@ -357,6 +370,7 @@ impl MqttClient {
             cached_topics,
             device,
             reconnect_tx,
+            subscribe_topics,
         };
 
         let cmd_rx = CommandReceiver { rx: command_rx };
@@ -455,6 +469,57 @@ impl MqttClient {
         }
 
         info!("Subscribed to {} command topics", topics.len());
+
+        // Seed the shared set so the ConnAck resubscribe and later refreshes diff
+        // against what we actually subscribed here.
+        *self.subscribe_topics.write().unwrap() = topics;
+    }
+
+    /// Reconcile the command-subscription set against the current config after a
+    /// hot-reload: subscribe topics newly enabled, unsubscribe ones just disabled,
+    /// then store the new set. Without this, a feature toggled on at runtime gets
+    /// its HA button registered but no subscription, so the broker silently drops
+    /// its presses until the next reconnect.
+    pub async fn refresh_subscriptions(&self, config: &Config) {
+        let desired = Self::build_subscribe_topics(&self.device_name, config);
+
+        // Diff under the lock, do the network I/O after releasing it (the guard
+        // must not be held across an await).
+        let (to_add, to_remove) = {
+            let current = self.subscribe_topics.read().unwrap();
+            let to_add: Vec<String> = desired
+                .iter()
+                .filter(|t| !current.contains(t))
+                .cloned()
+                .collect();
+            let to_remove: Vec<String> = current
+                .iter()
+                .filter(|t| !desired.contains(t))
+                .cloned()
+                .collect();
+            (to_add, to_remove)
+        };
+
+        for topic in &to_add {
+            if let Err(e) = self.client.subscribe(topic, QoS::AtLeastOnce).await {
+                error!("Failed to subscribe to {}: {:?}", topic, e);
+            }
+        }
+        for topic in &to_remove {
+            if let Err(e) = self.client.unsubscribe(topic).await {
+                error!("Failed to unsubscribe from {}: {:?}", topic, e);
+            }
+        }
+
+        *self.subscribe_topics.write().unwrap() = desired;
+
+        if !to_add.is_empty() || !to_remove.is_empty() {
+            info!(
+                "Refreshed command subscriptions: +{} -{}",
+                to_add.len(),
+                to_remove.len()
+            );
+        }
     }
 
     /// Subscribe to MQTT reconnect notifications.
@@ -579,6 +644,7 @@ mod tests {
                 sw_version: VERSION.to_string(),
             }),
             reconnect_tx,
+            subscribe_topics: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -2225,6 +2291,57 @@ mod tests {
             for topic in expected {
                 assert!(topics.contains(&topic), "Missing subscribe for: {topic}");
             }
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn test_refresh_subscriptions_adds_enabled_topic() {
+            let (port, state, _inject) = start_mini_broker().await;
+            // launch_game off by default: the Launch topic is not subscribed yet.
+            let config = broker_config("test-pc", port, FeatureConfig::default());
+            let (stx, _) = test_shutdown();
+
+            let (mqtt, _cmd_rx) = MqttClient::new(&config, stx.subscribe()).await.unwrap();
+
+            // Startup subscribes the 8 default power topics; Launch is absent.
+            wait_for_subscribes(&state, 8).await;
+            let launch = "homeassistant/button/test-pc/Launch/action";
+            assert!(
+                !state.lock().unwrap().subscribed.iter().any(|t| t == launch),
+                "Launch must not be subscribed while launch_game is off"
+            );
+
+            // Enable launch_game at runtime and reconcile.
+            let enabled = broker_config(
+                "test-pc",
+                port,
+                FeatureConfig {
+                    launch_game: true,
+                    ..FeatureConfig::default()
+                },
+            );
+            mqtt.refresh_subscriptions(&enabled).await;
+
+            // The broker must now receive a SUBSCRIBE for the Launch topic.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if state.lock().unwrap().subscribed.iter().any(|t| t == launch) {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("Launch subscribe not observed after refresh_subscriptions");
+
+            // The stored set is the single subscription authority and must reflect it.
+            assert!(
+                mqtt.subscribe_topics
+                    .read()
+                    .unwrap()
+                    .iter()
+                    .any(|t| t == launch),
+                "stored subscription set not updated by refresh_subscriptions"
+            );
         }
 
         // =================================================================

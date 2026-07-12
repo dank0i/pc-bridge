@@ -1492,6 +1492,9 @@ async fn reload_hot_config(state: &AppState) {
             let config = state.config.read().await;
             state.mqtt.register_discovery(&config).await;
             state.mqtt.clear_disabled_entities(&config).await;
+            // Reconcile the live subscription set so a feature/custom command just
+            // enabled actually receives its button presses this session.
+            state.mqtt.refresh_subscriptions(&config).await;
         }
 
         // Log security-relevant changes (using captured locals - no lock needed)
