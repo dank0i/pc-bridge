@@ -25,6 +25,15 @@ use wmi::{COMLibrary, WMIConnection};
 #[derive(Clone, Debug)]
 pub struct ProcessChangeNotification;
 
+/// Intrinsic process-change subscription. `WITHIN 2` (not 1) halves how often
+/// WmiPrvSE diffs the full process list - the top always-on cost since the
+/// v3.0.3 audit - for +1s worst-case detection latency, which the reconcile net
+/// bounds regardless. (An ETW-backed Win32_ProcessTrace path would avoid the
+/// diff entirely but needs elevation; non-elevated it would fall back to exactly
+/// this query, so this covers the common case.)
+const PROCESS_EVENT_QUERY: &str = "SELECT * FROM __InstanceOperationEvent WITHIN 2 \
+     WHERE TargetInstance ISA 'Win32_Process'";
+
 /// Process operation event from WMI (covers both creation and deletion)
 /// Uses __InstanceOperationEvent as the base query to receive both event types
 /// on a single thread, halving COM/WMI overhead.
@@ -167,8 +176,8 @@ impl ProcessWatcher {
         let state = Arc::clone(&self.state);
         let change_tx = self.change_tx.clone();
         // WMI fires events for ALL processes. The WMI thread uses blocking_send(),
-        // so a full channel stalls it rather than dropping events. WMI's WITHIN 1
-        // batching means events arrive in ~1s bursts - 64 slots is ample.
+        // so a full channel stalls it rather than dropping events. WMI's WITHIN 2
+        // batching means events arrive in ~2s bursts - 64 slots is ample.
         let (event_tx, event_rx) = mpsc::channel::<ProcessEvent>(64);
 
         // Try WMI events first, fall back to polling
@@ -224,8 +233,8 @@ impl ProcessWatcher {
 
         // Single thread handles both creation and deletion events.
         // Shutdown: when the mpsc receiver is dropped, blocking_send() returns Err
-        // and the thread breaks out of the event loop. The WMI `WITHIN 1` poll interval
-        // means at most ~1s delay before the thread notices and exits.
+        // and the thread breaks out of the event loop. The WMI `WITHIN 2` poll interval
+        // means at most ~2s delay before the thread notices and exits.
         // JoinHandle is intentionally detached - the thread is cleaned up on process exit.
         std::thread::Builder::new()
             .name("wmi-events".into())
@@ -256,21 +265,20 @@ impl ProcessWatcher {
 
                 // __InstanceOperationEvent is the parent of both __InstanceCreationEvent
                 // and __InstanceDeletionEvent, so one query captures both types.
-                let query = "SELECT * FROM __InstanceOperationEvent WITHIN 1 \
-                             WHERE TargetInstance ISA 'Win32_Process'";
-                let events = match wmi.raw_notification::<ProcessOperationEvent>(query) {
-                    Ok(iter) => {
-                        info!("WMI process event subscription established");
-                        let _ = ready_tx.send(Ok(()));
-                        iter
-                    }
-                    Err(e) => {
-                        let msg = format!("Failed to subscribe to process events: {}", e);
-                        error!("{}", msg);
-                        let _ = ready_tx.send(Err(msg));
-                        return;
-                    }
-                };
+                let events =
+                    match wmi.raw_notification::<ProcessOperationEvent>(PROCESS_EVENT_QUERY) {
+                        Ok(iter) => {
+                            info!("WMI process event subscription established");
+                            let _ = ready_tx.send(Ok(()));
+                            iter
+                        }
+                        Err(e) => {
+                            let msg = format!("Failed to subscribe to process events: {}", e);
+                            error!("{}", msg);
+                            let _ = ready_tx.send(Err(msg));
+                            return;
+                        }
+                    };
 
                 let mut consecutive_errors = 0u32;
                 for event_result in events {
@@ -569,6 +577,14 @@ impl ProcessWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_process_event_query_polls_every_two_seconds() {
+        // Guard against a regression back to WITHIN 1 (double the always-on cost).
+        assert!(PROCESS_EVENT_QUERY.contains("WITHIN 2"));
+        assert!(!PROCESS_EVENT_QUERY.contains("WITHIN 1"));
+        assert!(PROCESS_EVENT_QUERY.contains("Win32_Process"));
+    }
 
     #[test]
     fn test_process_state_add_remove() {
