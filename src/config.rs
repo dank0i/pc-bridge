@@ -92,6 +92,15 @@ pub struct RemovedGame {
     /// Display name captured at removal time.
     #[serde(default)]
     pub name: String,
+    /// Original game_id (HA entity id) captured at removal time. Reused on restore
+    /// so a rescan doesn't re-derive a different canonical slug and orphan the HA
+    /// entity (e.g. a legacy `baldurs_gate_3` coming back as `baldur_s_gate_3`).
+    #[serde(default)]
+    pub game_id: Option<String>,
+    /// App id captured at removal time (Steam games), so restore can rebuild the
+    /// full GameConfig with the original id.
+    #[serde(default)]
+    pub app_id: Option<u32>,
 }
 
 impl Default for Config {
@@ -917,6 +926,23 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    /// Restore a previously-removed game by index: drop its suppression entry and
+    /// re-insert it with its ORIGINAL game_id, so a following rescan sees it as
+    /// already-present and does NOT re-derive a possibly-different canonical slug
+    /// (which would orphan the HA entity keyed on the legacy id). No-op for a stale
+    /// index or an entry with no captured id (older configs).
+    pub fn restore_removed_game(&mut self, index: usize) {
+        if index >= self.removed_games.len() {
+            return;
+        }
+        let rg = self.removed_games.remove(index);
+        if let (Some(game_id), Some(app_id)) = (rg.game_id, rg.app_id) {
+            self.games
+                .entry(rg.process)
+                .or_insert_with(|| GameConfig::from_steam(game_id, app_id, rg.name));
+        }
     }
 
     /// Merge Steam-discovered games into the config and save
@@ -1780,6 +1806,8 @@ mod tests {
         cfg.removed_games.push(RemovedGame {
             process: "cs2".to_string(),
             name: "CS2".to_string(),
+            game_id: None,
+            app_id: None,
         });
         let (added, _removed) = cfg.merge_steam_games(&steam_discovery(&[("cs2", 730, "CS2")]));
         assert_eq!(added, 0, "removed game must not resurrect");
@@ -1791,6 +1819,34 @@ mod tests {
         ]));
         assert_eq!(added, 1);
         assert!(cfg.games.contains_key("dota2"));
+    }
+
+    #[test]
+    fn test_restore_preserves_legacy_game_id() {
+        // A game removed with a legacy (non-canonical) id must come back with that
+        // SAME id on restore, so the HA entity isn't orphaned by a re-derived slug.
+        let mut cfg = Config::default();
+        cfg.removed_games.push(RemovedGame {
+            process: "bg3".to_string(),
+            name: "Baldur's Gate 3".to_string(),
+            game_id: Some("baldurs_gate_3".to_string()), // legacy slug form
+            app_id: Some(1086940),
+        });
+
+        cfg.restore_removed_game(0);
+
+        assert!(cfg.removed_games.is_empty(), "suppression entry cleared");
+        let gc = cfg.games.get("bg3").expect("game re-inserted");
+        assert_eq!(
+            gc.game_id(),
+            "baldurs_gate_3",
+            "restore must keep the original id, not a re-derived canonical slug"
+        );
+        // A following rescan sees it as present and does not re-add/re-slug it.
+        let (added, _) =
+            cfg.merge_steam_games(&steam_discovery(&[("bg3", 1086940, "Baldur's Gate 3")]));
+        assert_eq!(added, 0);
+        assert_eq!(cfg.games.get("bg3").unwrap().game_id(), "baldurs_gate_3");
     }
 
     #[test]

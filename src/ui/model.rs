@@ -968,6 +968,8 @@ mod tests {
         fresh.removed_games = vec![crate::config::RemovedGame {
             process: "old_game".to_string(),
             name: "Old Game".to_string(),
+            game_id: None,
+            app_id: None,
         }];
 
         reconcile_with_disk(&mut ours, fresh, &baseline);

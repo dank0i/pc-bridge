@@ -305,6 +305,10 @@ impl App {
             .map(|(key, gc)| crate::config::RemovedGame {
                 process: key.clone(),
                 name: gc.display_name(),
+                // Capture the id + app_id so restore can re-insert with the
+                // original HA entity id instead of a rescan-derived slug.
+                game_id: Some(gc.game_id().to_string()),
+                app_id: gc.app_id(),
             })
             .collect();
         for rg in newly_removed {
@@ -1969,9 +1973,10 @@ fn removed_view(app: &mut App, ui: &mut egui::Ui) {
             }
         });
     if let Some(i) = restore {
-        // Drop it from the suppression list, then persist + rescan so a still-
-        // installed game reappears in the library right away.
-        app.cfg.removed_games.remove(i);
+        // Re-insert with the ORIGINAL game_id (preserving the HA entity), drop the
+        // suppression entry, then persist + rescan so a still-installed game
+        // reappears in the library right away (the rescan skips it as present).
+        app.cfg.restore_removed_game(i);
         spawn_steam_scan(app);
     }
 }
