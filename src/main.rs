@@ -341,11 +341,21 @@ async fn run_agent() -> anyhow::Result<()> {
     // the next restart.
     #[cfg(windows)]
     {
-        let poll_interval = Duration::from_secs(config.intervals.game_sensor.max(5));
-        state
-            .process_watcher
-            .start_background(shutdown_tx.subscribe(), poll_interval);
-        info!("  Process watcher started (WMI events with polling fallback)");
+        match config.detection_backend {
+            crate::config::DetectionBackend::Window => {
+                state
+                    .process_watcher
+                    .start_background_window(shutdown_tx.subscribe(), Arc::clone(&state));
+                info!("  Process watcher started (window events)");
+            }
+            crate::config::DetectionBackend::Wmi => {
+                let poll_interval = Duration::from_secs(config.intervals.game_sensor.max(5));
+                state
+                    .process_watcher
+                    .start_background(shutdown_tx.subscribe(), poll_interval);
+                info!("  Process watcher started (WMI events with polling fallback)");
+            }
+        }
     }
 
     // Command executor always runs (needed for any remote control)

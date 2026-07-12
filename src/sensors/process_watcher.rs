@@ -634,6 +634,472 @@ fn process_alive_with_name(pid: u32, expected_name: &str) -> bool {
     }
 }
 
+// ============================================================================
+// Window-event detection backend (Windows) - config detection_backend = "window"
+// ============================================================================
+//
+// Instead of WmiPrvSE diffing the whole process table every 2s, this backend
+// learns a game started from its top-level window appearing (SetWinEventHook,
+// non-admin, event-driven), resolves the window to its process, and admits it to
+// ProcessState only if a consumer WATCHES it (a game / custom ProcessExists /
+// screensaver) - so browsers and the shell never enter the set. Stop is a cheap
+// per-PID liveness probe over the tiny tracked set (not a full enumeration).
+// Headless watched patterns (no window) are found by a targeted snapshot that
+// runs only while the headless set is non-empty.
+//
+// UNVERIFIED off Windows: this is type-checked via cargo xwin but the WinEvent /
+// OpenProcess / message-pump behavior needs the live-box checklist in the plan
+// before detection_backend defaults to "window".
+
+#[cfg(windows)]
+impl ProcessWatcher {
+    /// Start the event-driven window-detection backend. `app` gives live config
+    /// access (which processes are watched) and the config-generation signal.
+    pub fn start_background_window(
+        &self,
+        shutdown_rx: broadcast::Receiver<()>,
+        app: Arc<crate::AppState>,
+    ) {
+        let state = Arc::clone(&self.state);
+        let change_tx = self.change_tx.clone();
+        tokio::spawn(async move { run_window_backend(state, change_tx, shutdown_rx, app).await });
+    }
+}
+
+#[cfg(windows)]
+async fn run_window_backend(
+    state: Arc<RwLock<ProcessState>>,
+    change_tx: broadcast::Sender<ProcessChangeNotification>,
+    mut shutdown_rx: broadcast::Receiver<()>,
+    app: Arc<crate::AppState>,
+) {
+    // Top-level window HWNDs from the hook thread (as isize; HWND isn't Send).
+    let (hwnd_tx, mut hwnd_rx) = mpsc::channel::<isize>(64);
+    let hook_waiter = spawn_window_event_thread(hwnd_tx, app.shutdown_tx.subscribe());
+
+    // Admit games already running before we started (window events won't refire).
+    window_reconcile_watched(&state, &change_tx, &app).await;
+
+    let mut config_rx = app.config_generation.subscribe();
+    // Slow liveness/headless tick. Body is cheap: a per-PID probe over the handful
+    // of tracked processes, plus a snapshot only when headless patterns exist.
+    let mut tick = tokio::time::interval(Duration::from_secs(5));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    tick.tick().await; // consume the immediate first tick
+
+    info!("Process watcher using window events");
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.recv() => break,
+            maybe = hwnd_rx.recv() => {
+                let Some(hwnd) = maybe else { break };
+                window_admit_hwnd(hwnd, &state, &change_tx, &app).await;
+            }
+            r = config_rx.recv() => {
+                if matches!(r, Ok(()) | Err(broadcast::error::RecvError::Lagged(_))) {
+                    window_reconcile_watched(&state, &change_tx, &app).await;
+                }
+            }
+            _ = tick.tick() => {
+                window_liveness_and_headless(&state, &change_tx, &app).await;
+            }
+        }
+    }
+    if let Some(h) = hook_waiter {
+        let _ = h.await;
+    }
+}
+
+/// Resolve a single HWND to (pid, image basename) and admit it if watched and new.
+#[cfg(windows)]
+async fn window_admit_hwnd(
+    hwnd: isize,
+    state: &Arc<RwLock<ProcessState>>,
+    change_tx: &broadcast::Sender<ProcessChangeNotification>,
+    app: &Arc<crate::AppState>,
+) {
+    // Filter + resolve off the runtime (OpenProcess/Query can block briefly).
+    let resolved = tokio::task::spawn_blocking(move || {
+        if is_top_level_app_window(hwnd) {
+            resolve_window_process(hwnd)
+        } else {
+            None
+        }
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some((pid, name)) = resolved else { return };
+    if state.read().await.pid_to_name.contains_key(&pid) {
+        return; // already tracked (alt-tab / refocus)
+    }
+    if !app.config.read().await.is_watched_process(&name) {
+        return;
+    }
+    debug!("Window backend: admitting {} (PID {})", name, pid);
+    state.write().await.add_process(name, pid);
+    let _ = change_tx.send(ProcessChangeNotification);
+}
+
+/// Prune dead tracked PIDs (per-PID probe, tiny set) and add any headless watched
+/// process (snapshot, only when the headless set is non-empty).
+#[cfg(windows)]
+async fn window_liveness_and_headless(
+    state: &Arc<RwLock<ProcessState>>,
+    change_tx: &broadcast::Sender<ProcessChangeNotification>,
+    app: &Arc<crate::AppState>,
+) {
+    let mut changed = false;
+
+    // Liveness: probe each tracked PID; drop the dead ones.
+    let tracked: Vec<(u32, Arc<str>)> = {
+        let guard = state.read().await;
+        guard
+            .pid_to_name
+            .iter()
+            .map(|(p, n)| (*p, Arc::clone(n)))
+            .collect()
+    };
+    for (pid, name) in tracked {
+        let alive = tokio::task::spawn_blocking(move || process_alive_with_name(pid, &name))
+            .await
+            .unwrap_or(false);
+        if !alive {
+            state.write().await.remove_process(pid);
+            changed = true;
+        }
+    }
+
+    // Headless watched patterns (no window): snapshot and reconcile, but only when
+    // there is something to look for.
+    let headless = app.config.read().await.headless_watch_names();
+    if !headless.is_empty() {
+        let snapshot = tokio::task::spawn_blocking(ProcessWatcher::snapshot_all_processes)
+            .await
+            .unwrap_or_default();
+        let mut guard = state.write().await;
+        for (pid, name) in &snapshot {
+            if guard.pid_to_name.contains_key(pid) {
+                continue;
+            }
+            let stem = name
+                .strip_suffix(".exe")
+                .or_else(|| name.strip_suffix(".EXE"))
+                .unwrap_or(name)
+                .to_lowercase();
+            if headless.iter().any(|h| h == &stem) {
+                guard.add_process(name.clone(), *pid);
+                changed = true;
+            }
+        }
+    }
+
+    if changed {
+        let _ = change_tx.send(ProcessChangeNotification);
+    }
+}
+
+/// Full re-evaluation: admit already-running watched top-level windows and drop
+/// tracked entries no longer watched (after startup and on config change).
+#[cfg(windows)]
+async fn window_reconcile_watched(
+    state: &Arc<RwLock<ProcessState>>,
+    change_tx: &broadcast::Sender<ProcessChangeNotification>,
+    app: &Arc<crate::AppState>,
+) {
+    // Drop tracked entries that are no longer watched (a game removed from config).
+    {
+        let cfg = app.config.read().await;
+        let stale: Vec<u32> = {
+            let guard = state.read().await;
+            guard
+                .pid_to_name
+                .iter()
+                .filter(|(_, name)| !cfg.is_watched_process(name))
+                .map(|(pid, _)| *pid)
+                .collect()
+        };
+        if !stale.is_empty() {
+            let mut guard = state.write().await;
+            for pid in stale {
+                guard.remove_process(pid);
+            }
+            let _ = change_tx.send(ProcessChangeNotification);
+        }
+    }
+    // Admit currently-open watched top-level windows.
+    let hwnds = tokio::task::spawn_blocking(enum_top_level_windows)
+        .await
+        .unwrap_or_default();
+    for hwnd in hwnds {
+        window_admit_hwnd(hwnd, state, change_tx, app).await;
+    }
+}
+
+/// Whether `hwnd` is a real, visible, top-level application window (not a child,
+/// owned dialog, or tool window like a menu/tooltip that OBJECT_SHOW also fires on).
+#[cfg(windows)]
+fn is_top_level_app_window(hwnd: isize) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GA_ROOT, GW_OWNER, GWL_EXSTYLE, GetAncestor, GetWindow, GetWindowLongW, IsWindowVisible,
+        WS_EX_TOOLWINDOW,
+    };
+    let h = HWND(hwnd as *mut core::ffi::c_void);
+    // SAFETY: all read-only window queries on a HWND the hook handed us.
+    unsafe {
+        if !IsWindowVisible(h).as_bool() {
+            return false;
+        }
+        if GetAncestor(h, GA_ROOT) != h {
+            return false; // a child window
+        }
+        if let Ok(owner) = GetWindow(h, GW_OWNER)
+            && !owner.is_invalid()
+        {
+            return false; // an owned window (dialog)
+        }
+        let ex = GetWindowLongW(h, GWL_EXSTYLE) as u32;
+        if ex & WS_EX_TOOLWINDOW.0 != 0 {
+            return false; // tool window (menu/tooltip/IME)
+        }
+    }
+    true
+}
+
+/// Resolve a top-level window to (pid, image basename), using the limited-info
+/// right so elevated / anti-cheat game processes still resolve.
+#[cfg(windows)]
+fn resolve_window_process(hwnd: isize) -> Option<(u32, String)> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    use windows::core::PWSTR;
+
+    let h = HWND(hwnd as *mut core::ffi::c_void);
+    // SAFETY: GetWindowThreadProcessId writes pid; OpenProcess handle is closed;
+    // QueryFullProcessImageNameW writes into a fixed buffer whose length we track.
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(h, Some(&raw mut pid));
+        if pid == 0 {
+            return None;
+        }
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 260];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_FORMAT(0),
+            PWSTR(buf.as_mut_ptr()),
+            &raw mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(handle);
+        if !ok {
+            return None;
+        }
+        let full = String::from_utf16_lossy(&buf[..len as usize]);
+        let base = full.rsplit(['\\', '/']).next().unwrap_or(&full).to_string();
+        if base.is_empty() {
+            None
+        } else {
+            Some((pid, base))
+        }
+    }
+}
+
+/// Enumerate all top-level windows' HWNDs (as isize) for a startup/rescan snapshot.
+#[cfg(windows)]
+fn enum_top_level_windows() -> Vec<isize> {
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, TRUE};
+    use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
+
+    unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        // SAFETY: lparam is the &mut Vec<isize> pointer we passed to EnumWindows.
+        let out = unsafe { &mut *(lparam.0 as *mut Vec<isize>) };
+        out.push(hwnd.0 as isize);
+        TRUE
+    }
+
+    let mut out: Vec<isize> = Vec::new();
+    // SAFETY: EnumWindows drives cb synchronously; the &mut Vec outlives the call.
+    unsafe {
+        let _ = EnumWindows(Some(cb), LPARAM(&raw mut out as isize));
+    }
+    out
+}
+
+/// Spawn the SetWinEventHook message-pump thread. Hooks FOREGROUND + OBJECT_SHOW
+/// and forwards each event's HWND (isize) to `event_tx`. Mirrors the ActiveWindow
+/// focus monitor: OUTOFCONTEXT hooks, WM_USER to unblock GetMessageW at shutdown,
+/// both hooks unhooked and the window destroyed on exit.
+#[cfg(windows)]
+fn spawn_window_event_thread(
+    event_tx: mpsc::Sender<isize>,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, MSG,
+        RegisterClassExW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_USER, WNDCLASSEXW,
+    };
+
+    // EVENT_SYSTEM_FOREGROUND = 0x3, EVENT_OBJECT_SHOW = 0x8002,
+    // OBJID_WINDOW = 0, CHILDID_SELF = 0, WINEVENT_OUTOFCONTEXT = 0x2.
+    const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
+    const EVENT_OBJECT_SHOW: u32 = 0x8002;
+    const WINEVENT_OUTOFCONTEXT: u32 = 0x0002;
+    const OBJID_WINDOW: i32 = 0;
+    const CHILDID_SELF: i32 = 0;
+
+    thread_local! {
+        static WIN_TX: std::cell::RefCell<Option<mpsc::Sender<isize>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    unsafe extern "system" fn win_event_proc(
+        _hook: windows::Win32::UI::Accessibility::HWINEVENTHOOK,
+        _event: u32,
+        hwnd: HWND,
+        id_object: i32,
+        id_child: i32,
+        _thread: u32,
+        _time: u32,
+    ) {
+        // Only real top-level window events; skip child/non-window objects here so
+        // the async side isn't flooded (it re-checks with is_top_level_app_window).
+        if hwnd.is_invalid() || id_object != OBJID_WINDOW || id_child != CHILDID_SELF {
+            return;
+        }
+        let raw = hwnd.0 as isize;
+        WIN_TX.with(|tx| {
+            if let Some(sender) = tx.borrow().as_ref() {
+                let _ = sender.try_send(raw); // drop on backpressure; rescan catches it
+            }
+        });
+    }
+
+    let (hwnd_tx, hwnd_rx) = tokio::sync::oneshot::channel::<isize>();
+
+    let spawned = std::thread::Builder::new()
+        .name("window-events".into())
+        .stack_size(256 * 1024)
+        .spawn(move || unsafe {
+            unsafe extern "system" fn wnd_proc(
+                hwnd: HWND,
+                msg: u32,
+                wparam: WPARAM,
+                lparam: LPARAM,
+            ) -> windows::Win32::Foundation::LRESULT {
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+            }
+
+            WIN_TX.with(|tx| *tx.borrow_mut() = Some(event_tx));
+
+            let class_name = windows::core::w!("PCAgentWindowMonitor");
+            let wc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(wnd_proc),
+                lpszClassName: class_name,
+                ..Default::default()
+            };
+            RegisterClassExW(&raw const wc);
+
+            let hwnd = match CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                class_name,
+                windows::core::w!("PC Agent Window Monitor"),
+                WINDOW_STYLE::default(),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                None,
+                None,
+            ) {
+                Ok(h) => h,
+                Err(e) => {
+                    error!("Failed to create window monitor window: {:?}", e);
+                    let _ = hwnd_tx.send(0);
+                    return;
+                }
+            };
+
+            let hook_fg = SetWinEventHook(
+                EVENT_SYSTEM_FOREGROUND,
+                EVENT_SYSTEM_FOREGROUND,
+                None,
+                Some(win_event_proc),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT,
+            );
+            let hook_show = SetWinEventHook(
+                EVENT_OBJECT_SHOW,
+                EVENT_OBJECT_SHOW,
+                None,
+                Some(win_event_proc),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT,
+            );
+            if hook_fg.is_invalid() || hook_show.is_invalid() {
+                error!("Failed to set window-event hooks");
+            }
+
+            let _ = hwnd_tx.send(hwnd.0 as isize);
+
+            let mut msg = MSG::default();
+            loop {
+                let ret = GetMessageW(&raw mut msg, None, 0, 0);
+                if !ret.as_bool() || ret.0 == -1 {
+                    break;
+                }
+                if msg.message == WM_USER {
+                    break;
+                }
+                let _ = TranslateMessage(&raw const msg);
+                DispatchMessageW(&raw const msg);
+            }
+
+            if !hook_fg.is_invalid() {
+                let _ = UnhookWinEvent(hook_fg);
+            }
+            if !hook_show.is_invalid() {
+                let _ = UnhookWinEvent(hook_show);
+            }
+            let _ = DestroyWindow(hwnd);
+        });
+
+    if let Err(e) = spawned {
+        error!("Failed to spawn window-events thread: {}", e);
+        return None;
+    }
+
+    // Shutdown waiter: posts WM_USER to unblock GetMessageW so the thread exits.
+    Some(tokio::spawn(async move {
+        use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_USER};
+        let hwnd_val = hwnd_rx.await.unwrap_or(0);
+        let _ = shutdown_rx.recv().await;
+        if hwnd_val != 0 {
+            let h = HWND(hwnd_val as *mut core::ffi::c_void);
+            // SAFETY: posting WM_USER to our own monitor window to break its pump.
+            unsafe {
+                let _ = PostMessageW(h, WM_USER, WPARAM(0), LPARAM(0));
+            }
+        }
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
