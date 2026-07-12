@@ -600,28 +600,43 @@ fn flag_set(f: &mut FeatureConfig, id: &str, v: bool) {
 
 /// Split an MQTT broker string into (host, port), defaulting the port to 1883.
 fn split_broker(broker: &str) -> (String, String) {
+    // Keep the scheme (ssl://, tcp://, ...) attached to the host field so a Save
+    // round-trip rebuilds the same string; only the host:port TAIL is split off.
+    // Counting ':' over the WHOLE broker would count the scheme's own colon and
+    // wrongly take the bare-IPv6 branch below - that misparse dumped the entire
+    // broker into the host field, and Save then re-appended a :port on every open
+    // (the ":8883:1883:1883:..." growth).
+    let scheme_len = ["ssl://", "tcp://", "wss://", "ws://"]
+        .iter()
+        .find(|s| broker.starts_with(**s))
+        .map_or(0, |s| s.len());
+    let (scheme, rest) = broker.split_at(scheme_len);
+
     // Bracketed IPv6 with port: `[::1]:1883`.
-    if broker.starts_with('[')
-        && let Some((host, port)) = broker.rsplit_once(':')
+    if rest.starts_with('[')
+        && let Some((host, port)) = rest.rsplit_once(':')
         && host.ends_with(']')
         && !port.is_empty()
         && port.bytes().all(|b| b.is_ascii_digit())
     {
-        return (host.to_owned(), port.to_owned());
+        return (format!("{scheme}{host}"), port.to_owned());
     }
     // A bare (unbracketed) IPv6 address has multiple ':' and no port - don't
     // misparse its last group as a port (e.g. `fe80::1`).
-    if broker.matches(':').count() > 1 {
-        return (broker.to_owned(), "1883".to_owned());
+    if rest.matches(':').count() > 1 {
+        return (format!("{scheme}{rest}"), String::new());
     }
     // Plain `host:port`.
-    if let Some((host, port)) = broker.rsplit_once(':')
+    if let Some((host, port)) = rest.rsplit_once(':')
         && !port.is_empty()
         && port.bytes().all(|b| b.is_ascii_digit())
     {
-        return (host.to_owned(), port.to_owned());
+        return (format!("{scheme}{host}"), port.to_owned());
     }
-    (broker.to_owned(), "1883".to_owned())
+    // No explicit port: leave it empty so Save writes host-only rather than
+    // fabricating one. The downstream parser fills the scheme default (8883 ssl
+    // / 1883 tcp).
+    (broker.to_owned(), String::new())
 }
 
 impl eframe::App for App {
@@ -2175,4 +2190,48 @@ fn switch_row(ui: &mut egui::Ui, title: &str, desc: &str, on: &mut bool) {
             toggle(ui, on);
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_broker;
+
+    /// Rebuild the broker the way Save does, to prove the host/port split
+    /// round-trips instead of appending a spurious :port each time.
+    fn rejoin(host: &str, port: &str) -> String {
+        if port.is_empty() {
+            host.to_owned()
+        } else {
+            format!("{host}:{port}")
+        }
+    }
+
+    #[test]
+    fn split_broker_roundtrips_schemed_broker() {
+        for broker in [
+            "ssl://homeassistant.local:8883",
+            "tcp://192.168.1.100:1883",
+            "tcp://localhost",
+            "ssl://mqtt.example.com",
+            "homeassistant.local:8883",
+        ] {
+            let (host, port) = split_broker(broker);
+            assert_eq!(rejoin(&host, &port), broker, "broker changed on round-trip");
+        }
+    }
+
+    #[test]
+    fn split_broker_extracts_scheme_host_port() {
+        let (host, port) = split_broker("ssl://homeassistant.local:8883");
+        assert_eq!(host, "ssl://homeassistant.local");
+        assert_eq!(port, "8883");
+    }
+
+    #[test]
+    fn split_broker_bare_ipv6_has_no_port() {
+        // Multiple ':' in the host tail is IPv6, not a port; must not fabricate one.
+        let (host, port) = split_broker("tcp://[fe80::1]");
+        assert_eq!(host, "tcp://[fe80::1]");
+        assert_eq!(port, "");
+    }
 }
