@@ -1070,9 +1070,16 @@ fn start_window_focus_monitor_linux(
     Some(tokio::spawn(async move {
         let _ = shutdown_rx.recv().await;
         stop.store(true, Ordering::Relaxed);
-        if let Some(mut c) = child_slot.lock().unwrap().take() {
-            let _ = c.kill();
-            let _ = c.wait();
+        // Take the child out (dropping the guard) BEFORE the await: an std
+        // MutexGuard held across .await is !Send.
+        let taken = child_slot.lock().unwrap().take();
+        if let Some(mut c) = taken {
+            // Reap off the async runtime: wait() blocks until the child dies.
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = c.kill();
+                let _ = c.wait();
+            })
+            .await;
         }
     }))
 }
