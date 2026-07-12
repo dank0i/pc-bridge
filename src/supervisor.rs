@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::info;
 use tokio::sync::broadcast;
@@ -146,6 +146,49 @@ const TASKS: &[TaskDef] = &[
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// How often the supervisor re-checks task health independent of config changes,
+/// so a sensor that died on its own is respawned within a bounded time.
+const RECONCILE_INTERVAL: Duration = Duration::from_mins(1);
+/// A task that finished within this long of being (re)spawned is failing fast.
+const FLAP_WINDOW: Duration = Duration::from_secs(10);
+/// How long to wait before respawning a flapping task, so a permanently-broken
+/// sensor doesn't hot-loop spawn->die->spawn.
+const FLAP_BACKOFF: Duration = Duration::from_mins(1);
+
+/// Whether to (re)spawn a wanted-but-not-running task this pass, and whether to
+/// open a flap-backoff window. Pure so the flap logic is unit-testable.
+#[derive(Debug, PartialEq)]
+struct RespawnPlan {
+    spawn: bool,
+    start_backoff: bool,
+}
+
+fn respawn_plan(
+    was_finished: bool,
+    since_spawn: Option<Duration>,
+    backoff_active: bool,
+) -> RespawnPlan {
+    // A task that died within FLAP_WINDOW of spawning is failing fast: skip this
+    // pass and open a backoff window.
+    if was_finished && since_spawn.is_some_and(|d| d < FLAP_WINDOW) {
+        return RespawnPlan {
+            spawn: false,
+            start_backoff: true,
+        };
+    }
+    // Respect an active backoff window opened by an earlier flap.
+    if backoff_active {
+        return RespawnPlan {
+            spawn: false,
+            start_backoff: false,
+        };
+    }
+    RespawnPlan {
+        spawn: true,
+        start_backoff: false,
+    }
+}
+
 pub struct Supervisor {
     state: Arc<AppState>,
     /// task name -> (handle, cancel sender)
@@ -153,6 +196,10 @@ pub struct Supervisor {
     /// task name -> times respawned after finishing on its own (feeds the
     /// bridge_health attributes; a climbing count flags a flapping sensor).
     restarts: HashMap<&'static str, u32>,
+    /// task name -> when it was last (re)spawned, for the flap-backoff check.
+    spawned_at: HashMap<&'static str, Instant>,
+    /// task name -> respawn is deferred until this instant (flap backoff).
+    backoff_until: HashMap<&'static str, Instant>,
     /// Last serialized bridge_health attributes, to change-gate the retained
     /// attributes topic (task states + MB-quantized RSS change rarely).
     last_health_attrs: String,
@@ -164,6 +211,8 @@ impl Supervisor {
             state,
             running: HashMap::new(),
             restarts: HashMap::new(),
+            spawned_at: HashMap::new(),
+            backoff_until: HashMap::new(),
             last_health_attrs: String::new(),
         }
     }
@@ -208,9 +257,30 @@ impl Supervisor {
                     if was_finished {
                         *self.restarts.entry(def.name).or_insert(0) += 1;
                     }
+                    let now = Instant::now();
+                    let since_spawn = self
+                        .spawned_at
+                        .get(def.name)
+                        .map(|t| now.duration_since(*t));
+                    let backoff_active = self.backoff_until.get(def.name).is_some_and(|t| *t > now);
+                    let plan = respawn_plan(was_finished, since_spawn, backoff_active);
+                    if plan.start_backoff {
+                        self.backoff_until.insert(def.name, now + FLAP_BACKOFF);
+                        info!(
+                            "Supervisor: {} died within {}s of spawn; backing off {}s",
+                            def.name,
+                            FLAP_WINDOW.as_secs(),
+                            FLAP_BACKOFF.as_secs()
+                        );
+                    }
+                    if !plan.spawn {
+                        continue;
+                    }
+                    self.backoff_until.remove(def.name);
                     let (tx, _) = broadcast::channel(1);
                     let handle = (def.spawn)(Arc::clone(&self.state), tx.clone());
                     self.running.insert(def.name, (handle, tx));
+                    self.spawned_at.insert(def.name, now);
                     spawned_any = true;
                     info!("Supervisor: started {}", def.name);
                 }
@@ -257,6 +327,12 @@ impl Supervisor {
         health_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         health_tick.tick().await; // consume the interval's immediate first tick
 
+        // Periodic reconcile so a task that died on its own (or a flap-backoff
+        // window that has elapsed) is respawned even without a config change.
+        let mut reconcile_tick = tokio::time::interval(RECONCILE_INTERVAL);
+        reconcile_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        reconcile_tick.tick().await; // consume the immediate first tick
+
         loop {
             tokio::select! {
                 biased;
@@ -266,6 +342,9 @@ impl Supervisor {
                     if matches!(r, Ok(()) | Err(broadcast::error::RecvError::Lagged(_))) {
                         self.reconcile().await;
                     }
+                }
+                _ = reconcile_tick.tick() => {
+                    self.reconcile().await;
                 }
                 _ = health_tick.tick() => {
                     self.publish_bridge_health().await;
@@ -381,6 +460,42 @@ fn agent_rss_bytes() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_respawn_plan() {
+        // Fresh start (never spawned): spawn, no backoff.
+        assert_eq!(
+            respawn_plan(false, None, false),
+            RespawnPlan {
+                spawn: true,
+                start_backoff: false
+            }
+        );
+        // Finished long after spawn: normal restart, spawn.
+        assert_eq!(
+            respawn_plan(true, Some(Duration::from_secs(30)), false),
+            RespawnPlan {
+                spawn: true,
+                start_backoff: false
+            }
+        );
+        // Finished within the flap window: skip and open a backoff window.
+        assert_eq!(
+            respawn_plan(true, Some(Duration::from_secs(2)), false),
+            RespawnPlan {
+                spawn: false,
+                start_backoff: true
+            }
+        );
+        // Backoff still active (from an earlier flap): skip, don't re-open.
+        assert_eq!(
+            respawn_plan(false, Some(Duration::from_secs(2)), true),
+            RespawnPlan {
+                spawn: false,
+                start_backoff: false
+            }
+        );
+    }
 
     #[test]
     fn health_attrs_include_version_and_tasks() {
