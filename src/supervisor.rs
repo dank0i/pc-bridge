@@ -149,43 +149,38 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// How often the supervisor re-checks task health independent of config changes,
 /// so a sensor that died on its own is respawned within a bounded time.
 const RECONCILE_INTERVAL: Duration = Duration::from_mins(1);
-/// A task that finished within this long of being (re)spawned is failing fast.
-const FLAP_WINDOW: Duration = Duration::from_secs(10);
-/// How long to wait before respawning a flapping task, so a permanently-broken
-/// sensor doesn't hot-loop spawn->die->spawn.
-const FLAP_BACKOFF: Duration = Duration::from_mins(1);
+/// Upper bound on the escalating respawn backoff, so a permanently-broken sensor
+/// is retried occasionally without hammering (respawn + log line) every reconcile.
+const BACKOFF_CAP: Duration = Duration::from_mins(5);
 
-/// Whether to (re)spawn a wanted-but-not-running task this pass, and whether to
-/// open a flap-backoff window. Pure so the flap logic is unit-testable.
+/// Whether to (re)spawn a wanted-but-not-running task this pass, and how long to
+/// defer the NEXT respawn if it keeps dying. Detection is reconcile-paced (a dead
+/// task is only noticed on the periodic tick), so flapping is measured by how many
+/// consecutive reconciles have found the task dead, not by wall-clock-since-spawn.
+/// Pure so the logic is unit-testable.
 #[derive(Debug, PartialEq)]
 struct RespawnPlan {
     spawn: bool,
-    start_backoff: bool,
+    /// When `Some`, open a backoff window of this length before the next respawn.
+    backoff: Option<Duration>,
 }
 
-fn respawn_plan(
-    was_finished: bool,
-    since_spawn: Option<Duration>,
-    backoff_active: bool,
-) -> RespawnPlan {
-    // A task that died within FLAP_WINDOW of spawning is failing fast: skip this
-    // pass and open a backoff window.
-    if was_finished && since_spawn.is_some_and(|d| d < FLAP_WINDOW) {
-        return RespawnPlan {
-            spawn: false,
-            start_backoff: true,
-        };
-    }
-    // Respect an active backoff window opened by an earlier flap.
+fn respawn_plan(consecutive_fails: u32, backoff_active: bool) -> RespawnPlan {
+    // A backoff window opened by an earlier repeated failure hasn't elapsed yet.
     if backoff_active {
         return RespawnPlan {
             spawn: false,
-            start_backoff: false,
+            backoff: None,
         };
     }
+    // Respawn now. A task that has already died repeatedly opens an escalating
+    // (capped) backoff so its next death waits longer instead of retrying every
+    // reconcile forever; a one-off death (fails <= 1) respawns with no backoff.
+    let backoff =
+        (consecutive_fails >= 2).then(|| (RECONCILE_INTERVAL * consecutive_fails).min(BACKOFF_CAP));
     RespawnPlan {
         spawn: true,
-        start_backoff: false,
+        backoff,
     }
 }
 
@@ -196,9 +191,10 @@ pub struct Supervisor {
     /// task name -> times respawned after finishing on its own (feeds the
     /// bridge_health attributes; a climbing count flags a flapping sensor).
     restarts: HashMap<&'static str, u32>,
-    /// task name -> when it was last (re)spawned, for the flap-backoff check.
-    spawned_at: HashMap<&'static str, Instant>,
-    /// task name -> respawn is deferred until this instant (flap backoff).
+    /// task name -> reconciles in a row that found it dead, reset when it's seen
+    /// alive again. Drives the escalating respawn backoff.
+    consecutive_fails: HashMap<&'static str, u32>,
+    /// task name -> respawn is deferred until this instant (escalating backoff).
     backoff_until: HashMap<&'static str, Instant>,
     /// Last serialized bridge_health attributes, to change-gate the retained
     /// attributes topic (task states + MB-quantized RSS change rarely).
@@ -211,7 +207,7 @@ impl Supervisor {
             state,
             running: HashMap::new(),
             restarts: HashMap::new(),
-            spawned_at: HashMap::new(),
+            consecutive_fails: HashMap::new(),
             backoff_until: HashMap::new(),
             last_health_attrs: String::new(),
         }
@@ -253,36 +249,41 @@ impl Supervisor {
             match (want, have) {
                 (true, false) => {
                     // Respawning a task that finished on its own is a restart, not
-                    // an initial start - count it for the health attributes.
+                    // an initial start - count it for the health attributes and the
+                    // escalating backoff.
                     if was_finished {
                         *self.restarts.entry(def.name).or_insert(0) += 1;
+                        *self.consecutive_fails.entry(def.name).or_insert(0) += 1;
                     }
                     let now = Instant::now();
-                    let since_spawn = self
-                        .spawned_at
-                        .get(def.name)
-                        .map(|t| now.duration_since(*t));
                     let backoff_active = self.backoff_until.get(def.name).is_some_and(|t| *t > now);
-                    let plan = respawn_plan(was_finished, since_spawn, backoff_active);
-                    if plan.start_backoff {
-                        self.backoff_until.insert(def.name, now + FLAP_BACKOFF);
-                        info!(
-                            "Supervisor: {} died within {}s of spawn; backing off {}s",
-                            def.name,
-                            FLAP_WINDOW.as_secs(),
-                            FLAP_BACKOFF.as_secs()
-                        );
-                    }
+                    let fails = self.consecutive_fails.get(def.name).copied().unwrap_or(0);
+                    let plan = respawn_plan(fails, backoff_active);
                     if !plan.spawn {
                         continue;
                     }
-                    self.backoff_until.remove(def.name);
+                    if let Some(d) = plan.backoff {
+                        self.backoff_until.insert(def.name, now + d);
+                        info!(
+                            "Supervisor: {} has died {} times in a row; backing off {}s before the next respawn",
+                            def.name,
+                            fails,
+                            d.as_secs()
+                        );
+                    } else {
+                        self.backoff_until.remove(def.name);
+                    }
                     let (tx, _) = broadcast::channel(1);
                     let handle = (def.spawn)(Arc::clone(&self.state), tx.clone());
                     self.running.insert(def.name, (handle, tx));
-                    self.spawned_at.insert(def.name, now);
                     spawned_any = true;
                     info!("Supervisor: started {}", def.name);
+                }
+                (true, true) => {
+                    // Alive and wanted: it survived, so clear any failure/backoff
+                    // state accumulated by earlier deaths.
+                    self.consecutive_fails.remove(def.name);
+                    self.backoff_until.remove(def.name);
                 }
                 (false, true) => {
                     if let Some((handle, tx)) = self.running.remove(def.name) {
@@ -463,36 +464,44 @@ mod tests {
 
     #[test]
     fn test_respawn_plan() {
-        // Fresh start (never spawned): spawn, no backoff.
+        // Healthy first start (no prior failures): spawn, no backoff.
         assert_eq!(
-            respawn_plan(false, None, false),
+            respawn_plan(0, false),
             RespawnPlan {
                 spawn: true,
-                start_backoff: false
+                backoff: None
             }
         );
-        // Finished long after spawn: normal restart, spawn.
+        // First death: respawn immediately, still no backoff.
         assert_eq!(
-            respawn_plan(true, Some(Duration::from_secs(30)), false),
+            respawn_plan(1, false),
             RespawnPlan {
                 spawn: true,
-                start_backoff: false
+                backoff: None
             }
         );
-        // Finished within the flap window: skip and open a backoff window.
+        // Repeated deaths: respawn but open an escalating backoff for the next one.
         assert_eq!(
-            respawn_plan(true, Some(Duration::from_secs(2)), false),
+            respawn_plan(2, false),
             RespawnPlan {
-                spawn: false,
-                start_backoff: true
+                spawn: true,
+                backoff: Some(RECONCILE_INTERVAL * 2)
             }
         );
-        // Backoff still active (from an earlier flap): skip, don't re-open.
+        // Backoff window still active: skip this pass, don't respawn.
         assert_eq!(
-            respawn_plan(false, Some(Duration::from_secs(2)), true),
+            respawn_plan(3, true),
             RespawnPlan {
                 spawn: false,
-                start_backoff: false
+                backoff: None
+            }
+        );
+        // Escalation is capped so a permanently-broken task is still retried.
+        assert_eq!(
+            respawn_plan(100, false),
+            RespawnPlan {
+                spawn: true,
+                backoff: Some(BACKOFF_CAP)
             }
         );
     }
