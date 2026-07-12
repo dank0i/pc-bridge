@@ -17,6 +17,16 @@ use tokio::time::Duration;
 
 use crate::AppState;
 
+/// Message from the filesystem-watcher callback to the sensor loop.
+enum FsMsg {
+    /// An ACF manifest changed - rescan the updating set.
+    Changed,
+    /// The watch backend reported an error. A ReadDirectoryChangesW buffer
+    /// overflow (large multi-game download) can silently kill the event stream,
+    /// so this asks the loop to recreate the watcher and force a rescan.
+    WatcherError,
+}
+
 // Steam appmanifest StateFlags bits (Valve EAppState; canonical values from the
 // reverse-engineered open-steamworks AppsCommon.h). A game is settled/current
 // iff StateFlags == FullyInstalled (0x4); any bit in STATE_UPDATE_MASK below
@@ -124,10 +134,13 @@ impl SteamSensor {
         // fallback for when the watcher can't be created at all. We do NOT tie the
         // watch to steam.exe lifetime because steamservice.exe/steamcmd.exe can
         // rewrite manifests independently.
-        let (fs_tx, mut fs_rx) = mpsc::channel::<()>(16);
-        // Held for its lifetime (dropping it stops the watch); read once below.
-        let watcher = self.setup_fs_watcher(&fs_tx);
-        let using_watcher = watcher.is_some();
+        let (fs_tx, mut fs_rx) = mpsc::channel::<FsMsg>(16);
+        // Held for its lifetime (dropping it stops the watch). Mutable so a watch
+        // error can drop and recreate it; if recreation fails, using_watcher flips
+        // to false and the poll fallback below takes over dynamically.
+        let mut watcher = self.setup_fs_watcher(&fs_tx);
+        let mut using_watcher = watcher.is_some();
+        let mut watcher_error_logged = false;
 
         if using_watcher {
             info!("Steam sensor using filesystem watcher (event-driven)");
@@ -162,10 +175,34 @@ impl SteamSensor {
                         last_sig = self.updating_signature();
                     }
                 }
-                // ACF change: re-read ground truth, publish only if the updating
-                // set actually changed (skip the redundant retained republish).
-                Some(()) = fs_rx.recv() => {
-                    debug!("ACF change detected, scanning");
+                // ACF change or watch error: re-read ground truth, publish only if
+                // the updating set actually changed (skip the redundant republish).
+                Some(msg) = fs_rx.recv() => {
+                    match msg {
+                        FsMsg::Changed => debug!("ACF change detected, scanning"),
+                        FsMsg::WatcherError => {
+                            // Recreate the watcher: an overflow error means the
+                            // stream is likely dead. Drop the old one FIRST so its
+                            // handle is released before we re-add the watches.
+                            if !watcher_error_logged {
+                                warn!("Steam watcher error; recreating watcher");
+                                watcher_error_logged = true;
+                            }
+                            drop(watcher.take());
+                            watcher = self.setup_fs_watcher(&fs_tx);
+                            using_watcher = watcher.is_some();
+                            if using_watcher {
+                                watcher_error_logged = false;
+                            } else {
+                                warn!(
+                                    "Steam watcher recreation failed, polling every {}s",
+                                    base_interval
+                                );
+                            }
+                        }
+                    }
+                    // Both cases force an immediate rescan to catch anything the
+                    // watcher missed during the fault window.
                     self.do_full_scan().await;
                     let sig = self.updating_signature();
                     if sig != last_sig {
@@ -189,25 +226,33 @@ impl SteamSensor {
 
     /// Set up a filesystem watcher on all Steam library folders.
     /// Returns the watcher handle (must be kept alive) or None if setup failed.
-    fn setup_fs_watcher(&self, fs_tx: &mpsc::Sender<()>) -> Option<notify::RecommendedWatcher> {
+    fn setup_fs_watcher(&self, fs_tx: &mpsc::Sender<FsMsg>) -> Option<notify::RecommendedWatcher> {
         use notify::{Event, EventKind, RecursiveMode, Watcher};
 
         let tx = fs_tx.clone();
         let mut watcher =
             match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
-                if let Ok(event) = res {
-                    // Only react to ACF file modifications/creations
-                    let is_acf_change = matches!(
-                        event.kind,
-                        EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                    ) && event.paths.iter().any(|p| {
-                        p.extension()
-                            .is_some_and(|ext| ext.eq_ignore_ascii_case("acf"))
-                    });
+                match res {
+                    Ok(event) => {
+                        // Only react to ACF file modifications/creations
+                        let is_acf_change = matches!(
+                            event.kind,
+                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                        ) && event.paths.iter().any(|p| {
+                            p.extension()
+                                .is_some_and(|ext| ext.eq_ignore_ascii_case("acf"))
+                        });
 
-                    if is_acf_change {
-                        // Non-blocking send - if channel is full, skip (we'll catch it next time)
-                        let _ = tx.try_send(());
+                        if is_acf_change {
+                            // Non-blocking send - if full, skip (caught next scan).
+                            let _ = tx.try_send(FsMsg::Changed);
+                        }
+                    }
+                    Err(_) => {
+                        // A backend error (notably a ReadDirectoryChangesW buffer
+                        // overflow) can silently kill the stream; ask the loop to
+                        // recreate the watcher rather than freeze forever.
+                        let _ = tx.try_send(FsMsg::WatcherError);
                     }
                 }
             }) {
