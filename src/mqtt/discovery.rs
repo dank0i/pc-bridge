@@ -235,18 +235,21 @@ impl MqttClient {
                 None,
             )
             .await;
-
-            // Bridge health diagnostics (uptime in seconds, version in attributes)
-            self.register_sensor_with_attributes(
-                device,
-                "bridge_health",
-                "Bridge Health",
-                "mdi:heart-pulse",
-                Some("duration"),
-                Some("s"),
-            )
-            .await;
         }
+
+        // Bridge health is the HA launch gate's live-ping, so it is ALWAYS
+        // registered (and published by the always-on supervisor task), regardless
+        // of the cpu/memory/active_window features. Uptime in seconds as state;
+        // version, task states, and agent RSS in the attributes.
+        self.register_sensor_with_attributes(
+            device,
+            "bridge_health",
+            "Bridge Health",
+            "mdi:heart-pulse",
+            Some("duration"),
+            Some("s"),
+        )
+        .await;
 
         // Steam update sensor - no availability so updates persist while PC is off/asleep
         if config.features.steam_updates {
@@ -1084,7 +1087,9 @@ fn feature_entities(config: &Config) -> Vec<(&'static str, &'static str, bool)> 
         ("sensor", "active_window", f.active_window),
         ("sensor", "battery_level", system_any),
         ("sensor", "battery_charging", system_any),
-        ("sensor", "bridge_health", system_any),
+        // bridge_health is always registered (the launch-gate live-ping), so it
+        // must never be torn down as a disabled entity.
+        ("sensor", "bridge_health", true),
         ("sensor", "steam_updating", f.steam_updates),
         ("sensor", "gpu_usage", f.gpu_sensor),
         ("sensor", "network_throughput", f.network_sensor),
@@ -1212,5 +1217,18 @@ mod tests {
         config.features.cpu_sensor = true;
         assert_eq!(enabled_of(&config, "sensor", "battery_level"), Some(true));
         assert_eq!(enabled_of(&config, "sensor", "bridge_health"), Some(true));
+    }
+
+    #[test]
+    fn bridge_health_always_registered() {
+        // bridge_health is the launch-gate live-ping: it must stay registered
+        // (never torn down) even with cpu/memory/active_window all off.
+        let mut config = Config::default();
+        config.features.cpu_sensor = false;
+        config.features.memory_sensor = false;
+        config.features.active_window = false;
+        assert_eq!(enabled_of(&config, "sensor", "bridge_health"), Some(true));
+        // battery still follows the system gate and is torn down.
+        assert_eq!(enabled_of(&config, "sensor", "battery_level"), Some(false));
     }
 }

@@ -144,10 +144,18 @@ const TASKS: &[TaskDef] = &[
     },
 ];
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub struct Supervisor {
     state: Arc<AppState>,
     /// task name -> (handle, cancel sender)
     running: HashMap<&'static str, (JoinHandle<()>, broadcast::Sender<()>)>,
+    /// task name -> times respawned after finishing on its own (feeds the
+    /// bridge_health attributes; a climbing count flags a flapping sensor).
+    restarts: HashMap<&'static str, u32>,
+    /// Last serialized bridge_health attributes, to change-gate the retained
+    /// attributes topic (task states + MB-quantized RSS change rarely).
+    last_health_attrs: String,
 }
 
 impl Supervisor {
@@ -155,6 +163,8 @@ impl Supervisor {
         Self {
             state,
             running: HashMap::new(),
+            restarts: HashMap::new(),
+            last_health_attrs: String::new(),
         }
     }
 
@@ -181,9 +191,11 @@ impl Supervisor {
             // "In the map" is not "alive": a task that returned on its own (e.g.
             // an init failure early-return) leaves a finished handle. Treat that
             // as not-running so it can be respawned while still wanted.
+            let mut was_finished = false;
             let have = match self.running.get(def.name) {
                 Some((h, _)) if h.is_finished() => {
                     self.running.remove(def.name);
+                    was_finished = true;
                     false
                 }
                 Some(_) => true,
@@ -191,6 +203,11 @@ impl Supervisor {
             };
             match (want, have) {
                 (true, false) => {
+                    // Respawning a task that finished on its own is a restart, not
+                    // an initial start - count it for the health attributes.
+                    if was_finished {
+                        *self.restarts.entry(def.name).or_insert(0) += 1;
+                    }
                     let (tx, _) = broadcast::channel(1);
                     let handle = (def.spawn)(Arc::clone(&self.state), tx.clone());
                     self.running.insert(def.name, (handle, tx));
@@ -231,6 +248,15 @@ impl Supervisor {
         // Initial start of everything currently enabled.
         self.reconcile().await;
 
+        // bridge_health is the HA launch gate's live-ping and must be published
+        // regardless of which sensor features are on, so it lives here in the
+        // always-on supervisor rather than the (feature-gated) system sensor.
+        // Publish an immediate heartbeat, then every 60s.
+        self.publish_bridge_health().await;
+        let mut health_tick = tokio::time::interval(Duration::from_mins(1));
+        health_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        health_tick.tick().await; // consume the interval's immediate first tick
+
         loop {
             tokio::select! {
                 biased;
@@ -240,6 +266,9 @@ impl Supervisor {
                     if matches!(r, Ok(()) | Err(broadcast::error::RecvError::Lagged(_))) {
                         self.reconcile().await;
                     }
+                }
+                _ = health_tick.tick() => {
+                    self.publish_bridge_health().await;
                 }
             }
         }
@@ -259,5 +288,120 @@ impl Supervisor {
             }
         })
         .await;
+    }
+
+    /// Publish the bridge_health heartbeat: uptime seconds as state (published
+    /// every tick for liveness), and version + per-task states + agent RSS as
+    /// change-gated attributes.
+    async fn publish_bridge_health(&mut self) {
+        let uptime_secs = self.state.start_time.elapsed().as_secs();
+
+        let tasks: Vec<serde_json::Value> = TASKS
+            .iter()
+            .map(|t| {
+                let running = self
+                    .running
+                    .get(t.name)
+                    .is_some_and(|(h, _)| !h.is_finished());
+                serde_json::json!({
+                    "name": t.name,
+                    "running": running,
+                    "restarts": self.restarts.get(t.name).copied().unwrap_or(0),
+                })
+            })
+            .collect();
+
+        let attrs = build_health_attrs(&tasks, agent_rss_bytes());
+
+        self.state
+            .mqtt
+            .publish_sensor("bridge_health", &uptime_secs.to_string())
+            .await;
+
+        let serialized = attrs.to_string();
+        if serialized != self.last_health_attrs {
+            self.state
+                .mqtt
+                .publish_sensor_attributes("bridge_health", &attrs)
+                .await;
+            self.last_health_attrs = serialized;
+        }
+    }
+}
+
+/// Assemble the bridge_health attributes. RSS is quantized to whole MB so a
+/// few-KB jitter doesn't churn the retained attributes topic.
+fn build_health_attrs(tasks: &[serde_json::Value], rss_bytes: Option<u64>) -> serde_json::Value {
+    let mut attrs = serde_json::json!({
+        "version": VERSION,
+        "tasks": tasks,
+    });
+    if let Some(bytes) = rss_bytes {
+        attrs["memory_mb"] = serde_json::json!(bytes / (1024 * 1024));
+    }
+    attrs
+}
+
+/// Resident set size of this process in bytes, or None where unsupported.
+#[cfg(windows)]
+fn agent_rss_bytes() -> Option<u64> {
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+
+    let mut counters = PROCESS_MEMORY_COUNTERS::default();
+    let cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    // SAFETY: counters is a valid, correctly-sized out-buffer; the pseudo-handle
+    // from GetCurrentProcess needs no close.
+    let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, cb).is_ok() };
+    ok.then_some(counters.WorkingSetSize as u64)
+}
+
+/// Resident set size of this process in bytes, or None where unsupported.
+#[cfg(target_os = "linux")]
+fn agent_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    // VmRSS is reported in kB.
+    let kb: u64 = status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmRSS:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    Some(kb * 1024)
+}
+
+/// Resident set size of this process in bytes, or None where unsupported
+/// (e.g. macOS dev builds - the agent ships only for Windows and Linux).
+#[cfg(not(any(windows, target_os = "linux")))]
+fn agent_rss_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn health_attrs_include_version_and_tasks() {
+        let tasks = vec![serde_json::json!({
+            "name": "gpu",
+            "running": true,
+            "restarts": 2,
+        })];
+        let attrs = build_health_attrs(&tasks, None);
+        assert_eq!(attrs["version"], VERSION);
+        assert_eq!(attrs["tasks"][0]["name"], "gpu");
+        assert_eq!(attrs["tasks"][0]["restarts"], 2);
+        // No RSS reading -> memory_mb omitted, not null.
+        assert!(attrs.get("memory_mb").is_none());
+    }
+
+    #[test]
+    fn health_attrs_quantize_rss_to_mb() {
+        // 5 MB + 700 KB rounds down to 5 MB (whole-MB quantization).
+        let bytes = 5 * 1024 * 1024 + 700 * 1024;
+        let attrs = build_health_attrs(&[], Some(bytes));
+        assert_eq!(attrs["memory_mb"], 5);
     }
 }

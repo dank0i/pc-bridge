@@ -24,7 +24,6 @@ struct PrevSystemValues {
     mem: String,
     battery_level: String,
     battery_charging: String,
-    health_uptime: u64,
 }
 
 impl PrevSystemValues {
@@ -34,7 +33,6 @@ impl PrevSystemValues {
             mem: String::new(),
             battery_level: String::new(),
             battery_charging: String::new(),
-            health_uptime: 0,
         }
     }
 }
@@ -115,9 +113,6 @@ impl SystemSensor {
         // Initial publish (force all by using empty prev_vals)
         self.publish_all(&mut prev_cpu, &mut prev_vals).await;
 
-        // Track health publish separately (once per ~60s)
-        let mut last_health_publish = tokio::time::Instant::now();
-
         info!("System sensor started (CPU/memory: polled, battery/active_window: event-driven)");
 
         loop {
@@ -166,11 +161,6 @@ impl SystemSensor {
                         // Keep prev_cpu fresh so re-enabling doesn't compute a CPU
                         // delta spanning the whole disabled gap.
                         prev_cpu = get_cpu_times();
-                    }
-                    // Bridge health diagnostics (~every 60s), driven off this tick.
-                    if last_health_publish.elapsed() >= Duration::from_mins(1) {
-                        last_health_publish = tokio::time::Instant::now();
-                        self.publish_health(&mut prev_vals).await;
                     }
                 }
                 _ = mem_tick.tick() => {
@@ -232,9 +222,6 @@ impl SystemSensor {
         self.publish_cpu(prev_cpu, prev).await;
         self.publish_memory(prev).await;
 
-        // Bridge health (initial publish)
-        self.publish_health(prev).await;
-
         // Battery (event-driven, but publish initial state)
         if let Some((percent, charging)) = get_battery_status() {
             let level_str = percent.to_string();
@@ -255,26 +242,6 @@ impl SystemSensor {
             }
         }
         // active_window's initial publish now lives in ActiveWindowSensor.
-    }
-
-    /// Publish bridge health diagnostics (uptime, version)
-    async fn publish_health(&self, prev: &mut PrevSystemValues) {
-        let uptime_secs = self.state.start_time.elapsed().as_secs();
-        // Only publish when uptime actually changed (avoids duplicate on rapid calls)
-        if uptime_secs != prev.health_uptime {
-            self.state
-                .mqtt
-                .publish_sensor("bridge_health", &uptime_secs.to_string())
-                .await;
-            let attrs = serde_json::json!({
-                "version": env!("CARGO_PKG_VERSION"),
-            });
-            self.state
-                .mqtt
-                .publish_sensor_attributes("bridge_health", &attrs)
-                .await;
-            prev.health_uptime = uptime_secs;
-        }
     }
 }
 
