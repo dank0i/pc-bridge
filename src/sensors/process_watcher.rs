@@ -642,10 +642,12 @@ fn process_alive_with_name(pid: u32, expected_name: &str) -> bool {
 // learns a game started from its top-level window appearing (SetWinEventHook,
 // non-admin, event-driven), resolves the window to its process, and admits it to
 // ProcessState only if a consumer WATCHES it (a game / custom ProcessExists /
-// screensaver) - so browsers and the shell never enter the set. Stop is a cheap
-// per-PID liveness probe over the tiny tracked set (not a full enumeration).
-// Headless watched patterns (no window) are found by a targeted snapshot that
-// runs only while the headless set is non-empty.
+// screensaver) - so browsers and the shell never enter the set. Stop is also
+// event-driven: a dedicated thread WaitForMultipleObjects on the admitted games'
+// SYNCHRONIZE handles (plus a wake event), so a game closing signals instantly
+// with no polling. Headless watched patterns (no window) are the one exception -
+// they have no window to hook, so a targeted snapshot finds their start/stop, and
+// that loop only runs while the headless set is non-empty.
 //
 // UNVERIFIED off Windows: this is type-checked via cargo xwin but the WinEvent /
 // OpenProcess / message-pump behavior needs the live-box checklist in the plan
@@ -666,6 +668,166 @@ impl ProcessWatcher {
     }
 }
 
+/// A Windows HANDLE we own and will close, wrapped so it can cross the
+/// spawn_blocking / channel boundary to the exit-watcher thread. Sound because
+/// exactly one place ever holds and closes each handle (the exit thread).
+#[cfg(windows)]
+struct SendHandle(windows::Win32::Foundation::HANDLE);
+#[cfg(windows)]
+unsafe impl Send for SendHandle {}
+
+/// Command from the async loop to the exit-watcher thread.
+#[cfg(windows)]
+enum ExitCmd {
+    /// Watch this PID's SYNCHRONIZE handle for exit.
+    Watch(u32, SendHandle),
+    /// Stop watching (game removed from config); closes the handle.
+    Unwatch(u32),
+    /// Tear down the thread and close all handles.
+    Shutdown,
+}
+
+/// Handle to the exit-watcher thread. Sending a command also wakes the thread out
+/// of WaitForMultipleObjects via the auto-reset wake event.
+#[cfg(windows)]
+struct ExitWatcher {
+    cmd_tx: std::sync::mpsc::Sender<ExitCmd>,
+    wake: isize, // wake event HANDLE as isize (Send)
+}
+
+#[cfg(windows)]
+impl ExitWatcher {
+    fn send(&self, cmd: ExitCmd) {
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::Threading::SetEvent;
+        if self.cmd_tx.send(cmd).is_err() {
+            return;
+        }
+        // SAFETY: signaling our own auto-reset event to break the wait.
+        unsafe {
+            let _ = SetEvent(HANDLE(self.wake as *mut core::ffi::c_void));
+        }
+    }
+    fn watch(&self, pid: u32, handle: SendHandle) {
+        self.send(ExitCmd::Watch(pid, handle));
+    }
+    fn unwatch(&self, pid: u32) {
+        self.send(ExitCmd::Unwatch(pid));
+    }
+    fn shutdown(&self) {
+        self.send(ExitCmd::Shutdown);
+    }
+}
+
+/// Spawn the dedicated exit-watcher thread. It WaitForMultipleObjects over the
+/// wake event (index 0) plus each watched game's SYNCHRONIZE handle; a game handle
+/// signaling means that PID exited, reported on `exited_tx`. One thread owns every
+/// handle and closes it, so there is no cross-thread unregister/close race.
+#[cfg(windows)]
+fn spawn_exit_watcher(exited_tx: mpsc::Sender<u32>) -> Option<ExitWatcher> {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForMultipleObjects};
+    // Win32 MAXIMUM_WAIT_OBJECTS (wake event + up to 63 process handles).
+    const MAXIMUM_WAIT_OBJECTS: usize = 64;
+
+    // Auto-reset, initially unsignaled wake event.
+    // SAFETY: standard event creation; handle is closed on thread exit.
+    let wake = match unsafe { CreateEventW(None, false, false, None) } {
+        Ok(h) => h,
+        Err(e) => {
+            error!("Exit watcher: CreateEventW failed: {:?}", e);
+            return None;
+        }
+    };
+    let wake_isize = wake.0 as isize;
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<ExitCmd>();
+
+    let spawned = std::thread::Builder::new()
+        .name("proc-exit".into())
+        .stack_size(128 * 1024)
+        .spawn(move || {
+            // Reconstruct the wake HANDLE inside the thread (HANDLE isn't Send, so
+            // only its isize crossed the boundary). handles[0] is the wake event;
+            // handles[1..] parallel pids[..].
+            let mut handles: Vec<HANDLE> = vec![HANDLE(wake_isize as *mut core::ffi::c_void)];
+            let mut pids: Vec<u32> = Vec::new();
+            let mut stop = false;
+            while !stop {
+                // SAFETY: waiting on our own event + process handles we own.
+                let r = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
+                if r == WAIT_FAILED {
+                    error!("Exit watcher: WaitForMultipleObjects failed");
+                    break;
+                }
+                let idx = (r.0 - WAIT_OBJECT_0.0) as usize;
+                if idx == 0 {
+                    // Wake: drain commands.
+                    while let Ok(cmd) = cmd_rx.try_recv() {
+                        match cmd {
+                            ExitCmd::Watch(pid, h) => {
+                                if handles.len() < MAXIMUM_WAIT_OBJECTS {
+                                    handles.push(h.0);
+                                    pids.push(pid);
+                                } else {
+                                    warn!(
+                                        "Exit watcher full ({} handles); not watching PID {}",
+                                        handles.len(),
+                                        pid
+                                    );
+                                    // SAFETY: dropping a handle we won't track.
+                                    unsafe {
+                                        let _ = CloseHandle(h.0);
+                                    }
+                                }
+                            }
+                            ExitCmd::Unwatch(pid) => {
+                                if let Some(i) = pids.iter().position(|p| *p == pid) {
+                                    // SAFETY: closing the handle we opened for this pid.
+                                    unsafe {
+                                        let _ = CloseHandle(handles[i + 1]);
+                                    }
+                                    handles.remove(i + 1);
+                                    pids.remove(i);
+                                }
+                            }
+                            ExitCmd::Shutdown => stop = true,
+                        }
+                    }
+                } else if idx <= pids.len() {
+                    // A watched process exited.
+                    let pid = pids[idx - 1];
+                    // SAFETY: closing the exited process's handle.
+                    unsafe {
+                        let _ = CloseHandle(handles[idx]);
+                    }
+                    handles.remove(idx);
+                    pids.remove(idx - 1);
+                    let _ = exited_tx.try_send(pid);
+                }
+            }
+            // Close every remaining handle, including the wake event at index 0.
+            for h in &handles {
+                // SAFETY: final cleanup of handles this thread exclusively owns.
+                unsafe {
+                    let _ = CloseHandle(*h);
+                }
+            }
+        });
+
+    if let Err(e) = spawned {
+        error!("Failed to spawn exit-watcher thread: {}", e);
+        // SAFETY: close the orphaned wake event.
+        unsafe {
+            let _ = CloseHandle(wake);
+        }
+        return None;
+    }
+    Some(ExitWatcher {
+        cmd_tx,
+        wake: wake_isize,
+    })
+}
+
 #[cfg(windows)]
 async fn run_window_backend(
     state: Arc<RwLock<ProcessState>>,
@@ -677,12 +839,17 @@ async fn run_window_backend(
     let (hwnd_tx, mut hwnd_rx) = mpsc::channel::<isize>(64);
     let hook_waiter = spawn_window_event_thread(hwnd_tx, app.shutdown_tx.subscribe());
 
+    // Exited-PID reports from the WaitForMultipleObjects thread.
+    let (exited_tx, mut exited_rx) = mpsc::channel::<u32>(64);
+    let exit = spawn_exit_watcher(exited_tx);
+
     // Admit games already running before we started (window events won't refire).
-    window_reconcile_watched(&state, &change_tx, &app).await;
+    window_reconcile_watched(&state, &change_tx, &app, exit.as_ref()).await;
 
     let mut config_rx = app.config_generation.subscribe();
-    // Slow liveness/headless tick. Body is cheap: a per-PID probe over the handful
-    // of tracked processes, plus a snapshot only when headless patterns exist.
+    // Headless poll: only meaningful when detect:"poll" games / ProcessExists
+    // sensors exist. When they don't, the branch is guarded off so nothing polls.
+    let mut headless_active = !app.config.read().await.headless_watch_names().is_empty();
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tick.tick().await; // consume the immediate first tick
@@ -694,32 +861,46 @@ async fn run_window_backend(
             _ = shutdown_rx.recv() => break,
             maybe = hwnd_rx.recv() => {
                 let Some(hwnd) = maybe else { break };
-                window_admit_hwnd(hwnd, &state, &change_tx, &app).await;
+                window_admit_hwnd(hwnd, &state, &change_tx, &app, exit.as_ref()).await;
+            }
+            Some(pid) = exited_rx.recv() => {
+                // A watched game's window process exited - drop it.
+                if state.read().await.pid_to_name.contains_key(&pid) {
+                    state.write().await.remove_process(pid);
+                    let _ = change_tx.send(ProcessChangeNotification);
+                }
             }
             r = config_rx.recv() => {
                 if matches!(r, Ok(()) | Err(broadcast::error::RecvError::Lagged(_))) {
-                    window_reconcile_watched(&state, &change_tx, &app).await;
+                    window_reconcile_watched(&state, &change_tx, &app, exit.as_ref()).await;
+                    headless_active = !app.config.read().await.headless_watch_names().is_empty();
                 }
             }
-            _ = tick.tick() => {
-                window_liveness_and_headless(&state, &change_tx, &app).await;
+            _ = tick.tick(), if headless_active => {
+                window_headless_poll(&state, &change_tx, &app).await;
             }
         }
+    }
+    if let Some(e) = &exit {
+        e.shutdown();
     }
     if let Some(h) = hook_waiter {
         let _ = h.await;
     }
 }
 
-/// Resolve a single HWND to (pid, image basename) and admit it if watched and new.
+/// Resolve a single HWND to (pid, image basename, exit handle) and admit it if
+/// watched and new, registering its SYNCHRONIZE handle with the exit watcher.
 #[cfg(windows)]
 async fn window_admit_hwnd(
     hwnd: isize,
     state: &Arc<RwLock<ProcessState>>,
     change_tx: &broadcast::Sender<ProcessChangeNotification>,
     app: &Arc<crate::AppState>,
+    exit: Option<&ExitWatcher>,
 ) {
-    // Filter + resolve off the runtime (OpenProcess/Query can block briefly).
+    // Filter + resolve off the runtime (OpenProcess/Query can block briefly). The
+    // returned handle (if any) is a SYNCHRONIZE handle for exit-watching.
     let resolved = tokio::task::spawn_blocking(move || {
         if is_top_level_app_window(hwnd) {
             resolve_window_process(hwnd)
@@ -730,71 +911,90 @@ async fn window_admit_hwnd(
     .await
     .ok()
     .flatten();
-    let Some((pid, name)) = resolved else { return };
-    if state.read().await.pid_to_name.contains_key(&pid) {
-        return; // already tracked (alt-tab / refocus)
-    }
-    if !app.config.read().await.is_watched_process(&name) {
+    let Some((pid, name, handle)) = resolved else {
+        return;
+    };
+    // Not new, or not watched: close the exit handle and stop.
+    let already = state.read().await.pid_to_name.contains_key(&pid);
+    let watched = !already && app.config.read().await.is_watched_process(&name);
+    if !watched {
+        if let Some(h) = handle {
+            // SAFETY: closing a handle we opened but won't track.
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(h.0);
+            }
+        }
         return;
     }
     debug!("Window backend: admitting {} (PID {})", name, pid);
     state.write().await.add_process(name, pid);
     let _ = change_tx.send(ProcessChangeNotification);
+    // Register for event-driven exit, or drop the handle if we have no watcher.
+    match (exit, handle) {
+        (Some(w), Some(h)) => w.watch(pid, h),
+        (_, Some(h)) => {
+            // SAFETY: no watcher (spawn failed); close the unused handle.
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(h.0);
+            }
+        }
+        (_, None) => {
+            // SYNCHRONIZE was denied (rare elevated process): admitted, but its exit
+            // won't be caught until a config-change reconcile or restart.
+            debug!("No exit handle for PID {} (SYNCHRONIZE denied)", pid);
+        }
+    }
 }
 
-/// Prune dead tracked PIDs (per-PID probe, tiny set) and add any headless watched
-/// process (snapshot, only when the headless set is non-empty).
+/// Reconcile the headless watched patterns (detect:"poll" games / ProcessExists):
+/// add those running but untracked, remove those tracked-by-headless-name that
+/// vanished. Windowed games are untouched here (the exit watcher handles them).
 #[cfg(windows)]
-async fn window_liveness_and_headless(
+async fn window_headless_poll(
     state: &Arc<RwLock<ProcessState>>,
     change_tx: &broadcast::Sender<ProcessChangeNotification>,
     app: &Arc<crate::AppState>,
 ) {
-    let mut changed = false;
-
-    // Liveness: probe each tracked PID; drop the dead ones.
-    let tracked: Vec<(u32, Arc<str>)> = {
-        let guard = state.read().await;
-        guard
-            .pid_to_name
-            .iter()
-            .map(|(p, n)| (*p, Arc::clone(n)))
-            .collect()
+    let headless = app.config.read().await.headless_watch_names();
+    if headless.is_empty() {
+        return;
+    }
+    let stem = |name: &str| -> String {
+        name.strip_suffix(".exe")
+            .or_else(|| name.strip_suffix(".EXE"))
+            .unwrap_or(name)
+            .to_lowercase()
     };
-    for (pid, name) in tracked {
-        let alive = tokio::task::spawn_blocking(move || process_alive_with_name(pid, &name))
-            .await
-            .unwrap_or(false);
-        if !alive {
-            state.write().await.remove_process(pid);
+    let snapshot = tokio::task::spawn_blocking(ProcessWatcher::snapshot_all_processes)
+        .await
+        .unwrap_or_default();
+    let mut changed = false;
+    let mut guard = state.write().await;
+    // Add headless matches not tracked.
+    for (pid, name) in &snapshot {
+        if guard.pid_to_name.contains_key(pid) {
+            continue;
+        }
+        if headless.iter().any(|h| h == &stem(name)) {
+            guard.add_process(name.clone(), *pid);
             changed = true;
         }
     }
-
-    // Headless watched patterns (no window): snapshot and reconcile, but only when
-    // there is something to look for.
-    let headless = app.config.read().await.headless_watch_names();
-    if !headless.is_empty() {
-        let snapshot = tokio::task::spawn_blocking(ProcessWatcher::snapshot_all_processes)
-            .await
-            .unwrap_or_default();
-        let mut guard = state.write().await;
-        for (pid, name) in &snapshot {
-            if guard.pid_to_name.contains_key(pid) {
-                continue;
-            }
-            let stem = name
-                .strip_suffix(".exe")
-                .or_else(|| name.strip_suffix(".EXE"))
-                .unwrap_or(name)
-                .to_lowercase();
-            if headless.iter().any(|h| h == &stem) {
-                guard.add_process(name.clone(), *pid);
-                changed = true;
-            }
-        }
+    // Remove tracked headless-named PIDs that vanished (windowed games excluded:
+    // their name won't be in the headless set).
+    let gone: Vec<u32> = guard
+        .pid_to_name
+        .iter()
+        .filter(|(pid, name)| {
+            headless.iter().any(|h| h == &stem(name)) && !snapshot.contains_key(pid)
+        })
+        .map(|(pid, _)| *pid)
+        .collect();
+    for pid in gone {
+        guard.remove_process(pid);
+        changed = true;
     }
-
+    drop(guard);
     if changed {
         let _ = change_tx.send(ProcessChangeNotification);
     }
@@ -807,6 +1007,7 @@ async fn window_reconcile_watched(
     state: &Arc<RwLock<ProcessState>>,
     change_tx: &broadcast::Sender<ProcessChangeNotification>,
     app: &Arc<crate::AppState>,
+    exit: Option<&ExitWatcher>,
 ) {
     // Drop tracked entries that are no longer watched (a game removed from config).
     {
@@ -822,8 +1023,14 @@ async fn window_reconcile_watched(
         };
         if !stale.is_empty() {
             let mut guard = state.write().await;
-            for pid in stale {
-                guard.remove_process(pid);
+            for pid in &stale {
+                guard.remove_process(*pid);
+            }
+            drop(guard);
+            if let Some(w) = exit {
+                for pid in &stale {
+                    w.unwatch(*pid); // stop watching + close the handle
+                }
             }
             let _ = change_tx.send(ProcessChangeNotification);
         }
@@ -833,7 +1040,7 @@ async fn window_reconcile_watched(
         .await
         .unwrap_or_default();
     for hwnd in hwnds {
-        window_admit_hwnd(hwnd, state, change_tx, app).await;
+        window_admit_hwnd(hwnd, state, change_tx, app, exit).await;
     }
 }
 
@@ -868,28 +1075,44 @@ fn is_top_level_app_window(hwnd: isize) -> bool {
     true
 }
 
-/// Resolve a top-level window to (pid, image basename), using the limited-info
-/// right so elevated / anti-cheat game processes still resolve.
+/// Resolve a top-level window to (pid, image basename, exit handle). Opens with
+/// SYNCHRONIZE so the returned handle can be watched for exit; falls back to
+/// limited-info-only (handle = None) if SYNCHRONIZE is denied (rare elevated
+/// process) so the name still resolves. The limited-info right is why elevated /
+/// anti-cheat game processes resolve at all. The caller owns and closes any
+/// returned handle.
 #[cfg(windows)]
-fn resolve_window_process(hwnd: isize) -> Option<(u32, String)> {
+fn resolve_window_process(hwnd: isize) -> Option<(u32, String, Option<SendHandle>)> {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
         QueryFullProcessImageNameW,
     };
     use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
     use windows::core::PWSTR;
 
     let h = HWND(hwnd as *mut core::ffi::c_void);
-    // SAFETY: GetWindowThreadProcessId writes pid; OpenProcess handle is closed;
-    // QueryFullProcessImageNameW writes into a fixed buffer whose length we track.
+    // SAFETY: GetWindowThreadProcessId writes pid; the process handle is either
+    // returned to the caller or closed here; QueryFullProcessImageNameW writes into
+    // a fixed buffer whose length we pass and read back.
     unsafe {
         let mut pid = 0u32;
         GetWindowThreadProcessId(h, Some(&raw mut pid));
         if pid == 0 {
             return None;
         }
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        // Prefer a SYNCHRONIZE handle (for exit-watching); fall back to query-only.
+        let (handle, can_wait) = match OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false,
+            pid,
+        ) {
+            Ok(hproc) => (hproc, true),
+            Err(_) => (
+                OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?,
+                false,
+            ),
+        };
         let mut buf = [0u16; 260];
         let mut len = buf.len() as u32;
         let ok = QueryFullProcessImageNameW(
@@ -899,16 +1122,21 @@ fn resolve_window_process(hwnd: isize) -> Option<(u32, String)> {
             &raw mut len,
         )
         .is_ok();
-        let _ = CloseHandle(handle);
         if !ok {
+            let _ = CloseHandle(handle);
             return None;
         }
         let full = String::from_utf16_lossy(&buf[..len as usize]);
         let base = full.rsplit(['\\', '/']).next().unwrap_or(&full).to_string();
         if base.is_empty() {
-            None
+            let _ = CloseHandle(handle);
+            return None;
+        }
+        if can_wait {
+            Some((pid, base, Some(SendHandle(handle))))
         } else {
-            Some((pid, base))
+            let _ = CloseHandle(handle);
+            Some((pid, base, None))
         }
     }
 }
