@@ -445,8 +445,12 @@ async fn run_agent() -> anyhow::Result<()> {
     // Config file watcher for hot-reload
     handles.push(tokio::spawn(config::watch_config(Arc::clone(&state))));
 
-    // Publish initial availability
-    state.mqtt.publish_availability(true).await;
+    // Availability "online" is published ONLY by the ConnAck handler, and only
+    // AFTER it has (re)subscribed to the command topics. Publishing it here would
+    // announce readiness before subscriptions land (or before the broker connects
+    // at all), so HA could gate a launch on a bridge that then drops the press.
+    // The ConnAck path fires on the first connect and every reconnect, so this
+    // startup publish is both redundant and premature - omit it.
 
     // HWiNFO sensors use a multi-source availability list - pre-seed the
     // HWiNFO availability topic to "offline" so HA marks the entities

@@ -568,6 +568,7 @@ PC Bridge auto-discovers via MQTT. After connecting, you'll get:
 - `sensor.<device>_disk_usage` - Highest disk usage % with per-path attributes (polled)
 - `sensor.<device>_system_uptime` - System uptime in seconds (polled 60s)
 - `sensor.<device>_bridge_info` - Agent version, OS, arch, enabled features (on connect)
+- `sensor.<device>_bridge_health` - Agent uptime in seconds (heartbeat, ~60s), with version, per-task states, and agent memory (MB) as attributes. Always published regardless of which sensor features are enabled.
 - `sensor.<device>_<custom>` - Any custom sensors you define
 
 **Buttons:**
@@ -594,6 +595,15 @@ PC Bridge auto-discovers via MQTT. After connecting, you'll get:
 - `notify.<device>_notification` - Send toast notifications to your PC
 
 Where `<device>` is your configured `device_name` with dashes replaced by underscores.
+
+### Readiness and the launch gate
+
+The device availability topic (`online`/`offline`) is a true readiness beacon: the
+agent publishes `online` only after it has subscribed to every command topic on each
+broker connection, so `online` means "subscribed and ready to execute commands". It
+publishes `offline` before suspending (during pre-suspend) and via MQTT Last Will if
+it crashes. When automating a launch, gate it on availability being `online` plus a
+live `bridge_health` heartbeat, rather than firing a command blindly.
 
 ---
 

@@ -315,9 +315,13 @@ impl MqttClient {
                         let attr_body = birth_attrs_payload.clone();
                         let rtx = reconnect_tx_for_eventloop.clone();
                         tokio::spawn(async move {
-                            // Subscribe BEFORE publishing "online": HA may fire
-                            // commands the instant we appear available, and the broker
-                            // silently drops them if our SUBSCRIBE hasn't landed yet.
+                            // Readiness contract: availability "online" means
+                            // "subscribed and ready to execute commands". So subscribe
+                            // to EVERY command topic BEFORE the online publish below -
+                            // HA may fire a command the instant we appear available and
+                            // the broker silently drops it if our SUBSCRIBE hasn't
+                            // landed. This is the ONLY place online is published (see
+                            // main.rs), keeping the ordering guarantee in one spot.
                             for topic in &topics {
                                 if let Err(e) = client.subscribe(topic, QoS::AtLeastOnce).await {
                                     warn!("Failed to resubscribe to {}: {:?}", topic, e);
