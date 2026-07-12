@@ -58,7 +58,7 @@ impl GameSensor {
 
     pub async fn run(self) {
         let config = self.state.config.read().await;
-        let interval_secs = config.intervals.game_sensor.max(1); // Prevent panic on 0
+        let mut interval_secs = config.intervals.game_sensor.max(1); // Prevent panic on 0
         let games = config.games.clone();
         let mut cached = CachedGamePatterns::build(&games);
         drop(config);
@@ -88,7 +88,18 @@ impl GameSensor {
                 }
                 // Rebuild cached patterns when config changes
                 Ok(()) = config_rx.recv() => {
-                    let games = self.state.config.read().await.games.clone();
+                    let config = self.state.config.read().await;
+                    let new_interval = config.intervals.game_sensor.max(1);
+                    let games = config.games.clone();
+                    drop(config);
+                    // Also pick up a changed poll interval (previously only patterns
+                    // were rebuilt, so an interval edit didn't take effect live).
+                    if new_interval != interval_secs {
+                        interval_secs = new_interval;
+                        tick = interval(Duration::from_secs(interval_secs));
+                        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                        debug!("Game sensor: interval changed to {}s", interval_secs);
+                    }
                     cached = CachedGamePatterns::build(&games);
                     self.publish_game_catalog(&games).await;
                     debug!("Game sensor: rebuilt cached patterns");
@@ -180,6 +191,11 @@ impl GameSensor {
     }
 
     async fn detect_game(&self, cached: &CachedGamePatterns) -> Vec<(String, String)> {
+        // No configured patterns means nothing can match, so skip the hundreds of
+        // /proc reads entirely (a no-games config would otherwise scan every tick).
+        if cached.patterns.is_empty() {
+            return Vec::new();
+        }
         // Enumerate processes via /proc
         let processes = match self.get_process_names().await {
             Ok(p) => p,
