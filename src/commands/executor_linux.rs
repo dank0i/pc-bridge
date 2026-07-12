@@ -150,6 +150,12 @@ impl CommandExecutor {
                             "homeassistant/sensor/{}/sleep_state/state",
                             config.device_name
                         ),
+                        // Same topic as the async client's LWT; built inline
+                        // because that helper is private to the mqtt module.
+                        availability_topic: format!(
+                            "homeassistant/sensor/{}/availability",
+                            config.device_name
+                        ),
                     }
                 };
                 // Off the runtime: a broker connect timeout would otherwise stall

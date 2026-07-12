@@ -23,6 +23,11 @@ pub struct SyncMqttConfig {
     pub pass: String,
     pub client_id: String,
     pub sleep_topic: String,
+    /// Availability topic (the same one the async client uses for its LWT). The
+    /// suspend handler publishes `offline` here so automations gating on
+    /// availability stop seeing a zombie `online` for the ~45s (keepalive x 1.5)
+    /// before the LWT would otherwise fire.
+    pub availability_topic: String,
 }
 
 /// Parse a broker URL like "tcp://host:port" into (host, port, use_tls).
@@ -154,15 +159,32 @@ fn do_mqtt_exchange(stream: &mut (impl Read + Write), cfg: &SyncMqttConfig) -> s
     }
 
     // --- PUBLISH (QoS 0, retained) ---
-    let publish = build_mqtt_publish(&cfg.sleep_topic, b"sleeping", true);
-    stream.write_all(&publish)?;
-    stream.flush()?;
+    // Ordered: sleep_state=sleeping first so a consumer watching availability
+    // already sees the sleep state, then availability=offline.
+    for (topic, payload) in suspend_message_set(cfg) {
+        let publish = build_mqtt_publish(topic, payload, true);
+        stream.write_all(&publish)?;
+        stream.flush()?;
+    }
 
     // --- DISCONNECT ---
     stream.write_all(&[0xE0, 0x00])?;
     let _ = stream.flush();
 
     Ok(())
+}
+
+/// The retained messages the suspend handler publishes, in send order.
+///
+/// sleep_state=sleeping is sent before availability=offline so any consumer that
+/// reacts to the availability flip already sees the sleep state. Both are
+/// retained: the OS may power down the NIC immediately after wnd_proc returns,
+/// so the broker must hold the last value for late subscribers.
+fn suspend_message_set(cfg: &SyncMqttConfig) -> [(&str, &'static [u8]); 2] {
+    [
+        (cfg.sleep_topic.as_str(), b"sleeping"),
+        (cfg.availability_topic.as_str(), b"offline"),
+    ]
 }
 
 /// Build an MQTT 3.1.1 CONNECT packet.
@@ -295,6 +317,24 @@ mod tests {
         let mut buf = Vec::new();
         encode_remaining_length(&mut buf, 128);
         assert_eq!(buf, vec![0x80, 0x01]);
+    }
+
+    #[test]
+    fn test_suspend_message_set_order_and_payloads() {
+        let cfg = SyncMqttConfig {
+            host: "h".into(),
+            port: 1883,
+            use_tls: false,
+            user: String::new(),
+            pass: String::new(),
+            client_id: "c".into(),
+            sleep_topic: "sleep/topic".into(),
+            availability_topic: "avail/topic".into(),
+        };
+        let set = suspend_message_set(&cfg);
+        // sleep_state=sleeping MUST come before availability=offline.
+        assert_eq!(set[0], ("sleep/topic", b"sleeping".as_slice()));
+        assert_eq!(set[1], ("avail/topic", b"offline".as_slice()));
     }
 
     #[test]
@@ -531,6 +571,7 @@ mod tests {
                 pass: String::new(),
                 client_id: "test-sleep".into(),
                 sleep_topic: "homeassistant/sensor/test-pc/sleep_state/state".into(),
+                availability_topic: "homeassistant/sensor/test-pc/availability".into(),
             };
 
             let broker_handle = std::thread::spawn(move || run_mini_broker(listener));
@@ -539,13 +580,20 @@ mod tests {
             assert!(result.is_ok(), "sync publish failed: {:?}", result.err());
 
             let received = broker_handle.join().unwrap();
-            assert_eq!(received.len(), 1, "Expected 1 publish, got {received:?}");
+            assert_eq!(received.len(), 2, "Expected 2 publishes, got {received:?}");
+            // sleep_state=sleeping first, then availability=offline, both retained.
             assert_eq!(
                 received[0].topic,
                 "homeassistant/sensor/test-pc/sleep_state/state"
             );
             assert_eq!(received[0].payload, b"sleeping");
             assert!(received[0].retain, "Sleep message must be retained");
+            assert_eq!(
+                received[1].topic,
+                "homeassistant/sensor/test-pc/availability"
+            );
+            assert_eq!(received[1].payload, b"offline");
+            assert!(received[1].retain, "Availability offline must be retained");
         }
 
         #[test]
@@ -561,6 +609,7 @@ mod tests {
                 pass: "testpass".into(),
                 client_id: "test-auth".into(),
                 sleep_topic: "test/sleep".into(),
+                availability_topic: "test/availability".into(),
             };
 
             let broker_handle = std::thread::spawn(move || run_mini_broker(listener));
@@ -573,8 +622,9 @@ mod tests {
             );
 
             let received = broker_handle.join().unwrap();
-            assert_eq!(received.len(), 1);
+            assert_eq!(received.len(), 2);
             assert_eq!(received[0].payload, b"sleeping");
+            assert_eq!(received[1].payload, b"offline");
         }
 
         #[test]
@@ -591,6 +641,7 @@ mod tests {
                 pass: String::new(),
                 client_id: "test-fail".into(),
                 sleep_topic: "test/sleep".into(),
+                availability_topic: "test/availability".into(),
             };
 
             let result = sync_mqtt_publish_sleep(&cfg);
@@ -616,6 +667,7 @@ mod tests {
                 pass: String::new(),
                 client_id: "test-timing".into(),
                 sleep_topic: "test/timing".into(),
+                availability_topic: "test/availability".into(),
             };
 
             let start = std::time::Instant::now();
@@ -630,8 +682,9 @@ mod tests {
             );
 
             let received = broker_handle.join().unwrap();
-            assert_eq!(received.len(), 1);
+            assert_eq!(received.len(), 2);
             assert_eq!(received[0].payload, b"sleeping");
+            assert_eq!(received[1].payload, b"offline");
         }
 
         /// Simulates NIC death: immediately after sync_mqtt_publish_sleep
@@ -688,6 +741,7 @@ mod tests {
                 pass: String::new(),
                 client_id: "test-nic-death".into(),
                 sleep_topic: "test/nic-death".into(),
+                availability_topic: "test/availability".into(),
             };
 
             let result = sync_mqtt_publish_sleep(&cfg);
@@ -747,6 +801,7 @@ mod tests {
                 pass: String::new(),
                 client_id: "test-reject".into(),
                 sleep_topic: "test/sleep".into(),
+                availability_topic: "test/availability".into(),
             };
 
             let result = sync_mqtt_publish_sleep(&cfg);
@@ -785,6 +840,7 @@ mod tests {
                 pass: String::new(),
                 client_id: "test-bad-connack".into(),
                 sleep_topic: "test/sleep".into(),
+                availability_topic: "test/availability".into(),
             };
 
             let result = sync_mqtt_publish_sleep(&cfg);
@@ -822,6 +878,7 @@ mod tests {
                 pass: String::new(),
                 client_id: "test-wrong-type".into(),
                 sleep_topic: "test/sleep".into(),
+                availability_topic: "test/availability".into(),
             };
 
             let result = sync_mqtt_publish_sleep(&cfg);

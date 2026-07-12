@@ -117,6 +117,12 @@ impl PowerEventListener {
                     "homeassistant/sensor/{}/sleep_state/state",
                     config.device_name
                 ),
+                // Same topic as the async client's LWT (availability_topic_static);
+                // built inline here because that helper is private to the mqtt module.
+                availability_topic: format!(
+                    "homeassistant/sensor/{}/availability",
+                    config.device_name
+                ),
             }
         };
 

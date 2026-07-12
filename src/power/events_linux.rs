@@ -169,6 +169,12 @@ impl PowerEventListener {
                                         "homeassistant/sensor/{}/sleep_state/state",
                                         config.device_name
                                     ),
+                                    // Same topic as the async client's LWT; built
+                                    // inline because that helper is private to mqtt.
+                                    availability_topic: format!(
+                                        "homeassistant/sensor/{}/availability",
+                                        config.device_name
+                                    ),
                                 }
                             };
                             match tokio::task::spawn_blocking(move || sync_mqtt_publish_sleep(&cfg))
