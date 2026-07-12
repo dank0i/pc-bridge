@@ -1613,6 +1613,7 @@ fn library_view(app: &mut App, ui: &mut egui::Ui) {
                 status: GameStatus::Installed,
                 exposed: false,
                 game_id: String::new(),
+                detect: crate::config::DetectMode::Window,
             });
         }
         let scanning = app.scan_rx.is_some();

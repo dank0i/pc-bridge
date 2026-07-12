@@ -704,6 +704,7 @@ mod tests {
             custom_sensors: Vec::new(),
             custom_commands: Vec::new(),
             update_channel: crate::config::default_update_channel(),
+            detection_backend: crate::config::DetectionBackend::default(),
             disk_sensor_paths: Vec::new(),
             removed_games: Vec::new(),
         }
@@ -2035,6 +2036,7 @@ mod tests {
                 custom_sensors: Vec::new(),
                 custom_commands: Vec::new(),
                 update_channel: crate::config::default_update_channel(),
+                detection_backend: crate::config::DetectionBackend::default(),
                 disk_sensor_paths: Vec::new(),
                 removed_games: Vec::new(),
             }

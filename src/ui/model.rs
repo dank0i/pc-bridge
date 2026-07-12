@@ -646,6 +646,9 @@ pub struct Game {
     /// derived from the config on save, so it isn't read back by `library_to_games`.
     #[allow(clippy::struct_field_names)]
     pub game_id: String,
+    /// Detection mode, preserved through the UI round-trip so a Save does not reset
+    /// a headless game back to window detection.
+    pub detect: crate::config::DetectMode,
 }
 
 /// Strip a launcher scheme (`lnk:`/`exe:`/`url:`) so the UI shows just the raw path
@@ -719,6 +722,7 @@ pub fn games_to_library(games: &HashMap<String, GameConfig>) -> Vec<Game> {
                 status: GameStatus::Installed,
                 exposed: gc.is_exposed(),
                 game_id: gc.game_id().to_string(),
+                detect: gc.detect(),
             }
         })
         .collect();
@@ -779,6 +783,7 @@ pub fn library_to_games(
                 launch_command,
                 auto_discovered,
                 exposed: g.exposed,
+                detect: g.detect,
             };
             (g.process.trim().to_string(), gc)
         })
@@ -847,6 +852,7 @@ mod tests {
                 launch_command: None,
                 auto_discovered: true,
                 exposed: true,
+                detect: crate::config::DetectMode::Window,
             },
         );
 
@@ -871,6 +877,7 @@ mod tests {
                 launch_command: None,
                 auto_discovered: false,
                 exposed: true,
+                detect: crate::config::DetectMode::Window,
             },
         );
         let new_out = library_to_games(&games_to_library(&fresh), &HashMap::new());
@@ -893,6 +900,7 @@ mod tests {
                 launch_command: Some("exe:C:/game.exe".into()),
                 auto_discovered: false,
                 exposed: false,
+                detect: crate::config::DetectMode::Window,
             },
         );
 
@@ -929,6 +937,7 @@ mod tests {
             launcher: Launcher::Manual,
             status: GameStatus::Installed,
             exposed: true,
+            detect: crate::config::DetectMode::Window,
             game_id: String::new(),
         };
         // Blank process (no detection key) and blank name (empty game_id) both drop.

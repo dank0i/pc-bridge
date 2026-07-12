@@ -64,6 +64,13 @@ pub struct Config {
     #[serde(default = "default_update_channel")]
     pub update_channel: String,
 
+    /// Windows process-detection backend. `wmi` (default) is the polling WMI
+    /// watcher; `window` is the event-driven window-event watcher plus a targeted
+    /// poll for headless games. Window mode is unverified on some setups, so it is
+    /// opt-in until validated. Ignored on Linux (/proc poll).
+    #[serde(default)]
+    pub detection_backend: DetectionBackend,
+
     /// Paths to check for disk usage (e.g. `C:\`, `D:\` or `/`, `/home`).
     /// If empty, disk sensor reports nothing even when enabled.
     #[serde(default)]
@@ -125,6 +132,7 @@ impl Default for Config {
             show_tray_icon: true,
             discord_keybind: None,
             update_channel: default_update_channel(),
+            detection_backend: DetectionBackend::default(),
             disk_sensor_paths: Vec::new(),
             custom_sensors: Vec::new(),
             custom_commands: Vec::new(),
@@ -139,6 +147,39 @@ fn default_true() -> bool {
 
 pub fn default_update_channel() -> String {
     "stable".to_string()
+}
+
+/// How the process watcher should detect a game is running (Windows). Windowed
+/// games (the norm) are caught event-driven by the window-event backend; a
+/// headless game (no top-level window, e.g. a dedicated server) must be found by
+/// the targeted poll instead. Ignored by the Linux /proc poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DetectMode {
+    /// Detected via a top-level window appearing (default).
+    #[default]
+    Window,
+    /// Detected only via the targeted process poll (no window).
+    Poll,
+}
+
+impl DetectMode {
+    // Takes &self because serde's skip_serializing_if requires a by-reference fn.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    fn is_default(&self) -> bool {
+        matches!(self, DetectMode::Window)
+    }
+}
+
+/// Windows process-detection backend selector (config `detection_backend`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DetectionBackend {
+    /// Polling WMI intrinsic-event watcher (default until window mode is validated).
+    #[default]
+    Wmi,
+    /// Event-driven window-event watcher plus a targeted poll for headless games.
+    Window,
 }
 
 /// Game configuration - supports both simple string and object with app_id
@@ -164,6 +205,9 @@ pub enum GameConfig {
         /// Whether this game is exposed in the game_catalog sensor (default: true)
         #[serde(default = "default_true")]
         exposed: bool,
+        /// How to detect this game is running (window event vs poll).
+        #[serde(default, skip_serializing_if = "DetectMode::is_default")]
+        detect: DetectMode,
     },
 }
 
@@ -248,6 +292,15 @@ impl GameConfig {
         }
     }
 
+    /// How this game is detected (window event vs poll). Simple entries default
+    /// to window detection.
+    pub fn detect(&self) -> DetectMode {
+        match self {
+            GameConfig::Simple(_) => DetectMode::Window,
+            GameConfig::Full { detect, .. } => *detect,
+        }
+    }
+
     /// Create from Steam discovery
     pub fn from_steam(game_id: String, app_id: u32, name: String) -> Self {
         GameConfig::Full {
@@ -257,6 +310,7 @@ impl GameConfig {
             launch_command: None,
             auto_discovered: true,
             exposed: true,
+            detect: DetectMode::Window,
         }
     }
 }
@@ -577,6 +631,65 @@ impl Config {
             }
         }
         matched
+    }
+
+    /// Process-name patterns the window-event backend can ignore because they must
+    /// be found by the targeted poll instead: games explicitly marked
+    /// `detect: "poll"`, plus every custom `ProcessExists` sensor's process (those
+    /// are arbitrary and may be headless). Returned lowercased, `.exe`-stripped.
+    /// When empty, the poll loop stays idle. Screensavers are windowed, so they are
+    /// NOT here - the window backend catches them.
+    pub fn headless_watch_names(&self) -> Vec<String> {
+        fn norm(s: &str) -> String {
+            let stem = if s.len() >= 4 && s.as_bytes()[s.len() - 4..].eq_ignore_ascii_case(b".exe")
+            {
+                &s[..s.len() - 4]
+            } else {
+                s
+            };
+            stem.to_lowercase()
+        }
+        let mut out: Vec<String> = self
+            .games
+            .iter()
+            .filter(|(_, g)| g.detect() == DetectMode::Poll)
+            .map(|(key, _)| norm(key))
+            .collect();
+        for s in &self.custom_sensors {
+            if let CustomSensorType::ProcessExists = s.sensor_type
+                && let Some(p) = &s.process
+            {
+                out.push(norm(p));
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Whether a running process `name` is something ANY consumer watches: a
+    /// configured game, a custom `ProcessExists` target, or a screensaver. The
+    /// window-event backend uses this to admit only relevant windows into the
+    /// shared process set (so browsers/shell never enter it). Reuses the exact
+    /// per-consumer matching so the backend can never disagree with a consumer.
+    pub fn is_watched_process(&self, name: &str) -> bool {
+        // Games (exact stem match, same as matching_game_processes).
+        if !self.matching_game_processes([name]).is_empty() {
+            return true;
+        }
+        // Screensaver (.scr), watched by the idle sensor.
+        if name.len() >= 4 && name.as_bytes()[name.len() - 4..].eq_ignore_ascii_case(b".scr") {
+            return true;
+        }
+        // Custom ProcessExists (exact or substring, same as poll_process_exists).
+        let lname = name.to_lowercase();
+        self.custom_sensors.iter().any(|s| {
+            matches!(s.sensor_type, CustomSensorType::ProcessExists)
+                && s.process.as_ref().is_some_and(|p| {
+                    let lp = p.to_lowercase();
+                    lname == lp || lname.contains(&lp)
+                })
+        })
     }
 
     /// Check if this is a first run (no config file exists)
@@ -1601,6 +1714,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_is_watched_process() {
+        let mut cfg = Config {
+            games: HashMap::from([(
+                "cs2".to_string(),
+                GameConfig::Simple("counter_strike_2".to_string()),
+            )]),
+            ..Config::default()
+        };
+        cfg.custom_sensors.push(CustomSensor {
+            name: "svc".to_string(),
+            sensor_type: CustomSensorType::ProcessExists,
+            interval_seconds: 30,
+            unit: None,
+            icon: None,
+            script: None,
+            process: Some("mybackgroundsvc".to_string()),
+            file_path: None,
+            registry_key: None,
+            registry_value: None,
+        });
+        assert!(cfg.is_watched_process("cs2.exe")); // game (stem match)
+        assert!(cfg.is_watched_process("Mystify.scr")); // screensaver
+        assert!(cfg.is_watched_process("MyBackgroundSvc.exe")); // custom substring
+        assert!(!cfg.is_watched_process("chrome.exe")); // unwatched
+    }
+
+    #[test]
+    fn test_headless_watch_names() {
+        let cfg = Config {
+            games: HashMap::from([
+                (
+                    "server.exe".to_string(),
+                    GameConfig::Full {
+                        game_id: "srv".to_string(),
+                        app_id: None,
+                        name: None,
+                        launch_command: None,
+                        auto_discovered: false,
+                        exposed: true,
+                        detect: DetectMode::Poll,
+                    },
+                ),
+                ("cs2".to_string(), GameConfig::Simple("cs".to_string())),
+            ]),
+            ..Config::default()
+        };
+        // Only the poll-mode game is in the headless set; the window-mode one isn't.
+        assert_eq!(cfg.headless_watch_names(), vec!["server".to_string()]);
+    }
+
     fn minimal_config() -> Config {
         Config {
             device_name: "test-pc".to_string(),
@@ -1625,6 +1789,7 @@ mod tests {
             custom_commands: vec![],
             removed_games: Vec::new(),
             update_channel: default_update_channel(),
+            detection_backend: DetectionBackend::default(),
             disk_sensor_paths: Vec::new(),
         }
     }
@@ -1711,6 +1876,7 @@ mod tests {
             launch_command: None,
             auto_discovered: true,
             exposed: true,
+            detect: DetectMode::Window,
         };
         assert_eq!(config.game_id(), "counter_strike_2");
         assert_eq!(config.app_id(), Some(730));
@@ -1731,6 +1897,7 @@ mod tests {
             launch_command: None,
             auto_discovered: false,
             exposed: true,
+            detect: DetectMode::Window,
         };
         assert_eq!(config.display_name(), "Counter-Strike 2");
     }
@@ -1866,6 +2033,7 @@ mod tests {
                 launch_command: None,
                 auto_discovered: true,
                 exposed: true,
+                detect: DetectMode::Window,
             },
         );
         let (added, removed) =
@@ -1891,6 +2059,7 @@ mod tests {
             launch_command: None,
             auto_discovered: false,
             exposed: true,
+            detect: DetectMode::Window,
         };
         assert_eq!(config.launch_command(), Some("steam:730".into()));
     }
@@ -1904,6 +2073,7 @@ mod tests {
             launch_command: Some("lnk:C:\\Users\\danke\\Desktop\\Fortnite.lnk".into()),
             auto_discovered: false,
             exposed: true,
+            detect: DetectMode::Window,
         };
         assert_eq!(
             config.launch_command(),
@@ -1926,6 +2096,7 @@ mod tests {
             launch_command: None,
             auto_discovered: false,
             exposed: true,
+            detect: DetectMode::Window,
         };
         assert_eq!(config.launch_command(), None);
     }
