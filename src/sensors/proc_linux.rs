@@ -70,27 +70,35 @@ pub(crate) fn resolve_processes(proc_root: &Path) -> Vec<ProcEntry> {
 /// without a trailing `.exe`, or a case-insensitive substring. Centralized so
 /// the Linux sensor gains `.exe`/long-name support instead of exact-comm only.
 pub(crate) fn name_matches(name: &str, pattern: &str) -> bool {
-    let name_stem = name.strip_suffix(".exe").unwrap_or(name);
-    let pat_stem = pattern.strip_suffix(".exe").unwrap_or(pattern);
-    name.eq_ignore_ascii_case(pattern)
-        || name_stem.eq_ignore_ascii_case(pat_stem)
+    name_matches_exact(name, pattern)
         || name
             .to_ascii_lowercase()
             .contains(&pattern.to_ascii_lowercase())
 }
 
+/// Strict name match: equality (case-insensitive) with or without a trailing
+/// `.exe`, but WITHOUT the substring rule [`name_matches`] adds. Used by the
+/// close/kill path: signalling is destructive, so `close:vlc` must match only
+/// `vlc`/`vlc.exe`, never `vlc-wrapper`.
+pub(crate) fn name_matches_exact(name: &str, pattern: &str) -> bool {
+    let name_stem = name.strip_suffix(".exe").unwrap_or(name);
+    let pat_stem = pattern.strip_suffix(".exe").unwrap_or(pattern);
+    name.eq_ignore_ascii_case(pattern) || name_stem.eq_ignore_ascii_case(pat_stem)
+}
+
 /// PIDs of live processes under `proc_root` whose resolved name matches
-/// `pattern` (via [`name_matches`]), owned by the current euid, excluding
-/// PID <= 1. The ownership + pid>1 guard means a `close:`/`kill:` payload can
-/// never signal init or another user's process. Empty on macOS (no `/proc`),
-/// so callers fall back to `pkill`.
+/// `pattern` EXACTLY (via [`name_matches_exact`] - no substring, since this
+/// feeds a kill), owned by the current euid, excluding PID <= 1. The ownership
+/// and low-pid guards mean a `close:`/`kill:` payload can never signal init or
+/// another user's process. Empty on macOS (no `/proc`), so callers fall back to
+/// `pkill -x`.
 pub(crate) fn owned_pids_by_name(proc_root: &Path, pattern: &str) -> Vec<u32> {
     use std::os::unix::fs::MetadataExt;
     // SAFETY: geteuid takes no args and has no side effects.
     let euid = unsafe { libc::geteuid() };
     resolve_processes(proc_root)
         .into_iter()
-        .filter(|p| p.pid > 1 && name_matches(&p.name, pattern))
+        .filter(|p| p.pid > 1 && name_matches_exact(&p.name, pattern))
         .filter(|p| {
             // The /proc/<pid> directory is owned by the process's real uid.
             std::fs::metadata(proc_root.join(p.pid.to_string()))
@@ -181,5 +189,28 @@ mod tests {
         assert!(name_matches("MarvelRivals_Shipping.exe", "marvelrivals"));
         assert!(name_matches("steam", "steam"));
         assert!(!name_matches("firefox", "chrome"));
+    }
+
+    #[test]
+    fn name_matches_exact_rejects_substring() {
+        // Same eq / .exe-stem behavior as the relaxed matcher...
+        assert!(name_matches_exact("GTA5.exe", "gta5"));
+        assert!(name_matches_exact("gta5", "GTA5.exe"));
+        assert!(name_matches_exact("steam", "steam"));
+        // ...but a substring must NOT match (would over-kill).
+        assert!(!name_matches_exact("vlc-wrapper", "vlc"));
+        assert!(!name_matches_exact(
+            "MarvelRivals_Shipping.exe",
+            "marvelrivals"
+        ));
+    }
+
+    #[test]
+    fn owned_pids_uses_exact_match_not_substring() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_proc(tmp.path(), "1000", "vlc", None);
+        write_proc(tmp.path(), "1001", "vlc-wrapper", None); // must NOT be killed
+        let pids = owned_pids_by_name(tmp.path(), "vlc");
+        assert_eq!(pids, vec![1000]);
     }
 }
