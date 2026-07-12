@@ -87,6 +87,10 @@ fn get_gpu_usage() -> String {
         query: isize,
         counter: isize,
         has_first_sample: bool,
+        /// When this query was opened. The wildcard `GPU Engine(*)` query is the
+        /// one native handle unbounded by our code: PDH accumulates per-process
+        /// instance state as processes churn, so we recycle it daily.
+        opened_at: std::time::Instant,
     }
 
     // SAFETY: PdhState contains raw isize handles (PDH query/counter). Access is
@@ -98,6 +102,38 @@ fn get_gpu_usage() -> String {
 
     static PDH_INIT: OnceLock<Mutex<Option<PdhState>>> = OnceLock::new();
 
+    // Recycle the wildcard query once a day to release accumulated PDH instance
+    // state (see PdhState::opened_at). Bounded well above the poll interval.
+    const RECYCLE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+
+    // Open a fresh query + wildcard counter. Returns None on any PDH failure.
+    let open_pdh_query = || unsafe {
+        let mut query: isize = 0;
+        let status = PdhOpenQueryW(None, 0, &raw mut query);
+        if status != 0 {
+            warn!("PdhOpenQueryW failed: 0x{:08x}", status);
+            return None;
+        }
+        let counter_path = windows::core::w!("\\GPU Engine(*engtype_3D)\\Utilization Percentage");
+        let mut counter: isize = 0;
+        let status = PdhAddEnglishCounterW(query, counter_path, 0, &raw mut counter);
+        if status != 0 {
+            warn!("PdhAddEnglishCounterW failed: 0x{:08x}", status);
+            let _ = PdhCloseQuery(query);
+            return None;
+        }
+        // Don't collect here: leave has_first_sample=false so the FIRST real tick
+        // takes sample 1 and the SECOND takes sample 2 a full interval later.
+        // Collecting now would make the first formatted read span ~0 time (a
+        // meaningless spike/zero).
+        Some(PdhState {
+            query,
+            counter,
+            has_first_sample: false,
+            opened_at: std::time::Instant::now(),
+        })
+    };
+
     let cell = PDH_INIT.get_or_init(|| Mutex::new(None));
     let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -105,34 +141,23 @@ fn get_gpu_usage() -> String {
     // provider isn't ready yet used to be cached as dead forever; retry on later
     // ticks instead (bounded by the poll interval).
     if guard.is_none() {
-        *guard = unsafe {
-            let mut query: isize = 0;
-            let status = PdhOpenQueryW(None, 0, &raw mut query);
-            if status != 0 {
-                warn!("PdhOpenQueryW failed: 0x{:08x}", status);
-                None
-            } else {
-                let counter_path =
-                    windows::core::w!("\\GPU Engine(*engtype_3D)\\Utilization Percentage");
-                let mut counter: isize = 0;
-                let status = PdhAddEnglishCounterW(query, counter_path, 0, &raw mut counter);
-                if status != 0 {
-                    warn!("PdhAddEnglishCounterW failed: 0x{:08x}", status);
-                    let _ = PdhCloseQuery(query);
-                    None
-                } else {
-                    // Don't collect here: leave has_first_sample=false so the
-                    // FIRST real tick takes sample 1 and the SECOND takes sample 2
-                    // a full interval later. Collecting now would make the first
-                    // formatted read span ~0 time (a meaningless spike/zero).
-                    Some(PdhState {
-                        query,
-                        counter,
-                        has_first_sample: false,
-                    })
+        *guard = open_pdh_query();
+    } else if guard
+        .as_ref()
+        .is_some_and(|p| p.opened_at.elapsed() >= RECYCLE_AFTER)
+    {
+        // Daily recycle: open the replacement FIRST and only close the old query
+        // if it succeeds, so a transient reopen failure never loses the working
+        // query. On failure, defer the next attempt a full cycle to avoid spam.
+        if let Some(fresh) = open_pdh_query() {
+            if let Some(old) = guard.replace(fresh) {
+                unsafe {
+                    let _ = PdhCloseQuery(old.query);
                 }
             }
-        };
+        } else if let Some(old) = guard.as_mut() {
+            old.opened_at = std::time::Instant::now();
+        }
     }
 
     let Some(pdh) = guard.as_mut() else {
