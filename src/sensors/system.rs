@@ -487,7 +487,9 @@ fn start_battery_monitor(
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
-    use windows::Win32::System::Power::RegisterPowerSettingNotification;
+    use windows::Win32::System::Power::{
+        RegisterPowerSettingNotification, UnregisterPowerSettingNotification,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DEVICE_NOTIFY_WINDOW_HANDLE, DefWindowProcW, DestroyWindow,
         DispatchMessageW, GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, MSG, PostMessageW,
@@ -586,23 +588,32 @@ fn start_battery_monitor(
                 }
             };
 
-            // Register for battery percentage changes
-            if let Err(e) = RegisterPowerSettingNotification(
+            // Register for battery percentage changes. Keep the HPOWERNOTIFY so
+            // teardown can unregister it (leaked otherwise).
+            let battery_notify = match RegisterPowerSettingNotification(
                 HANDLE(hwnd.0),
                 &GUID_BATTERY_PERCENTAGE_REMAINING,
                 DEVICE_NOTIFY_WINDOW_HANDLE,
             ) {
-                error!("Failed to register battery level notification: {:?}", e);
-            }
+                Ok(h) => Some(h),
+                Err(e) => {
+                    error!("Failed to register battery level notification: {:?}", e);
+                    None
+                }
+            };
 
-            // Register for AC/DC power source changes (plug/unplug)
-            if let Err(e) = RegisterPowerSettingNotification(
+            // Register for AC/DC power source changes (plug/unplug).
+            let acdc_notify = match RegisterPowerSettingNotification(
                 HANDLE(hwnd.0),
                 &GUID_ACDC_POWER_SOURCE,
                 DEVICE_NOTIFY_WINDOW_HANDLE,
             ) {
-                error!("Failed to register power source notification: {:?}", e);
-            }
+                Ok(h) => Some(h),
+                Err(e) => {
+                    error!("Failed to register power source notification: {:?}", e);
+                    None
+                }
+            };
 
             // Store event_tx in window's user data
             let event_tx_box = Box::new(event_tx);
@@ -626,7 +637,14 @@ fn start_battery_monitor(
                 DispatchMessageW(&raw const msg);
             }
 
-            // Cleanup
+            // Cleanup: unregister both power notifications before destroying the
+            // window, then free the context.
+            if let Some(h) = battery_notify {
+                let _ = UnregisterPowerSettingNotification(h);
+            }
+            if let Some(h) = acdc_notify {
+                let _ = UnregisterPowerSettingNotification(h);
+            }
             let _ = Box::from_raw(event_tx_ptr);
             let _ = DestroyWindow(hwnd);
         }) {

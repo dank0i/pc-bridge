@@ -17,7 +17,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::mpsc;
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::Power::RegisterPowerSettingNotification;
+use windows::Win32::System::Power::{
+    RegisterPowerSettingNotification, UnregisterPowerSettingNotification,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DEVICE_NOTIFY_WINDOW_HANDLE, DefWindowProcW, DestroyWindow, DispatchMessageW,
     GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, MSG, PostMessageW, RegisterClassExW,
@@ -257,16 +259,22 @@ impl PowerEventListener {
                 }
             };
 
-            // Register for display power state notifications
-            if let Err(e) = RegisterPowerSettingNotification(
+            // Register for display power state notifications. Keep the returned
+            // HPOWERNOTIFY so teardown can unregister it (leaked otherwise).
+            let display_notify = match RegisterPowerSettingNotification(
                 HANDLE(hwnd.0),
                 &GUID_CONSOLE_DISPLAY_STATE,
                 DEVICE_NOTIFY_WINDOW_HANDLE,
             ) {
-                error!("Failed to register display power notification: {:?}", e);
-            } else {
-                info!("Registered for display power state notifications");
-            }
+                Ok(h) => {
+                    info!("Registered for display power state notifications");
+                    Some(h)
+                }
+                Err(e) => {
+                    error!("Failed to register display power notification: {:?}", e);
+                    None
+                }
+            };
 
             // Store context (event_tx + sync mqtt config) in window's user data
             let ctx = Box::new(WndProcContext {
@@ -297,7 +305,11 @@ impl PowerEventListener {
                 DispatchMessageW(&raw const msg);
             }
 
-            // Cleanup
+            // Cleanup: unregister the power notification before destroying its
+            // window, then free the context.
+            if let Some(h) = display_notify {
+                let _ = UnregisterPowerSettingNotification(h);
+            }
             let _ = Box::from_raw(ctx_ptr);
             let _ = DestroyWindow(hwnd);
         }
