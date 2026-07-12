@@ -53,13 +53,13 @@ impl IdleSensor {
         // `idle_seconds` grows each tick while idle (so it keeps publishing);
         // `lastactive` freezes while idle (so it stops publishing) - both correct.
         let mut prev_idle_secs: i64 = -1;
-        let mut prev_lastactive_secs: i64 = i64::MIN;
+        let mut prev_lastactive_min: i64 = i64::MIN;
         let mut query_failed = false;
 
         // Publish initial idle state
         self.publish_idle(
             &mut prev_idle_secs,
-            &mut prev_lastactive_secs,
+            &mut prev_lastactive_min,
             &mut query_failed,
         )
         .await;
@@ -96,10 +96,10 @@ impl IdleSensor {
                 // so they don't stay stale until the value next changes.
                 Ok(()) = reconnect_rx.recv() => {
                     prev_idle_secs = -1;
-                    prev_lastactive_secs = i64::MIN;
+                    prev_lastactive_min = i64::MIN;
                 }
                 _ = tick.tick() => {
-                    self.publish_idle(&mut prev_idle_secs, &mut prev_lastactive_secs, &mut query_failed).await;
+                    self.publish_idle(&mut prev_idle_secs, &mut prev_lastactive_min, &mut query_failed).await;
                 }
                 result = process_rx.recv() => {
                     // Process list changed - check screensaver state immediately
@@ -141,7 +141,7 @@ impl IdleSensor {
     async fn publish_idle(
         &self,
         prev_idle_secs: &mut i64,
-        prev_lastactive_secs: &mut i64,
+        prev_lastactive_min: &mut i64,
         query_failed: &mut bool,
     ) {
         let Some(idle_ms) = self.get_idle_ms() else {
@@ -171,15 +171,20 @@ impl IdleSensor {
             *prev_idle_secs = idle_secs;
         }
 
-        // lastactive - timestamp of last input; stays frozen (no republish) while idle.
+        // lastactive - timestamp of last input; stays frozen (no republish) while
+        // idle. Quantized to the minute: while active it otherwise advances every
+        // tick and republishes each poll. HA's idle/presence logic only needs
+        // minute resolution, and the gate follows the quantized value for free.
         let last_active = OffsetDateTime::now_utc() - time::Duration::milliseconds(idle_ms);
-        let la_secs = last_active.unix_timestamp();
-        if la_secs != *prev_lastactive_secs {
+        let la_minute = last_active.unix_timestamp().div_euclid(60);
+        if la_minute != *prev_lastactive_min {
+            let quantized =
+                OffsetDateTime::from_unix_timestamp(la_minute * 60).unwrap_or(last_active);
             self.state
                 .mqtt
-                .publish_sensor("lastactive", &format_rfc3339(last_active))
+                .publish_sensor("lastactive", &format_rfc3339(quantized))
                 .await;
-            *prev_lastactive_secs = la_secs;
+            *prev_lastactive_min = la_minute;
         }
     }
 

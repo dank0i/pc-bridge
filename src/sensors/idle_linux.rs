@@ -130,8 +130,13 @@ impl IdleSensor {
             *prev_idle = idle_secs;
         }
         // lastactive = now - idle → freezes while idle (stops publishing).
+        // Quantized to the minute: while active it otherwise advances every tick
+        // and republishes each poll; HA's idle/presence logic only needs minute
+        // resolution and the string gate below then holds within the minute.
         let last_active = OffsetDateTime::now_utc() - time::Duration::seconds(idle_secs);
-        let formatted = format_rfc3339(last_active);
+        let la_minute = last_active.unix_timestamp().div_euclid(60);
+        let quantized = OffsetDateTime::from_unix_timestamp(la_minute * 60).unwrap_or(last_active);
+        let formatted = format_rfc3339(quantized);
         if formatted != *prev_last {
             self.state
                 .mqtt
