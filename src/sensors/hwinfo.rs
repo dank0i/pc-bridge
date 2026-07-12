@@ -491,6 +491,26 @@ pub fn match_reading<'a>(
     None
 }
 
+/// Decide what to flush for the diagnostic sensor given the freshly-built payload
+/// vs. the last-published one: returns `(publish_state, publish_attrs)`.
+///
+/// The state topic republishes on change OR when the liveness heartbeat is due;
+/// the retained attributes topic republishes ONLY on change (no heartbeat) so it
+/// never churns multi-KB retained payloads at QoS 1 in steady state. Pure so it
+/// can be unit-tested off Windows.
+pub(super) fn diag_flush_plan(
+    new_state: &str,
+    new_attrs: &str,
+    last_state: &str,
+    last_attrs: &str,
+    secs_since_state_flush: u64,
+    heartbeat_secs: u64,
+) -> (bool, bool) {
+    let publish_state = new_state != last_state || secs_since_state_flush >= heartbeat_secs;
+    let publish_attrs = new_attrs != last_attrs;
+    (publish_state, publish_attrs)
+}
+
 // ---------------------------------------------------------------------------
 // Windows-only task
 // ---------------------------------------------------------------------------
@@ -513,15 +533,44 @@ mod win {
     use tokio::time::{Duration, MissedTickBehavior, interval};
 
     const HEARTBEAT_SECS: u64 = 30;
-    /// Diagnostic publish interval. We rebuild the payload on every snapshot
-    /// but only flush to MQTT this often, to keep the broker traffic boring.
+    /// Diagnostic rebuild/compare interval. We rebuild the payload this often, but
+    /// only flush to MQTT when the serialized value actually changed (plus the
+    /// liveness heartbeat below), so a steady state or an endless "NotOpen" doesn't
+    /// churn multi-KB retained attributes at QoS 1 every 5s.
     const DIAGNOSTIC_INTERVAL_SECS: u64 = 5;
+    /// Republish the diagnostic STATE (not the retained attributes) at least this
+    /// often even when unchanged, so HA can see the sensor is alive.
+    const DIAGNOSTIC_HEARTBEAT_SECS: u64 = 60;
     /// If HWiNFO's pollTime stops advancing for this long, treat it as gone (the
     /// mapped section can outlive the app). HWiNFO's own poll is usually ~2s.
     const HWINFO_STALE_SECS: u64 = 15;
 
     pub struct HwInfoSensor {
         state: Arc<AppState>,
+    }
+
+    /// Change-gating state for the diagnostic publish. Kept in one struct so the
+    /// publish helper stays under a sane argument count.
+    struct DiagPublishState {
+        /// When the payload was last rebuilt/compared (gates the 5s cadence).
+        last_at: Option<Instant>,
+        /// Last state string actually published (empty = force first publish).
+        last_state: String,
+        /// Last serialized attributes actually published (empty = force first).
+        last_attrs: String,
+        /// When the state topic was last flushed (drives the liveness heartbeat).
+        last_state_flush: Instant,
+    }
+
+    impl DiagPublishState {
+        fn new() -> Self {
+            Self {
+                last_at: None,
+                last_state: String::new(),
+                last_attrs: String::new(),
+                last_state_flush: Instant::now(),
+            }
+        }
     }
 
     impl HwInfoSensor {
@@ -569,7 +618,7 @@ mod win {
             let mut latest_error: Option<String> = None;
             let mut latest_matched: Vec<&'static str> = Vec::new();
             let mut latest_unmatched: Vec<&'static str> = Vec::new();
-            let mut last_diagnostic_at: Option<Instant> = None;
+            let mut diag = DiagPublishState::new();
 
             info!(
                 "HWiNFO sensor started (lazy poll @ 500 ms, {} mapped sensors)",
@@ -597,7 +646,11 @@ mod win {
                             last_published.clear();
                             last_published_attrs.clear();
                             last_poll_time = None;
-                            last_diagnostic_at = None;
+                            // Force a full diagnostic republish: the broker may have
+                            // dropped the retained state/attributes on reconnect.
+                            diag.last_at = None;
+                            diag.last_state.clear();
+                            diag.last_attrs.clear();
                             let online = client.is_some();
                             self.state.mqtt.publish_hwinfo_availability(online).await;
                         }
@@ -625,7 +678,7 @@ mod win {
                                         latest_view_size,
                                         &latest_matched,
                                         &latest_unmatched,
-                                        &mut last_diagnostic_at,
+                                        &mut diag,
                                     )
                                     .await;
                                 continue;
@@ -650,7 +703,7 @@ mod win {
                                     0,
                                     &latest_matched,
                                     &latest_unmatched,
-                                    &mut last_diagnostic_at,
+                                    &mut diag,
                                 )
                                 .await;
                             continue;
@@ -785,7 +838,7 @@ mod win {
                                 latest_view_size,
                                 &latest_matched,
                                 &latest_unmatched,
-                                &mut last_diagnostic_at,
+                                &mut diag,
                             )
                             .await;
                     }
@@ -793,34 +846,53 @@ mod win {
             }
         }
 
-        /// Publish the diagnostic payload to MQTT if at least
-        /// `DIAGNOSTIC_INTERVAL_SECS` has elapsed since the previous publish
-        /// (or this is the first publish). Updates `last_diagnostic_at` on
-        /// successful flush.
+        /// Rebuild the diagnostic payload at most every `DIAGNOSTIC_INTERVAL_SECS`
+        /// and flush to MQTT only when it changed: the state topic republishes on
+        /// change OR every `DIAGNOSTIC_HEARTBEAT_SECS` for liveness; the retained
+        /// attributes topic republishes only on change (no heartbeat), to avoid
+        /// multi-KB retained churn while gaming or an endless "NotOpen" republish.
         async fn maybe_publish_diagnostic(
             &self,
             input: DiagnosticInput<'_>,
             view_size_bytes: usize,
             matched: &[&str],
             unmatched: &[&str],
-            last_diagnostic_at: &mut Option<Instant>,
+            diag: &mut DiagPublishState,
         ) {
             let now = Instant::now();
-            let due = match *last_diagnostic_at {
+            let due = match diag.last_at {
                 None => true,
                 Some(when) => now.duration_since(when).as_secs() >= DIAGNOSTIC_INTERVAL_SECS,
             };
             if !due {
                 return;
             }
+            diag.last_at = Some(now);
+
             let DiagnosticPayload { state, attributes } =
                 build_diagnostic_payload(&input, view_size_bytes, matched, unmatched);
-            self.state.mqtt.publish_sensor(DIAGNOSTIC_KEY, &state).await;
-            self.state
-                .mqtt
-                .publish_sensor_attributes(DIAGNOSTIC_KEY, &attributes)
-                .await;
-            *last_diagnostic_at = Some(now);
+            let attrs_str = attributes.to_string();
+
+            let (publish_state, publish_attrs) = super::diag_flush_plan(
+                &state,
+                &attrs_str,
+                &diag.last_state,
+                &diag.last_attrs,
+                now.duration_since(diag.last_state_flush).as_secs(),
+                DIAGNOSTIC_HEARTBEAT_SECS,
+            );
+            if publish_state {
+                self.state.mqtt.publish_sensor(DIAGNOSTIC_KEY, &state).await;
+                diag.last_state = state;
+                diag.last_state_flush = now;
+            }
+            if publish_attrs {
+                self.state
+                    .mqtt
+                    .publish_sensor_attributes(DIAGNOSTIC_KEY, &attributes)
+                    .await;
+                diag.last_attrs = attrs_str;
+            }
         }
 
         /// True if this value differs by ≥ threshold from the last-published
@@ -892,6 +964,18 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_diag_flush_plan() {
+        // Identical payload, before the heartbeat: suppress both.
+        assert_eq!(diag_flush_plan("s", "a", "s", "a", 10, 60), (false, false));
+        // Changed state publishes state; unchanged attrs stay suppressed.
+        assert_eq!(diag_flush_plan("s2", "a", "s", "a", 10, 60), (true, false));
+        // Changed attrs publishes attrs; unchanged state stays suppressed.
+        assert_eq!(diag_flush_plan("s", "a2", "s", "a", 10, 60), (false, true));
+        // Heartbeat due republishes state even when unchanged; attrs unaffected.
+        assert_eq!(diag_flush_plan("s", "a", "s", "a", 60, 60), (true, false));
+    }
 
     fn mk_reading(sensor: &str, label: &str, unit: &str, value: f64) -> Reading {
         Reading {
