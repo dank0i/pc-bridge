@@ -405,6 +405,7 @@ mod tests {
                 launch_command: None,
                 auto_discovered: true,
                 exposed: true,
+                detect: crate::config::DetectMode::Window,
             },
         )]);
         let processes = procs(&["helldivers2.exe"]);
@@ -424,6 +425,7 @@ mod tests {
                 launch_command: None,
                 auto_discovered: false,
                 exposed: true,
+                detect: crate::config::DetectMode::Window,
             },
         )]);
         let processes = procs(&["cod_mw.exe"]);
@@ -483,6 +485,7 @@ mod tests {
                     launch_command: None,
                     auto_discovered: false,
                     exposed: true,
+                    detect: crate::config::DetectMode::Window,
                 },
             ),
             ("cod_mw", GameConfig::Simple("call_of_duty_mw".into())),
@@ -552,6 +555,7 @@ mod tests {
                 launch_command: None,
                 auto_discovered: true,
                 exposed: true,
+                detect: crate::config::DetectMode::Window,
             },
         )]);
         let processes = procs(&["bf2042.exe", "chrome.exe", "explorer.exe"]);
@@ -664,6 +668,7 @@ mod tests {
             launch_command: None,
             auto_discovered: false,
             exposed: false,
+            detect: crate::config::DetectMode::Window,
         };
         assert!(!gc.is_exposed());
 
@@ -686,6 +691,7 @@ mod tests {
                     launch_command: None,
                     auto_discovered: false,
                     exposed: false,
+                    detect: crate::config::DetectMode::Window,
                 },
             ),
             (
@@ -697,6 +703,7 @@ mod tests {
                     launch_command: None,
                     auto_discovered: true,
                     exposed: true,
+                    detect: crate::config::DetectMode::Window,
                 },
             ),
         ]
