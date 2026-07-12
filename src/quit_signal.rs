@@ -15,12 +15,21 @@ const QUIT_EVENT: windows::core::PCWSTR = windows::core::w!("Local\\pc-bridge-ag
 #[cfg(windows)]
 pub fn watch_for_quit(shutdown_tx: tokio::sync::broadcast::Sender<()>) {
     use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
+    use windows::Win32::System::Threading::{
+        CreateEventW, INFINITE, ResetEvent, WaitForSingleObject,
+    };
     std::thread::spawn(move || unsafe {
         // Manual-reset event so a single SetEvent reliably wakes the wait.
         let Ok(event) = CreateEventW(None, true, false, QUIT_EVENT) else {
             return;
         };
+        // Reset at startup: CreateEventW on an EXISTING named event ignores the
+        // initial-state arg, so a relaunched agent can inherit the previous
+        // instance's still-signaled event (it outlives us while the settings
+        // window holds a handle) and quit immediately. The race window with a
+        // legitimate concurrent quit is milliseconds, and the settings window
+        // retries its SetEvent, so a clobbered request is re-delivered.
+        let _ = ResetEvent(event);
         // WAIT_OBJECT_0 == 0: the event was signaled.
         if WaitForSingleObject(event, INFINITE).0 == 0 {
             log::info!("Quit requested from settings window; shutting down");
