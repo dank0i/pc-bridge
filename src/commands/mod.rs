@@ -96,6 +96,34 @@ pub(crate) fn is_arbitrary_launch(payload: &str) -> bool {
     }
 }
 
+/// The action class a launcher payload resolves to, derived from its SCHEME
+/// (not the command name) so a feature gate on it can't be bypassed by renaming
+/// the command topic. Shared by both executors' launcher fall-through.
+pub(crate) enum LaunchClass {
+    /// Runs or opens something: steam/epic/exe/lnk/url/update/validate.
+    Launch,
+    /// Terminates a process: close/kill.
+    Close,
+    /// Not a launcher scheme (predefined/raw handling applies instead).
+    Other,
+}
+
+/// Classify a payload by its resolved scheme. Uses the SAME scheme extraction as
+/// `expand_launcher_shortcut` / `is_arbitrary_launch` (split at first ':', trim,
+/// Unicode lowercase), so a scheme can't evade the class gate while still
+/// resolving to a launch. Pass the string the resolver consumes (env-expanded on
+/// Windows).
+pub(crate) fn classify_launch(payload: &str) -> LaunchClass {
+    match payload.split_once(':') {
+        Some((scheme, _)) => match scheme.trim().to_lowercase().as_str() {
+            "steam" | "epic" | "exe" | "lnk" | "url" | "update" | "validate" => LaunchClass::Launch,
+            "close" | "kill" => LaunchClass::Close,
+            _ => LaunchClass::Other,
+        },
+        None => LaunchClass::Other,
+    }
+}
+
 /// Whether `payload` matches a configured game's launch command (what Home
 /// Assistant's Launch button publishes). Used to authorize the arbitrary-launch
 /// schemes above so an attacker with MQTT access can't run an unconfigured
@@ -238,6 +266,42 @@ mod tests {
         // Any other url: target is still arbitrary.
         assert!(is_arbitrary_launch("url:file:///etc/passwd"));
         assert!(is_arbitrary_launch("url:https://evil"));
+    }
+
+    #[test]
+    fn test_classify_launch() {
+        use super::{LaunchClass, classify_launch};
+        // Launch schemes.
+        for p in [
+            "steam:730",
+            "epic:Fortnite",
+            "exe:C:/x.exe",
+            "lnk:C:/x.lnk",
+            "url:discord://x",
+            "update:730",
+            "validate:730",
+            "EXE:C:/x.exe", // scheme normalized (trim + lowercase)
+            "  steam:1",
+        ] {
+            assert!(
+                matches!(classify_launch(p), LaunchClass::Launch),
+                "{p} should classify as Launch"
+            );
+        }
+        // Close schemes.
+        for p in ["close:notepad", "kill:GTA5.exe", "KILL:x"] {
+            assert!(
+                matches!(classify_launch(p), LaunchClass::Close),
+                "{p} should classify as Close"
+            );
+        }
+        // Non-launcher payloads fall through.
+        for p in ["notepad.exe", "no-scheme", "", "unknown:thing"] {
+            assert!(
+                matches!(classify_launch(p), LaunchClass::Other),
+                "{p} should classify as Other"
+            );
+        }
     }
 
     #[test]

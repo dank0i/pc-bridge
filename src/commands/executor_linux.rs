@@ -279,6 +279,30 @@ impl CommandExecutor {
             return Ok(());
         }
 
+        // Defense in depth: gate the launcher fall-through on the RESOLVED action
+        // class so a command whose NAME isn't feature-gated (an unknown or renamed
+        // topic from a compromised broker) can't smuggle a launch/close past the
+        // launch_game/close_game toggles. Native commands are already gated by name
+        // (command_feature_enabled above) - and gating them here would break the
+        // legitimate close: on the Launch topic, which is intentionally NOT gated on
+        // close_game - so only unrecognized names are class-gated. Custom commands
+        // returned earlier with their own allow mechanism. Mirrors Windows.
+        if !crate::commands::is_native_command(name) {
+            let blocked = match crate::commands::classify_launch(payload) {
+                crate::commands::LaunchClass::Launch => {
+                    !state.config.read().await.features.launch_game
+                }
+                crate::commands::LaunchClass::Close => {
+                    !state.config.read().await.features.close_game
+                }
+                crate::commands::LaunchClass::Other => false,
+            };
+            if blocked {
+                warn!("Blocked '{name}': resolved launch/close class is disabled");
+                return Ok(());
+            }
+        }
+
         // DiscordJoin is subscribed whenever the discord feature is on but has no
         // inline arm, so its payload falls through to the launcher resolver. It
         // must ONLY carry a discord deep-link; otherwise a steam:/epic:/close:/
