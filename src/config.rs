@@ -683,7 +683,8 @@ impl Config {
         // Atomic write like every other userConfig.json writer: a bare write()
         // here could leave a truncated file (and fire the hot-reload watcher on
         // the partial write) if it's interrupted mid-flight.
-        crate::fsutil::write_atomic(config_path, content.as_bytes(), None)?;
+        // 0600 to match save() (see there); a bare None would relax the mode.
+        crate::fsutil::write_atomic(config_path, content.as_bytes(), Some(0o600))?;
         Ok(())
     }
 
@@ -832,7 +833,8 @@ impl Config {
             // Write back the migrated config atomically (same guarantee as save()):
             // a crash mid-write must not truncate the user's config.
             let new_content = serde_json::to_string_pretty(&json)?;
-            crate::fsutil::write_atomic(config_path, new_content.as_bytes(), None)
+            // 0600 to match save() (see there); a bare None would relax the mode.
+            crate::fsutil::write_atomic(config_path, new_content.as_bytes(), Some(0o600))
                 .with_context(|| format!("Failed to write migrated config to {:?}", config_path))?;
             info!("Migrated userConfig.json - moved feature toggles into features section");
             Ok(new_content)
@@ -1046,7 +1048,11 @@ impl Config {
         to_save.mqtt.pass = String::new();
 
         let content = serde_json::to_string_pretty(&to_save)?;
-        crate::fsutil::write_atomic(&config_path, content.as_bytes(), None)
+        // 0600: userConfig.json may hold the MQTT username and other settings; keep
+        // it owner-only on Unix (no-op on Windows, where ACLs govern). Every
+        // userConfig.json writer must agree, or a later rewrite (migrate/clear)
+        // would relax the mode back to the umask default.
+        crate::fsutil::write_atomic(&config_path, content.as_bytes(), Some(0o600))
             .with_context(|| format!("Failed to write config to {:?}", config_path))?;
         Ok(())
     }
