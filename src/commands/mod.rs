@@ -75,8 +75,10 @@ pub(crate) fn is_native_command(name: &str) -> bool {
 /// The scheme is extracted EXACTLY as `expand_launcher_shortcut` does (split at
 /// the first ':', trim, lowercase), so `EXE:`, `exe :`, etc. can't slip past the
 /// gate while still resolving to a launch. Callers must pass the same string the
-/// resolver consumes (on Windows that is the env-expanded payload).
-pub(crate) fn is_arbitrary_launch(payload: &str) -> bool {
+/// resolver consumes (on Windows that is the env-expanded payload), and the
+/// command `name` so the discord:// exemption can't be reused under a different
+/// command.
+pub(crate) fn is_arbitrary_launch(name: &str, payload: &str) -> bool {
     match payload.split_once(':') {
         // MUST use Unicode to_lowercase (NOT to_ascii_lowercase): the resolver
         // (expand_launcher_shortcut) lowercases with to_lowercase, and e.g. U+212A
@@ -85,11 +87,17 @@ pub(crate) fn is_arbitrary_launch(payload: &str) -> bool {
         // to "lnk:" and launch, bypassing allow_raw_commands. Match the resolver.
         Some((scheme, rest)) => match scheme.trim().to_lowercase().as_str() {
             "exe" | "lnk" => true,
-            // url:discord://... is the DiscordJoin channel deep-link (a feature
-            // gated by f.discord), not an arbitrary program/URL launch. Any other
-            // url: target is arbitrary. Metacharacters are still validated by
-            // is_safe_url downstream regardless.
-            "url" => !rest.trim_start().to_lowercase().starts_with("discord://"),
+            // url:discord://... is the DiscordJoin channel deep-link (gated by
+            // f.discord), not an arbitrary program/URL launch - but ONLY under the
+            // DiscordJoin command. Under any other name it is an arbitrary launch
+            // (subject to allow_raw_commands / configured-launch matching), so a
+            // stray command can't drive arbitrary discord:// deep links. Any other
+            // url: target is arbitrary regardless. Metacharacters are still
+            // validated by is_safe_url downstream.
+            "url" => {
+                let discord_deeplink = rest.trim_start().to_lowercase().starts_with("discord://");
+                !(discord_deeplink && name == "DiscordJoin")
+            }
             _ => false,
         },
         None => false,
@@ -226,46 +234,55 @@ mod tests {
             "Kelvin-K kill: must be gated like kill:"
         );
         assert!(
-            is_arbitrary_launch("ln\u{212A}:C:/x.lnk"),
+            is_arbitrary_launch("Launch", "ln\u{212A}:C:/x.lnk"),
             "Kelvin-K lnk: must be treated as an arbitrary launch"
         );
         // Sanity: the plain ASCII forms behave identically.
         assert!(global_scheme_blocked(&cfg, "kill:notepad"));
-        assert!(is_arbitrary_launch("lnk:C:/x.lnk"));
+        assert!(is_arbitrary_launch("Launch", "lnk:C:/x.lnk"));
     }
 
     #[test]
     fn test_is_arbitrary_launch() {
-        assert!(is_arbitrary_launch("exe:C:/Games/g.exe"));
-        assert!(is_arbitrary_launch("lnk:C:/x.lnk"));
-        assert!(is_arbitrary_launch("url:steam://run/1"));
+        assert!(is_arbitrary_launch("Launch", "exe:C:/Games/g.exe"));
+        assert!(is_arbitrary_launch("Launch", "lnk:C:/x.lnk"));
+        assert!(is_arbitrary_launch("Launch", "url:steam://run/1"));
         // ID/name-restricted schemes are not "arbitrary".
-        assert!(!is_arbitrary_launch("steam:730"));
-        assert!(!is_arbitrary_launch("epic:Fortnite"));
-        assert!(!is_arbitrary_launch("close:notepad"));
+        assert!(!is_arbitrary_launch("Launch", "steam:730"));
+        assert!(!is_arbitrary_launch("Launch", "epic:Fortnite"));
+        assert!(!is_arbitrary_launch("Launch", "close:notepad"));
     }
 
     #[test]
     fn test_is_arbitrary_launch_normalizes_scheme() {
         // The resolver lowercases + trims the scheme, so the gate must too, or
         // these would slip past while still resolving to a launch.
-        assert!(is_arbitrary_launch("EXE:C:/x.exe"));
-        assert!(is_arbitrary_launch("Exe:C:/x.exe"));
-        assert!(is_arbitrary_launch("exe :C:/x.exe"));
-        assert!(is_arbitrary_launch("  URL:steam://run/1"));
-        assert!(is_arbitrary_launch("LNK:C:/x.lnk"));
+        assert!(is_arbitrary_launch("Launch", "EXE:C:/x.exe"));
+        assert!(is_arbitrary_launch("Launch", "Exe:C:/x.exe"));
+        assert!(is_arbitrary_launch("Launch", "exe :C:/x.exe"));
+        assert!(is_arbitrary_launch("Launch", "  URL:steam://run/1"));
+        assert!(is_arbitrary_launch("Launch", "LNK:C:/x.lnk"));
     }
 
     #[test]
     fn test_discord_deeplink_not_arbitrary() {
-        // DiscordJoin's channel deep-link is feature-gated, not arbitrary exec.
+        // DiscordJoin's channel deep-link is feature-gated, not arbitrary exec -
+        // but ONLY under the DiscordJoin command.
         assert!(!is_arbitrary_launch(
+            "DiscordJoin",
             "url:discord://discord.com/channels/1/2"
         ));
-        assert!(!is_arbitrary_launch("URL:discord://x"));
-        // Any other url: target is still arbitrary.
-        assert!(is_arbitrary_launch("url:file:///etc/passwd"));
-        assert!(is_arbitrary_launch("url:https://evil"));
+        assert!(!is_arbitrary_launch("DiscordJoin", "URL:discord://x"));
+        // The same discord:// payload under ANY other command IS an arbitrary
+        // launch, so a stray command can't drive arbitrary discord:// deep links.
+        assert!(is_arbitrary_launch(
+            "Launch",
+            "url:discord://discord.com/channels/1/2"
+        ));
+        assert!(is_arbitrary_launch("Foo", "url:discord://x"));
+        // Any other url: target is still arbitrary, even under DiscordJoin.
+        assert!(is_arbitrary_launch("DiscordJoin", "url:file:///etc/passwd"));
+        assert!(is_arbitrary_launch("DiscordJoin", "url:https://evil"));
     }
 
     #[test]

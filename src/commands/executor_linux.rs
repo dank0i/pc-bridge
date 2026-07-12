@@ -322,7 +322,7 @@ impl CommandExecutor {
         // which would defeat the allow_raw_commands=false guarantee (the launcher
         // shortcut path is otherwise "always allowed"). Only run them if they
         // match a configured game's launch command or raw commands are enabled.
-        if crate::commands::is_arbitrary_launch(payload) {
+        if crate::commands::is_arbitrary_launch(name, payload) {
             let cfg = state.config.read().await;
             if !cfg.allow_raw_commands && !crate::commands::is_configured_launch(&cfg, payload) {
                 warn!(

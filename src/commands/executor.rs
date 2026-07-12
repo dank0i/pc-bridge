@@ -324,7 +324,7 @@ impl CommandExecutor {
         // shortcut path is otherwise "always allowed"). Check the EXPANDED payload
         // (env vars could inject the scheme) and authorize against a configured
         // game's launch command (matched raw OR expanded).
-        if crate::commands::is_arbitrary_launch(&expanded_payload) {
+        if crate::commands::is_arbitrary_launch(name, &expanded_payload) {
             let cfg = state.config.read().await;
             if !cfg.allow_raw_commands
                 && !crate::commands::is_configured_launch(&cfg, payload)
