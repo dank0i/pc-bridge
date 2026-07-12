@@ -544,6 +544,12 @@ mod win {
     /// If HWiNFO's pollTime stops advancing for this long, treat it as gone (the
     /// mapped section can outlive the app). HWiNFO's own poll is usually ~2s.
     const HWINFO_STALE_SECS: u64 = 15;
+    /// Poll cadence once the shared memory is open.
+    const OPEN_POLL_MS: u64 = 500;
+    /// Slow backoff while closed: probing open() every 500ms with the feature on
+    /// but HWiNFO not running is ~172k wakeups/day for nothing. The interval's
+    /// first tick is still immediate, so startup detection stays fast.
+    const CLOSED_POLL_MS: u64 = 10_000;
 
     pub struct HwInfoSensor {
         state: Arc<AppState>,
@@ -585,8 +591,10 @@ mod win {
             }
             drop(config);
 
-            let mut tick = interval(Duration::from_millis(500));
+            // Start slow: the client is closed until the first probe opens it.
+            let mut tick = interval(Duration::from_millis(CLOSED_POLL_MS));
             tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            let mut fast_poll = false;
             let mut shutdown_rx = self.state.shutdown_tx.subscribe();
             let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
 
@@ -621,7 +629,7 @@ mod win {
             let mut diag = DiagPublishState::new();
 
             info!(
-                "HWiNFO sensor started (lazy poll @ 500 ms, {} mapped sensors)",
+                "HWiNFO sensor started (lazy poll: 500ms open / 10s closed, {} mapped sensors)",
                 MATCH_RULES.len()
             );
 
@@ -656,6 +664,17 @@ mod win {
                         }
                     }
                     _ = tick.tick() => {
+                        // Reconcile poll cadence to the client state: 500ms while
+                        // open, 10s backoff while closed. Rebuilding here (rather than
+                        // at each transition) keeps every open/loss path covered even
+                        // through the `continue`s below.
+                        if client.is_some() != fast_poll {
+                            fast_poll = client.is_some();
+                            let ms = if fast_poll { OPEN_POLL_MS } else { CLOSED_POLL_MS };
+                            tick = interval(Duration::from_millis(ms));
+                            tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+                        }
+
                         // Mid-session start: try to open if currently closed.
                         if client.is_none() {
                             if let Some(c) = HwInfoClient::open() {
