@@ -185,6 +185,15 @@ impl ProcessWatcher {
             match Self::setup_wmi_events(event_tx).await {
                 Ok(()) => {
                     info!("Process watcher using WMI events");
+                    // Close the startup blind window: a process started between the
+                    // initial ToolHelp enumeration (in new()) and the WMI
+                    // subscription going live is otherwise invisible until the first
+                    // 60s reconcile. Re-snapshot now; add_process is idempotent per
+                    // PID, so re-adding already-tracked processes is safe.
+                    let (pruned, added) = Self::reconcile(&state).await;
+                    if pruned > 0 || added > 0 {
+                        let _ = change_tx.send(ProcessChangeNotification);
+                    }
                     Self::run_event_processor(&state, shutdown_rx, change_tx, event_rx).await;
                 }
                 Err(e) => {
