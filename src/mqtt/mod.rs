@@ -74,6 +74,17 @@ fn parse_incoming_topic<'a>(
     None
 }
 
+/// Whether an inbound command PUBLISH should be dispatched given its retain flag.
+///
+/// Per MQTT 3.1.1 the broker sets retain=1 only when delivering a STORED retained
+/// message to a fresh subscription; live forwards of a button press arrive with
+/// retain=0. A retained command is therefore a stale replay (e.g. an old Sleep
+/// stored on the command topic re-fired at subscribe time), so drop it - live
+/// presses are unaffected.
+fn should_dispatch_command(retain: bool) -> bool {
+    !retain
+}
+
 impl MqttClient {
     pub async fn new(
         config: &Config,
@@ -99,7 +110,12 @@ impl MqttClient {
 
         // Connection settings
         opts.set_keep_alive(Duration::from_secs(30));
-        opts.set_clean_session(false); // Preserve subscriptions
+        // clean_session=true: the ConnAck handler resubscribes on every connect, so
+        // a persistent session buys nothing except the bug it caused - the broker
+        // queuing QoS 1 commands published while we were asleep/off and delivering
+        // them all on reconnect (a queued Sleep re-suspended the PC the instant it
+        // woke). A clean session drops that offline queue.
+        opts.set_clean_session(true);
 
         // Cap packet size to bound memory, but generously: an incoming payload
         // over the cap makes the event loop error and the whole connection cycle
@@ -243,6 +259,18 @@ impl MqttClient {
                         .map(str::to_owned);
 
                         if let Some(cmd_name) = cmd_name {
+                            // Drop a retained command replay: the broker only sets
+                            // retain=1 when handing us a stored message on a fresh
+                            // subscription, so this is a stale command, not a live
+                            // press. Executing it re-runs whatever was last retained
+                            // on the topic (a queued Sleep would re-suspend on wake).
+                            if !should_dispatch_command(publish.retain) {
+                                warn!(
+                                    "Dropping retained command on {} (stale replay at subscribe time)",
+                                    publish.topic
+                                );
+                                continue;
+                            }
                             // Zero-copy when payload is valid UTF-8 (common case)
                             let payload = match std::str::from_utf8(&publish.payload) {
                                 Ok(s) => s.to_string(),
@@ -1671,6 +1699,17 @@ mod tests {
         assert_eq!(host, "192.168.1.1");
         assert_eq!(port, 1883);
         assert!(!tls);
+    }
+
+    // ===== retained-command drop test =====
+
+    #[test]
+    fn test_should_dispatch_command_drops_retained() {
+        // A live button press arrives retain=0 and must dispatch; a retained
+        // delivery (broker replaying a stored command to a fresh subscription)
+        // is stale and must be dropped.
+        assert!(should_dispatch_command(false));
+        assert!(!should_dispatch_command(true));
     }
 
     // ===== extract_command_name tests =====

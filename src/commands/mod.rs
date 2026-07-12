@@ -8,9 +8,9 @@ use crate::config::FeatureConfig;
 /// Whether the feature gating a command is currently enabled.
 ///
 /// Destructive/native commands (Shutdown, Sleep, Lock, ...) are only registered
-/// with HA when their feature is on, but the broker can still deliver a stale
-/// subscription after a feature is disabled (clean_session is false and topics
-/// aren't unsubscribed), so the executor must re-check here before acting.
+/// with HA when their feature is on, but a ConnAck resubscribe can race a feature
+/// disable (or the hot-reload unsubscribe), so the broker may still deliver a
+/// command for a just-disabled feature. The executor re-checks here before acting.
 /// Commands not tied to a feature flag (notifications, custom, raw shell) return
 /// `true` and are gated by their own downstream checks.
 pub(crate) fn command_feature_enabled(name: &str, f: &FeatureConfig) -> bool {
