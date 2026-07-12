@@ -508,7 +508,21 @@ async fn run_agent() -> anyhow::Result<()> {
     }
 
     #[cfg(not(windows))]
-    tokio::signal::ctrl_c().await?;
+    {
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        // systemctl stop, updater --replace, and relaunch (kill_existing_instances
+        // sends SIGTERM) would otherwise kill main mid-flight, skipping graceful
+        // shutdown: no offline publish and the gdbus monitor child left orphaned.
+        // Wait on Ctrl+C OR SIGTERM OR the global shutdown broadcast, mirroring the
+        // Windows arm above; all three then run the normal drain that reaps children.
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+            _ = shutdown_rx.recv() => {}
+        }
+    }
 
     info!("Shutting down...");
 
