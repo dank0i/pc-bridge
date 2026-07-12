@@ -157,6 +157,54 @@ impl IdleSensor {
     }
 
     fn get_idle_seconds_blocking() -> Option<i64> {
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::time::Instant;
+
+        // Warn-once latch + failure backoff so an unsupported setup doesn't warn
+        // every tick and keep forking xprintidle/qdbus forever. After 3 consecutive
+        // full-probe failures we stop probing and retry only every 5 minutes (env
+        // changes like logging into a session can make detection start working, so
+        // we never give up permanently).
+        static WARN_LOGGED: AtomicBool = AtomicBool::new(false);
+        static FAIL_STREAK: AtomicU32 = AtomicU32::new(0);
+        static BACKOFF_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+        const FAIL_THRESHOLD: u32 = 3;
+        const BACKOFF: Duration = Duration::from_mins(5);
+
+        // Skip all probes while backing off. Clear the window when it elapses so
+        // the next tick runs one retry.
+        {
+            let mut until = BACKOFF_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(t) = *until {
+                if t > Instant::now() {
+                    return None;
+                }
+                *until = None;
+            }
+        }
+
+        let idle = Self::probe_idle_seconds();
+        if idle.is_some() {
+            FAIL_STREAK.store(0, Ordering::Relaxed);
+            WARN_LOGGED.store(false, Ordering::Relaxed);
+            return idle;
+        }
+
+        // Full-probe failure.
+        let streak = FAIL_STREAK.fetch_add(1, Ordering::Relaxed) + 1;
+        if !WARN_LOGGED.swap(true, Ordering::Relaxed) {
+            warn!("No idle time detection available (install xprintidle for X11)");
+        }
+        if streak >= FAIL_THRESHOLD {
+            *BACKOFF_UNTIL.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(Instant::now() + BACKOFF);
+        }
+        None
+    }
+
+    /// Run the idle-detection probes in priority order, returning the first hit.
+    fn probe_idle_seconds() -> Option<i64> {
         // On Wayland, XWayland's screensaver counter doesn't track Wayland-native
         // input, so the X11 paths (x11rb/xprintidle) would report the user as idle
         // while active. Use the compositor's D-Bus idle there; on X11, x11rb is
@@ -205,8 +253,8 @@ impl IdleSensor {
             return Some(idle_secs);
         }
 
-        // No detection available: return None rather than fabricating now().
-        warn!("No idle time detection available (install xprintidle for X11)");
+        // No detection available: return None rather than fabricating now(). The
+        // caller handles warn-once + backoff so we don't spam or keep forking.
         None
     }
 }
