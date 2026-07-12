@@ -14,9 +14,6 @@ ignore = [
     # egui/eframe dependency tree (settings UI). Unmaintained notices, no fixes:
     "RUSTSEC-2026-0192", # ttf-parser unmaintained (egui font parsing)
     "RUSTSEC-2024-0436", # paste unmaintained (egui macros)
-    # anyhow: unsoundness only when calling Error::downcast_mut() on a
-    # context-wrapped error. pc-bridge never does that. Revisit when anyhow ships a fix.
-    "RUSTSEC-2026-0190",
     # quick-xml DoS-on-malicious-XML advisories. pc-bridge only pulls quick-xml
     # transitively via wayland-scanner, a BUILD-TIME proc-macro that parses the
     # bundled, trusted Wayland protocol XML - never attacker-controlled runtime
