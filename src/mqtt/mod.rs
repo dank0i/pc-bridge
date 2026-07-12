@@ -1852,11 +1852,14 @@ mod tests {
         }
 
         /// Build a QoS 0 PUBLISH packet for injecting commands into the client.
-        fn encode_publish_qos0(topic: &str, payload: &[u8]) -> Vec<u8> {
+        /// `retain` sets the retain bit, which a broker only sets when replaying a
+        /// stored message to a fresh subscription (exercises the A2 drop path).
+        fn encode_publish_qos0(topic: &str, payload: &[u8], retain: bool) -> Vec<u8> {
             let topic_bytes = topic.as_bytes();
             let remaining = 2 + topic_bytes.len() + payload.len();
             let mut pkt = Vec::with_capacity(1 + 4 + remaining);
-            pkt.push(0x30); // PUBLISH, QoS 0, no retain
+            // PUBLISH, QoS 0; low bit is the retain flag.
+            pkt.push(0x30 | u8::from(retain));
             encode_remaining_length(&mut pkt, remaining);
             pkt.extend_from_slice(&(topic_bytes.len() as u16).to_be_bytes());
             pkt.extend_from_slice(topic_bytes);
@@ -1960,15 +1963,19 @@ mod tests {
         ///
         /// The inject sender pushes PUBLISH packets to the client (simulates HA
         /// sending button commands or notifications).
-        async fn start_mini_broker()
-        -> (u16, Arc<Mutex<BrokerState>>, mpsc::Sender<(String, String)>) {
+        async fn start_mini_broker() -> (
+            u16,
+            Arc<Mutex<BrokerState>>,
+            mpsc::Sender<(String, String, bool)>,
+        ) {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
             let state = Arc::new(Mutex::new(BrokerState {
                 published: Vec::new(),
                 subscribed: Vec::new(),
             }));
-            let (inject_tx, mut inject_rx) = mpsc::channel::<(String, String)>(16);
+            // (topic, payload, retain) so tests can inject retained deliveries.
+            let (inject_tx, mut inject_rx) = mpsc::channel::<(String, String, bool)>(16);
 
             let broker_state = Arc::clone(&state);
             tokio::spawn(async move {
@@ -1991,8 +1998,8 @@ mod tests {
                                 }
                             }
                         }
-                        Some((topic, payload)) = inject_rx.recv() => {
-                            let pkt = encode_publish_qos0(&topic, payload.as_bytes());
+                        Some((topic, payload, retain)) = inject_rx.recv() => {
+                            let pkt = encode_publish_qos0(&topic, payload.as_bytes(), retain);
                             if stream.write_all(&pkt).await.is_err() {
                                 return;
                             }
@@ -2411,6 +2418,7 @@ mod tests {
                 .send((
                     "homeassistant/button/test-pc/Sleep/action".to_string(),
                     String::new(),
+                    false,
                 ))
                 .await
                 .unwrap();
@@ -2422,6 +2430,97 @@ mod tests {
 
             assert_eq!(cmd.name, "Sleep");
             assert!(cmd.payload.is_empty());
+        }
+
+        // H1: a retained command delivery (broker replaying a stored message to a
+        // fresh subscription) must be DROPPED, not executed (locks in A2 layer 2).
+        #[tokio::test(flavor = "current_thread")]
+        async fn test_retained_command_is_dropped() {
+            let (port, state, inject) = start_mini_broker().await;
+            let features = FeatureConfig {
+                cmd_sleep: true,
+                ..FeatureConfig::default()
+            };
+            let config = broker_config("test-pc", port, features);
+            let (stx, _) = test_shutdown();
+
+            let (_mqtt, mut cmd_rx) = MqttClient::new(&config, stx.subscribe()).await.unwrap();
+            wait_for_subscribes(&state, 5).await;
+
+            // Retained Sleep: must NOT reach the executor.
+            inject
+                .send((
+                    "homeassistant/button/test-pc/Sleep/action".to_string(),
+                    String::new(),
+                    true,
+                ))
+                .await
+                .unwrap();
+            // Then a live (retain=0) Shutdown so we know the loop processed both.
+            inject
+                .send((
+                    "homeassistant/button/test-pc/Shutdown/action".to_string(),
+                    String::new(),
+                    false,
+                ))
+                .await
+                .unwrap();
+
+            let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+                .await
+                .expect("Timed out")
+                .expect("Channel closed");
+            // The retained Sleep was dropped; the first command delivered is the
+            // live Shutdown.
+            assert_eq!(cmd.name, "Shutdown", "retained Sleep must be dropped");
+        }
+
+        // H1: a feature toggled ON at runtime, then a button press on its topic,
+        // must dispatch (locks in A1's refresh_subscriptions wiring).
+        #[tokio::test(flavor = "current_thread")]
+        async fn test_toggle_on_then_press_dispatches() {
+            let (port, state, inject) = start_mini_broker().await;
+            // launch_game off at startup: Launch is not subscribed.
+            let config = broker_config("test-pc", port, FeatureConfig::default());
+            let (stx, _) = test_shutdown();
+
+            let (mqtt, mut cmd_rx) = MqttClient::new(&config, stx.subscribe()).await.unwrap();
+            wait_for_subscribes(&state, 8).await;
+
+            // Enable launch_game and reconcile subscriptions.
+            let enabled = broker_config(
+                "test-pc",
+                port,
+                FeatureConfig {
+                    launch_game: true,
+                    ..FeatureConfig::default()
+                },
+            );
+            mqtt.refresh_subscriptions(&enabled).await;
+            let launch = "homeassistant/button/test-pc/Launch/action";
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if state.lock().unwrap().subscribed.iter().any(|t| t == launch) {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("Launch not subscribed after refresh");
+
+            // A press on the newly-enabled topic must now dispatch.
+            inject
+                .send((launch.to_string(), "steam:730".to_string(), false))
+                .await
+                .unwrap();
+
+            let cmd = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+                .await
+                .expect("Timed out waiting for Launch")
+                .expect("Channel closed");
+            assert_eq!(cmd.name, "Launch");
+            assert_eq!(cmd.payload, "steam:730");
         }
 
         #[tokio::test(flavor = "current_thread")]
@@ -2443,6 +2542,7 @@ mod tests {
                 .send((
                     "pc-bridge/notifications/test-pc".to_string(),
                     payload.to_string(),
+                    false,
                 ))
                 .await
                 .unwrap();
@@ -2475,6 +2575,7 @@ mod tests {
                 .send((
                     "homeassistant/button/other-pc/Sleep/action".to_string(),
                     String::new(),
+                    false,
                 ))
                 .await
                 .unwrap();
@@ -2484,6 +2585,7 @@ mod tests {
                 .send((
                     "homeassistant/button/test-pc/Shutdown/action".to_string(),
                     String::new(),
+                    false,
                 ))
                 .await
                 .unwrap();
