@@ -116,10 +116,13 @@ pub fn show_toast(payload: &str) -> anyhow::Result<()> {
 
     // Try notify-send (available on most Linux desktops).  .status() waits
     // and reaps the child; .spawn() alone would leak zombies on Linux.
+    // `--` terminates option parsing: a user-controlled title/message starting
+    // with '-' must be taken as a positional argument, not an option flag.
     let result = Command::new("notify-send")
         .args([
             "--app-name=PC Bridge",
             "--icon=dialog-information",
+            "--",
             title,
             message,
         ])
@@ -132,7 +135,9 @@ pub fn show_toast(payload: &str) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Fallback: gdbus for GNOME.
+    // Fallback: gdbus for GNOME. title/message are positional D-Bus method
+    // arguments after the fixed --method= flag, not gdbus options, so a leading
+    // '-' can't be reinterpreted as a flag here.
     let gdbus_result = Command::new("gdbus")
         .args([
             "call",
