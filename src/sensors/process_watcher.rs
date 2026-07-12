@@ -386,6 +386,17 @@ impl ProcessWatcher {
                                         guard.add_process(name, pid);
                                     }
                                     ProcessEvent::Deleted(pid) => {
+                                        // PID-reuse guard: a late deletion event for
+                                        // a PID that has since been reused would evict
+                                        // the live new process. Before evicting, check
+                                        // the PID is actually gone; skip if it still
+                                        // resolves to the image name we track for it.
+                                        if let Some(name) = guard.pid_to_name.get(&pid).cloned()
+                                            && process_alive_with_name(pid, &name)
+                                        {
+                                            debug!("Skipping stale deletion for reused PID {}", pid);
+                                            continue;
+                                        }
                                         debug!("Process ended: PID {}", pid);
                                         guard.remove_process(pid);
                                     }
@@ -580,6 +591,46 @@ impl ProcessWatcher {
     /// Get the underlying shared state for direct access
     pub fn state(&self) -> Arc<RwLock<ProcessState>> {
         Arc::clone(&self.state)
+    }
+}
+
+/// Whether `pid` currently refers to a live process whose image basename equals
+/// `expected_name` (case-insensitive). Used to detect PID reuse before acting on
+/// a deletion event: if the PID still resolves to the name we track, the old
+/// process's deletion event is stale and evicting would drop the live one.
+///
+/// Returns false if the process can't be opened (gone, or access denied - in
+/// which case we let the eviction proceed; the reconcile net corrects any error).
+fn process_alive_with_name(pid: u32, expected_name: &str) -> bool {
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    };
+    use windows::core::PWSTR;
+
+    // SAFETY: OpenProcess returns a handle we close; QueryFullProcessImageNameW
+    // writes into a fixed buffer whose length we pass and read back.
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut buf = [0u16; 260];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            windows::Win32::System::Threading::PROCESS_NAME_FORMAT(0),
+            PWSTR(buf.as_mut_ptr()),
+            &raw mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(handle);
+        if !ok {
+            return false;
+        }
+        let full = String::from_utf16_lossy(&buf[..len as usize]);
+        // Compare basenames case-insensitively (stored name is like "chrome.exe").
+        full.rsplit(['\\', '/'])
+            .next()
+            .is_some_and(|base| base.eq_ignore_ascii_case(expected_name))
     }
 }
 
