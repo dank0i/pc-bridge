@@ -353,18 +353,11 @@ impl SteamGameDiscovery {
 
         // Sort: prefer exact/short matches, avoid trial/demo, then by size
         candidates.sort_by(|a, b| {
-            let a_lower = a.0.to_lowercase();
-            let b_lower = b.0.to_lowercase();
-
-            // Penalize trial/demo/test versions
-            let a_trial = a_lower.contains("trial")
-                || a_lower.contains("demo")
-                || a_lower.contains("test")
-                || a_lower.contains("benchmark");
-            let b_trial = b_lower.contains("trial")
-                || b_lower.contains("demo")
-                || b_lower.contains("test")
-                || b_lower.contains("benchmark");
+            // Penalize trial/demo/test versions, matched on word boundaries so
+            // "Protest" isn't a "test" and "Demolition" isn't a "demo".
+            const TRIAL_MARKERS: &[&str] = &["trial", "demo", "test", "benchmark"];
+            let a_trial = super::has_marker_token(&a.0, TRIAL_MARKERS);
+            let b_trial = super::has_marker_token(&b.0, TRIAL_MARKERS);
             if a_trial != b_trial {
                 return if a_trial {
                     std::cmp::Ordering::Greater
@@ -437,7 +430,9 @@ impl SteamGameDiscovery {
             let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
 
             // Skip launchers, anti-cheat wrappers, installers, and other helpers.
-            if super::is_non_game_exe(&lower) {
+            // Pass the ORIGINAL-case name so is_non_game_exe can see camelCase
+            // token boundaries (PalServer -> pal|server).
+            if super::is_non_game_exe(name) {
                 continue;
             }
 
