@@ -592,6 +592,22 @@ impl ProcessWatcher {
     pub fn state(&self) -> Arc<RwLock<ProcessState>> {
         Arc::clone(&self.state)
     }
+
+    /// Backend-independent live check for one specific process by name, via a
+    /// ToolHelp snapshot. Needed for one-off checks like "is Steam running" that
+    /// must work under the window backend too, whose ProcessState only tracks
+    /// WATCHED games - not arbitrary processes like steam.exe. Runs the blocking
+    /// snapshot off the runtime.
+    pub async fn is_process_running(name: &str) -> bool {
+        let name = name.to_owned();
+        tokio::task::spawn_blocking(move || {
+            Self::snapshot_all_processes()
+                .values()
+                .any(|n| n.eq_ignore_ascii_case(&name))
+        })
+        .await
+        .unwrap_or(false)
+    }
 }
 
 /// Whether `pid` currently refers to a live process whose image basename equals
