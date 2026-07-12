@@ -20,6 +20,6 @@ pub use display::{monitor_off, wake_display};
 pub use events::PowerEventListener;
 
 #[cfg(unix)]
-pub use display_linux::{monitor_off, wake_display};
+pub use display_linux::{monitor_off, observed_display_state, wake_display};
 #[cfg(unix)]
 pub use events_linux::PowerEventListener;

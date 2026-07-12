@@ -477,7 +477,15 @@ async fn run_agent() -> anyhow::Result<()> {
             .await;
     }
     if config.features.display_state {
-        state.mqtt.publish_sensor_retained("display", "on").await;
+        // Windows tracks display power via GUID_CONSOLE_DISPLAY_STATE events, so
+        // "on" is a safe seed. On Linux the DPMS state may be unobservable
+        // (GNOME/KDE Wayland): seed the real value if a source answers, else
+        // "unavailable" rather than a confident "on" that never updates.
+        #[cfg(windows)]
+        let seed = "on";
+        #[cfg(not(windows))]
+        let seed = crate::power::observed_display_state().unwrap_or("unavailable");
+        state.mqtt.publish_sensor_retained("display", seed).await;
     }
     if config.features.session_state {
         state

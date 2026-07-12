@@ -1,8 +1,21 @@
 //! Display wake functions for Linux
 #![allow(dead_code)] // Used on Linux only
 
-use log::info;
+use log::{info, warn};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// The display power state to seed at startup, or None when it can't be observed
+/// on this stack (GNOME/KDE Wayland with no wlr power protocol). A None must seed
+/// the sensor "unavailable" rather than a confident "on" that never updates -
+/// MonitorOff is also a no-op there, so a persistent retained "on" is a lie.
+pub fn observed_display_state() -> Option<&'static str> {
+    let wayland = crate::linux_wayland::is_wayland_session();
+    if !wayland && let Some(on) = crate::linux_x11::dpms_on() {
+        return Some(if on { "on" } else { "off" });
+    }
+    crate::linux_wayland::dpms_on().map(|on| if on { "on" } else { "off" })
+}
 
 /// Wake display: bundled X11 (DPMS on + XTEST) first, then external-tool
 /// fallbacks for setups where x11rb can't reach the display.
@@ -50,7 +63,20 @@ pub fn monitor_off() {
     if crate::linux_wayland::set_dpms(false) {
         return;
     }
-    if !wayland {
-        let _ = Command::new("xset").args(["dpms", "force", "off"]).status();
+    if !wayland
+        && Command::new("xset")
+            .args(["dpms", "force", "off"])
+            .status()
+            .is_ok_and(|s| s.success())
+    {
+        return;
+    }
+    // Nothing worked (e.g. GNOME/KDE Wayland with no wlr power protocol). Warn
+    // once instead of silently no-op'ing so the user knows the button did nothing.
+    if !MONITOR_OFF_WARNED.swap(true, Ordering::Relaxed) {
+        warn!("MonitorOff not supported on this display stack (no usable DPMS source)");
     }
 }
+
+/// Latch so an unsupported MonitorOff warns only once, not on every press.
+static MONITOR_OFF_WARNED: AtomicBool = AtomicBool::new(false);
