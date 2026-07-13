@@ -1918,7 +1918,7 @@ fn spawn_steam_scan(app: &mut App) {
     let _ = app.persist(true);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let merged = crate::steam::SteamGameDiscovery::discover()
+        let merged = crate::steam::SteamGameDiscovery::discover_fresh()
             .and_then(|d| crate::config::Config::refresh_steam_games(&d).ok())
             .map(|(fresh, _added, _removed)| fresh);
         let _ = tx.send(merged);

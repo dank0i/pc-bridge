@@ -242,7 +242,7 @@ impl CommandExecutor {
             }
             "RefreshSteamGames" => {
                 info!("Refreshing Steam game library...");
-                match SteamGameDiscovery::discover_async().await {
+                match SteamGameDiscovery::discover_fresh_async().await {
                     Some(discovery) => {
                         // Re-load from disk, merge, and save off the runtime, so a
                         // manual userConfig.json edit made since startup isn't

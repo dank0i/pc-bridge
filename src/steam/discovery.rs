@@ -56,6 +56,37 @@ impl SteamGameDiscovery {
             .flatten()
     }
 
+    /// Force a fresh discovery, ignoring the on-disk cache (for the manual
+    /// RefreshSteamGames button, so it always reflects the current install state).
+    pub async fn discover_fresh_async() -> Option<Self> {
+        tokio::task::spawn_blocking(Self::discover_fresh)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Blocking fresh discovery: always rebuilds, then refreshes the cache.
+    pub fn discover_fresh() -> Option<Self> {
+        let start = Instant::now();
+        let steam_path = Self::find_steam_path()?;
+        let appinfo_path = steam_path.join("appcache").join("appinfo.vdf");
+        let libraryfolders_path = steam_path.join("steamapps").join("libraryfolders.vdf");
+
+        let result = Self::discover_full(&steam_path, &appinfo_path)?;
+        Self::save_cache(&result, &appinfo_path, &libraryfolders_path);
+
+        let build_time_ms = start.elapsed().as_millis() as u64;
+        info!(
+            "Steam discovery (forced): {} games in {}ms",
+            result.game_count, build_time_ms
+        );
+        Some(Self {
+            build_time_ms,
+            from_cache: false,
+            ..result
+        })
+    }
+
     /// Discover all installed Steam games (blocking)
     ///
     /// # Performance
