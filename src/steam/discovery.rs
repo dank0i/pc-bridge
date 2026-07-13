@@ -17,7 +17,7 @@ use super::vdf;
 
 /// Cache file magic + version
 const CACHE_MAGIC: u32 = 0x50435354; // "PCST"
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 
 /// Safety limits for cache deserialization to prevent memory exhaustion
 /// from malformed or tampered cache files.
@@ -70,9 +70,10 @@ impl SteamGameDiscovery {
         debug!("Steam path: {:?}", steam_path);
 
         let appinfo_path = steam_path.join("appcache").join("appinfo.vdf");
+        let libraryfolders_path = steam_path.join("steamapps").join("libraryfolders.vdf");
 
         // Try loading from cache first (but reject empty caches)
-        if let Some(cached) = Self::load_cache(&appinfo_path) {
+        if let Some(cached) = Self::load_cache(&appinfo_path, &libraryfolders_path) {
             if cached.game_count > 0 {
                 let build_time_ms = start.elapsed().as_millis() as u64;
                 info!(
@@ -93,7 +94,7 @@ impl SteamGameDiscovery {
         let result = Self::discover_full(&steam_path, &appinfo_path)?;
 
         // Save to cache
-        Self::save_cache(&result, &appinfo_path);
+        Self::save_cache(&result, &appinfo_path, &libraryfolders_path);
 
         let build_time_ms = start.elapsed().as_millis() as u64;
         info!(
@@ -508,7 +509,7 @@ impl SteamGameDiscovery {
             .map(|d| d.as_secs())
     }
 
-    fn load_cache(appinfo_path: &Path) -> Option<Self> {
+    fn load_cache(appinfo_path: &Path, libraryfolders_path: &Path) -> Option<Self> {
         let cache_path = Self::cache_path()?;
         let file = File::open(&cache_path).ok()?;
         let mut reader = BufReader::new(file);
@@ -525,15 +526,22 @@ impl SteamGameDiscovery {
             return None;
         }
 
-        // Read stored mtime
+        // Read stored mtimes: appinfo.vdf (names/exes) + libraryfolders.vdf (installed set)
         let mut buf8 = [0u8; 8];
         reader.read_exact(&mut buf8).ok()?;
-        let cached_mtime = u64::from_le_bytes(buf8);
+        let cached_appinfo_mtime = u64::from_le_bytes(buf8);
+        reader.read_exact(&mut buf8).ok()?;
+        let cached_lib_mtime = u64::from_le_bytes(buf8);
 
-        // Check if appinfo.vdf has changed
-        let current_mtime = Self::get_file_mtime(appinfo_path)?;
-        if current_mtime != cached_mtime {
+        // appinfo.vdf changes when Valve refreshes metadata; libraryfolders.vdf
+        // changes on install/uninstall. Invalidate if EITHER moved, otherwise an
+        // uninstall leaves the game list stale until steam_cache.bin is deleted.
+        if Self::get_file_mtime(appinfo_path)? != cached_appinfo_mtime {
             debug!("Cache invalidated: appinfo.vdf modified");
+            return None;
+        }
+        if Self::get_file_mtime(libraryfolders_path)? != cached_lib_mtime {
+            debug!("Cache invalidated: libraryfolders.vdf modified (install/uninstall)");
             return None;
         }
 
@@ -611,7 +619,7 @@ impl SteamGameDiscovery {
         })
     }
 
-    fn save_cache(&self, appinfo_path: &Path) {
+    fn save_cache(&self, appinfo_path: &Path, libraryfolders_path: &Path) {
         let Some(cache_path) = Self::cache_path() else {
             return;
         };
@@ -634,9 +642,11 @@ impl SteamGameDiscovery {
         let _ = writer.write_all(&CACHE_MAGIC.to_le_bytes());
         let _ = writer.write_all(&CACHE_VERSION.to_le_bytes());
 
-        // Write appinfo.vdf mtime
-        let mtime = Self::get_file_mtime(appinfo_path).unwrap_or(0);
-        let _ = writer.write_all(&mtime.to_le_bytes());
+        // Write appinfo.vdf mtime + libraryfolders.vdf mtime (installed-set signal)
+        let appinfo_mtime = Self::get_file_mtime(appinfo_path).unwrap_or(0);
+        let _ = writer.write_all(&appinfo_mtime.to_le_bytes());
+        let lib_mtime = Self::get_file_mtime(libraryfolders_path).unwrap_or(0);
+        let _ = writer.write_all(&lib_mtime.to_le_bytes());
 
         // Write game count
         let _ = writer.write_all(&(self.game_count as u32).to_le_bytes());

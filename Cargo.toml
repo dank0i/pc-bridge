@@ -1,6 +1,6 @@
 [package]
 name = "pc-bridge"
-version = "3.0.8"
+version = "3.0.9"
 edition = "2024"
 authors = ["dank0i"]
 description = "Home Assistant PC Bridge - cross-platform app for game detection and remote control"
@@ -198,6 +198,11 @@ match_wildcard_for_single_variants = "allow"
 single_match_else = "allow"
 needless_pass_by_value = "allow"
 struct_excessive_bools = "allow"
+# New pedantic lints (clippy 1.97+) that fire on existing working code
+similar_names = "allow"
+struct_field_names = "allow"
+duration_suboptimal_units = "allow"
+borrow_as_ptr = "allow"
 
 # Windows API requires these patterns
 cast_possible_truncation = "allow"
