@@ -31,6 +31,10 @@ impl MqttClient {
         }
     }
 
+    // Pre-existing offender from before the cognitive_complexity gate (79/30);
+    // splitting it per-domain is tracked as tech debt. New code must stay under
+    // the threshold in clippy.toml.
+    #[allow(clippy::cognitive_complexity)]
     pub(crate) async fn register_discovery(&self, config: &Config) {
         // Fix #5: Use shared device reference instead of creating new one
         let device = &self.device;

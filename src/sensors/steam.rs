@@ -99,6 +99,9 @@ impl SteamSensor {
         sig
     }
 
+    // Pre-existing offender from before the cognitive_complexity gate; new code
+    // must stay under the threshold in clippy.toml.
+    #[allow(clippy::cognitive_complexity)]
     pub async fn run(mut self) {
         let config = self.state.config.read().await;
         let base_interval = config.intervals.steam_check.max(10);

@@ -82,6 +82,9 @@ impl CommandExecutor {
         }
     }
 
+    // Pre-existing offender from before the cognitive_complexity gate; new code
+    // must stay under the threshold in clippy.toml.
+    #[allow(clippy::cognitive_complexity)]
     async fn execute_command(
         name: &str,
         payload: &str,

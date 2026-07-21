@@ -174,6 +174,9 @@ fn hold_singleton() {
 #[cfg(not(windows))]
 fn hold_singleton() {}
 
+// Pre-existing offender from before the cognitive_complexity gate; new code
+// must stay under the threshold in clippy.toml.
+#[allow(clippy::cognitive_complexity)]
 async fn run_agent() -> anyhow::Result<()> {
     // On Windows, attach to parent console if launched from terminal
     // This allows seeing output when run from cmd/powershell
