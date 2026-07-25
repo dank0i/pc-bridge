@@ -22,7 +22,6 @@ mod process_watcher;
 #[cfg(windows)]
 mod session;
 mod steam;
-mod steam_progress;
 
 #[cfg(unix)]
 mod games_linux;

@@ -278,31 +278,6 @@ impl MqttClient {
                 return;
             };
             self.publish_discovery(&topic, json).await;
-
-            // Download queue. State is the number of apps in the pipeline; the
-            // per-app rows live in the `games` JSON attribute. Also no availability
-            // topic, matching steam_updating, so the queue survives PC-off.
-            let payload = HADiscoveryPayload {
-                name: "Steam Downloads".to_string(),
-                unique_id: format!("{}_steam_downloads", self.device_id),
-                state_topic: Some(self.sensor_topic("steam_downloads")),
-                command_topic: None,
-                availability_topic: None,
-                availability: None,
-                availability_mode: None,
-                json_attributes_topic: Some(self.sensor_attributes_topic("steam_downloads")),
-                device: Arc::clone(device),
-                icon: Some("mdi:download".to_string()),
-                device_class: None,
-                unit_of_measurement: None,
-                state_class: None,
-            };
-            let topic = self.config_topic("sensor", "steam_downloads");
-            let Ok(json) = serde_json::to_string(&payload) else {
-                error!("Failed to serialize HA discovery payload");
-                return;
-            };
-            self.publish_discovery(&topic, json).await;
         }
 
         // GPU sensor
@@ -1120,7 +1095,6 @@ fn feature_entities(config: &Config) -> Vec<(&'static str, &'static str, bool)> 
         // must never be torn down as a disabled entity.
         ("sensor", "bridge_health", true),
         ("sensor", "steam_updating", f.steam_updates),
-        ("sensor", "steam_downloads", f.steam_updates),
         ("sensor", "gpu_usage", f.gpu_sensor),
         ("sensor", "network_throughput", f.network_sensor),
         ("sensor", "disk_usage", f.disk_sensor),

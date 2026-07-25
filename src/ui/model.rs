@@ -228,16 +228,15 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
         s(
             "steam_downloads",
             "Steam Updating",
-            "On/off when Steam is downloading, plus progress for each game in the queue.",
+            "On/off when Steam is downloading or updating a game.",
             Games,
             true,
             Running,
             "on",
             0,
-            "sensor.dank0i_pc_steam_updating, sensor.dank0i_pc_steam_downloads",
+            "sensor.dank0i_pc_steam_updating",
             "",
-            "Reads Steam's .acf manifests and staging files. The downloads sensor lists every \
-             app in the queue with its percentage, phase, rate and ETA",
+            "Reads Steam's .acf manifests",
         ),
         a(
             "launch_game",
