@@ -16,22 +16,28 @@ static IDLE_STEAM_ATTRS: LazyLock<serde_json::Value> =
 use tokio::time::Duration;
 
 use crate::AppState;
-use crate::sensors::steam_vdl;
+use crate::sensors::steam_progress::{self, DownloadEstimator, LogEvent};
 
-/// How often to re-read Valid Data Length while a download is active.
+/// How often to read new content_log lines and advance the estimate.
 ///
-/// 5s rather than something snappier because nothing below it buys anything: at a
-/// realistic 100 MB/s a 5s tick advances a 144 GB download by 0.3 of a percentage
-/// point, so a faster poll cannot look more "live" to a human. Costs nothing when
-/// idle, since the tick is disabled unless an app is actually being written.
-const PROGRESS_TICK_SECS: u64 = 5;
+/// 2s: Steam reports its transfer rate several times a minute, and between those
+/// readings the estimate is pure integration, so a shorter tick simply makes the
+/// bar move more smoothly at no real cost (one small tail read of one file).
+/// Costs nothing when idle, since the tick is disabled unless an app is active.
+const PROGRESS_TICK_SECS: u64 = 2;
 
 /// Quantisation applied to the published rows so fields that would otherwise
 /// change every tick settle instead. Each is well below dashboard resolution:
-/// 16 MB against tens of GB, 1 MB/s against ~100 MB/s, 10 s against minutes.
+/// 16 MB against tens of GB, and 10 s against minutes.
 const QUANTISE_BYTES: u64 = 16 * 1024 * 1024;
-const QUANTISE_RATE: u64 = 1024 * 1024;
-const QUANTISE_ETA: u64 = 10;
+/// Ticks between forced manifest rescans while a download is active. At a 2s
+/// tick that is every 60s, which retires a row if Steam dies without ever
+/// rewriting the manifest.
+const TICKS_PER_RESCAN: u32 = 30;
+
+/// How much of the tail of content_log.txt to replay on startup. Enough to catch
+/// the most recent anchor without parsing a log that can run to many megabytes.
+const LOG_PRIME_TAIL_BYTES: u64 = 512 * 1024;
 
 /// Message from the filesystem-watcher callback to the sensor loop.
 enum FsMsg {
@@ -90,8 +96,9 @@ struct GameUpdateState {
     app_id: String,
     name: String,
     state_flags: u32,
-    /// Source manifest, e.g. `<lib>/steamapps/appmanifest_<id>.acf`. Its parent is
-    /// the steamapps dir, which is how we locate `downloading/<appid>` for VDL.
+    /// Source manifest, e.g. `<lib>/steamapps/appmanifest_<id>.acf`. Kept for
+    /// diagnostics and to identify which library an app lives in.
+    #[allow(dead_code)]
     manifest_path: PathBuf,
     /// Manifest byte checkpoints. These advance mid-download but at irregular
     /// intervals (observed 472MB/28s up to 4.4GB/167s), which is why they are a
@@ -101,34 +108,40 @@ struct GameUpdateState {
     bytes_to_download: u64,
     bytes_staged: u64,
     bytes_to_stage: u64,
+    /// `HKCU\\Software\\Valve\\Steam\\Apps\\<appid>\\Updating`, when present.
+    ///
+    /// This is the ONLY reliable active-vs-paused discriminator. StateFlags keeps
+    /// the UpdateStarted bit set while a download is suspended and does NOT set
+    /// UpdatePaused on a user pause, so the manifest alone reports a paused
+    /// download as still running. `None` means the key was absent, in which case
+    /// we fall back to the StateFlags reading rather than guessing.
+    registry_updating: Option<bool>,
 }
 
 impl GameUpdateState {
-    /// The `steamapps/downloading/<appid>` staging directory for this app.
-    fn staging_dir(&self) -> Option<PathBuf> {
-        Some(
-            self.manifest_path
-                .parent()?
-                .join("downloading")
-                .join(&self.app_id),
-        )
-    }
-
     /// Whether Steam is actively working this app right now, as opposed to it
     /// sitting queued or paused behind another download. Only the active app
-    /// needs live VDL sampling; everything else is static.
+    /// gets the live estimate; everything else keeps its exact checkpoint.
     fn is_active(&self) -> bool {
         self.state_flags & STATE_UPDATE_PAUSED == 0
+            && self.registry_updating != Some(false)
             && self.state_flags & (STATE_UPDATE_RUNNING | STATE_UPDATE_STARTED) != 0
     }
 
-    /// Phase label for the dashboard. Derived from the state bits plus the byte
-    /// counters, because the substates (Downloading/Staging/Committing/Validating)
-    /// are NOT StateFlags bits: they appear only on `update changed :` lines in
-    /// content_log.txt. Comparing downloaded-vs-total against staged-vs-total
-    /// recovers the same distinction without opening another file.
+    /// Base phase label, from the state bits plus the byte counters.
+    ///
+    /// This is the fallback and the sort key. For an actively downloading app the
+    /// estimator overrides it with Steam's own word from the log, which is more
+    /// specific: the substates (Downloading/Staging/Committing/Validating) are NOT
+    /// StateFlags bits and appear only on `App update changed :` lines.
     fn phase(&self) -> &'static str {
-        if self.state_flags & STATE_UPDATE_PAUSED != 0 {
+        // "Paused" means an update that WAS started and is now suspended. The
+        // registry flag alone is not enough: an app with an available update that
+        // was never started also reads Updating=0, and that is "pending".
+        let started = self.state_flags & (STATE_UPDATE_RUNNING | STATE_UPDATE_STARTED) != 0;
+        if self.state_flags & STATE_UPDATE_PAUSED != 0
+            || (started && self.registry_updating == Some(false))
+        {
             return "paused";
         }
         if !self.is_active() {
@@ -147,35 +160,30 @@ impl GameUpdateState {
         }
     }
 
-    /// Progress from the manifest alone, as (done, total). Prefers the staging
-    /// basis because that is what VDL measures, so the two agree; falls back to
-    /// the download basis when stage totals are absent.
+    /// Progress from the manifest alone, as (done, total).
+    ///
+    /// DOWNLOAD basis, deliberately. Two reasons. The live estimator is on the
+    /// download basis, so anything else would change the meaning of `percent`
+    /// whenever a row switched between the two sources: on one measured patch the
+    /// stage total was 120.8 GB against a download total of 14.6 GB, a factor of
+    /// 8.3. And the stage counters are not trustworthy anyway, since a real
+    /// install finished with BytesStaged at 39% of BytesToStage and then stopped.
+    /// Stage remains only as a fallback for a manifest with no download totals.
     fn checkpoint_bytes(&self) -> (u64, u64) {
-        if self.bytes_to_stage > 0 {
-            (
-                self.bytes_staged.min(self.bytes_to_stage),
-                self.bytes_to_stage,
-            )
-        } else if self.bytes_to_download > 0 {
+        if self.bytes_to_download > 0 {
             (
                 self.bytes_downloaded.min(self.bytes_to_download),
                 self.bytes_to_download,
+            )
+        } else if self.bytes_to_stage > 0 {
+            (
+                self.bytes_staged.min(self.bytes_to_stage),
+                self.bytes_to_stage,
             )
         } else {
             (0, 0)
         }
     }
-}
-
-/// Per-app sampling state for a download currently being written.
-struct ActiveProgress {
-    /// Most recent Valid Data Length reading for the staging tree.
-    vdl: steam_vdl::StagingProgress,
-    /// When `vdl` was taken, and the byte count at that moment, for rate maths.
-    sampled_at: std::time::Instant,
-    prev_bytes: u64,
-    /// Smoothed transfer rate in bytes/sec.
-    rate_bps: u64,
 }
 
 pub struct SteamSensor {
@@ -184,23 +192,8 @@ pub struct SteamSensor {
     updating_games: HashMap<String, GameUpdateState>,
     /// Cache of ACF file paths → (mtime, parsed state) to skip unchanged files
     acf_cache: HashMap<PathBuf, (std::time::SystemTime, Option<GameUpdateState>)>,
-    /// Live sampling state for the actively-downloading app(s). Queued and paused
-    /// apps are deliberately absent: they are static, and their manifest
-    /// checkpoint is authoritative (Steam flushes true byte counts on pause).
-    ///
-    /// These three values share one lifetime, so they live in one entry. NOTE
-    /// `published_pct` below deliberately does NOT: it is keyed on the full
-    /// updating set so a paused app keeps its high-water mark. Do not be tempted
-    /// to fold it in here and unify the retains.
-    live: HashMap<String, ActiveProgress>,
-    /// High-water mark of the percentage already published per appid.
-    ///
-    /// Progress must never appear to go backwards. Two things make it try: Steam
-    /// deletes staging files as it commits them, so the VDL sum falls while the
-    /// manifest's staged count rises, and the two sources use different
-    /// denominators, so switching between them can drop the ratio even when the
-    /// byte count rose. Clamping the published value fixes both at once.
-    published_pct: HashMap<String, f64>,
+    /// Live percentage estimator, fed from content_log.txt.
+    estimator: Option<DownloadEstimator>,
     /// Last `steam_downloads` payload actually sent, so an unchanged one is not
     /// republished. Without this, a download that stalls while still flagged
     /// running republishes a byte-identical payload every tick indefinitely, and
@@ -208,8 +201,6 @@ pub struct SteamSensor {
     /// Mirrors the republish-only-on-change rule `hwinfo::diag_flush_plan` already
     /// applies to the other retained attribute topics.
     last_downloads: Option<(String, String)>,
-    /// Latch so a persistently slow VDL scan warns once, not every tick.
-    slow_scan_logged: bool,
 }
 
 impl SteamSensor {
@@ -219,127 +210,71 @@ impl SteamSensor {
             library_folders: Vec::new(),
             updating_games: HashMap::new(),
             acf_cache: HashMap::new(),
-            live: HashMap::new(),
-            published_pct: HashMap::new(),
+            estimator: None,
             last_downloads: None,
-            slow_scan_logged: false,
         }
     }
 
-    /// Re-read Valid Data Length for the actively-downloading app(s).
+    /// Pull new lines from content_log.txt and advance the live estimate.
     ///
-    /// Only active apps are sampled. A queued or paused app is not being written,
-    /// so walking its staging tree every tick would be pure waste, and its manifest
-    /// checkpoint is already correct. This is what keeps the tick cheap even with a
-    /// large queue.
+    /// Cheap: one small tail read of one file, plus arithmetic. Nothing here
+    /// scales with the size of the download, which is the main reason this
+    /// replaced the staging-tree walk it used to do.
     async fn sample_progress(&mut self) {
-        let targets: Vec<(String, PathBuf)> = self
-            .updating_games
-            .values()
-            .filter(|g| g.is_active())
-            .filter_map(|g| g.staging_dir().map(|d| (g.app_id.clone(), d)))
-            .collect();
-
-        // Forget apps that are no longer being written so a later re-download
-        // starts from a clean rate baseline instead of a stale one. Borrowing
-        // `updating_games` inside the closure is fine on edition 2024 (disjoint
-        // closure captures), which removes the two throwaway HashSets this used
-        // to build purely to drive the retains.
-        let games = &self.updating_games;
-        self.live
-            .retain(|id, _| games.get(id).is_some_and(GameUpdateState::is_active));
-        // Keyed on the full updating set, not just the active one, so a paused app
-        // keeps its high-water mark and does not reset to 0 when resumed.
-        self.published_pct.retain(|id, _| games.contains_key(id));
-
-        if targets.is_empty() {
+        let Some(est) = self.estimator.as_mut() else {
             return;
-        }
+        };
 
-        let started = std::time::Instant::now();
-        let results = tokio::task::spawn_blocking(move || {
-            targets
-                .into_iter()
-                .map(|(id, dir)| {
-                    let p = steam_vdl::read_staging_progress(&dir);
-                    (id, p)
-                })
-                .collect::<Vec<_>>()
+        let path = est.log_path().to_path_buf();
+        let offset = est.offset();
+        let (new_offset, events) =
+            tokio::task::spawn_blocking(move || steam_progress::read_new_events(&path, offset))
+                .await
+                .unwrap_or((offset, Vec::new()));
+
+        for ev in events {
+            est.apply(ev);
+        }
+        est.set_offset(new_offset);
+        est.advance();
+
+        // The manifest is exact but rare. Whenever it has moved, pull the estimate
+        // onto it so drift accumulated since the last flush is erased.
+        for g in self.updating_games.values() {
+            if g.bytes_to_download > 0 {
+                est.snap_to(&g.app_id, g.bytes_downloaded, g.bytes_to_download);
+            }
+        }
+    }
+
+    /// Seek the estimator to the end of the log, replaying only the recent tail so
+    /// a restart mid-download still recovers an anchor and a denominator.
+    async fn prime_estimator(&mut self) {
+        // find_steam_path reads the registry and stats directories, so it belongs
+        // off the runtime with the rest of the blocking work in this file.
+        let Some((root, len, events)) = tokio::task::spawn_blocking(|| {
+            let root = crate::steam::find_steam_path()?;
+            let path = root.join("logs").join("content_log.txt");
+            let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let from = len.saturating_sub(LOG_PRIME_TAIL_BYTES);
+            let (_, evs) = steam_progress::read_new_events(&path, from);
+            Some((root, len, evs))
         })
         .await
-        .unwrap_or_default();
+        .ok()
+        .flatten() else {
+            return;
+        };
+        let mut est = DownloadEstimator::new(&root);
 
-        // This walk opens every staging file once per tick, so its cost scales with
-        // the file count of whatever is downloading. Logged so the real number can
-        // be checked against a live download rather than assumed, and warned about
-        // if it ever grows enough to matter on a machine that is also gaming.
-        let elapsed = started.elapsed();
-        let files: usize = results
-            .iter()
-            .map(|(_, p)| p.files_read + p.files_failed)
-            .sum();
-        if elapsed > Duration::from_millis(500) {
-            // Latched: a slow scan is by definition persistent, so warning every
-            // tick would be 720 lines an hour for one condition.
-            if !self.slow_scan_logged {
-                warn!(
-                    "Steam VDL scan took {}ms across {} files; consider raising PROGRESS_TICK_SECS",
-                    elapsed.as_millis(),
-                    files
-                );
-                self.slow_scan_logged = true;
-            }
-        } else {
-            self.slow_scan_logged = false;
-            debug!(
-                "Steam VDL scan: {} files in {}ms",
-                files,
-                elapsed.as_millis()
-            );
-        }
-
-        let now = std::time::Instant::now();
-        for (id, vdl) in results {
-            if !vdl.is_usable() {
-                // Filesystem said no (not NTFS, files vanished mid-walk). Leave the
-                // previous reading in place; the checkpoint fallback covers us.
-                continue;
-            }
-            match self.live.get_mut(&id) {
-                Some(entry) => {
-                    let dt = now.duration_since(entry.sampled_at).as_secs_f64();
-                    if dt >= 1.0 {
-                        // A stalled download must decay toward zero rather than
-                        // reporting the last good speed forever, otherwise the
-                        // dashboard quotes a live rate and ETA for something that
-                        // has not moved in an hour.
-                        let instant = if vdl.valid_bytes > entry.prev_bytes {
-                            ((vdl.valid_bytes - entry.prev_bytes) as f64 / dt) as u64
-                        } else {
-                            0
-                        };
-                        // Exponential smoothing: the raw per-tick delta is jumpy
-                        // because SteamPipe writes in bursts.
-                        entry.rate_bps =
-                            entry.rate_bps.saturating_mul(2).saturating_add(instant) / 3;
-                        entry.sampled_at = now;
-                        entry.prev_bytes = vdl.valid_bytes;
-                    }
-                    entry.vdl = vdl;
-                }
-                None => {
-                    self.live.insert(
-                        id,
-                        ActiveProgress {
-                            vdl,
-                            sampled_at: now,
-                            prev_bytes: vdl.valid_bytes,
-                            rate_bps: 0,
-                        },
-                    );
-                }
-            }
-        }
+        // Only anchors and completions matter for recovery; a stale rate reading
+        // from before a restart would otherwise integrate from nowhere.
+        let recent: Vec<LogEvent> = events
+            .into_iter()
+            .filter(|e| matches!(e, LogEvent::Anchor(..) | LogEvent::Finished(..)))
+            .collect();
+        est.prime(len, &recent);
+        self.estimator = Some(est);
     }
 
     /// Stable signature of the current updating set (sorted (app_id, name)
@@ -413,12 +348,17 @@ impl SteamSensor {
             );
         }
 
+        // Seek the log estimator to the end before the first scan, replaying only
+        // the recent tail so a restart mid-download recovers its anchor.
+        self.prime_estimator().await;
+
         // Initial scan + unconditional publish to seed the retained state.
         self.do_full_scan().await;
         self.sample_progress().await;
         self.publish_state().await;
         let mut last_sig = self.updating_signature();
         let mut has_active = self.updating_games.values().any(|g| g.is_active());
+        let mut ticks_since_scan: u32 = 0;
 
         loop {
             tokio::select! {
@@ -503,6 +443,16 @@ impl SteamSensor {
                 // observed), so this is what makes the bar move smoothly in between.
                 () = tokio::time::sleep(Duration::from_secs(PROGRESS_TICK_SECS)), if has_active => {
                     self.sample_progress().await;
+                    // Re-read ground truth occasionally. If Steam is killed
+                    // mid-download the manifest is never rewritten, so no watcher
+                    // event ever arrives and nothing would otherwise retire the
+                    // row or stop this tick.
+                    ticks_since_scan += 1;
+                    if ticks_since_scan >= TICKS_PER_RESCAN {
+                        ticks_since_scan = 0;
+                        self.do_full_scan().await;
+                        has_active = self.updating_games.values().any(|g| g.is_active());
+                    }
                     self.publish_downloads().await;
                 }
                 // Fallback poll: only ever fires when the watcher couldn't be
@@ -625,7 +575,13 @@ impl SteamSensor {
                         && *cached_mt == mt
                     {
                         if let Some(gs) = cached_state.as_ref().filter(|g| is_updating(g)) {
-                            updating.insert(gs.app_id.clone(), gs.clone());
+                            let mut gs = gs.clone();
+                            // Always re-read: the cache is keyed on manifest mtime,
+                            // but pausing flips this flag WITHOUT rewriting the
+                            // manifest, so a cached entry would go stale exactly
+                            // when it matters.
+                            gs.registry_updating = registry_updating_flag(&gs.app_id);
+                            updating.insert(gs.app_id.clone(), gs);
                         }
                         continue;
                     }
@@ -634,9 +590,10 @@ impl SteamSensor {
                     if let Some(mt) = mtime {
                         acf_cache.insert(path.clone(), (mt, state.clone()));
                     }
-                    if let Some(gs) = state
+                    if let Some(mut gs) = state
                         && is_updating(&gs)
                     {
+                        gs.registry_updating = registry_updating_flag(&gs.app_id);
                         updating.insert(gs.app_id.clone(), gs);
                     }
                 }
@@ -730,6 +687,10 @@ fn parse_acf_content(content: &str, manifest_path: &Path) -> Option<GameUpdateSt
         bytes_to_download,
         bytes_staged,
         bytes_to_stage,
+        // Stamped on by the caller after parsing: this comes from the registry,
+        // not the manifest, and is re-read on every scan because pausing flips it
+        // without rewriting the manifest.
+        registry_updating: None,
     })
 }
 
@@ -756,6 +717,31 @@ fn byte_counter_slot<'a>(
     } else {
         None
     }
+}
+
+/// Read `HKCU\\Software\\Valve\\Steam\\Apps\\<appid>\\Updating`.
+///
+/// `Some(true)` while Steam is actively transferring, `Some(false)` when it is
+/// not, `None` if the key is absent. This is the only signal that distinguishes a
+/// paused download from a running one: the appmanifest keeps its UpdateStarted
+/// bit set while suspended and does not set UpdatePaused on a user pause.
+/// Blocking registry I/O, so it runs inside the same spawn_blocking as the scan.
+#[cfg(windows)]
+fn registry_updating_flag(app_id: &str) -> Option<bool> {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let key = hkcu
+        .open_subkey(format!("Software\\Valve\\Steam\\Apps\\{app_id}"))
+        .ok()?;
+    let v: u32 = key.get_value("Updating").ok()?;
+    Some(v != 0)
+}
+
+#[cfg(not(windows))]
+fn registry_updating_flag(_app_id: &str) -> Option<bool> {
+    None
 }
 
 /// Extract a quoted value from a VDF key-value line
@@ -843,46 +829,33 @@ impl SteamSensor {
         });
 
         let mut games: Vec<serde_json::Value> = Vec::with_capacity(ordered.len());
-        let mut new_marks: Vec<(String, f64)> = Vec::with_capacity(ordered.len());
 
         for g in ordered {
-            let (mut done, mut total) = g.checkpoint_bytes();
+            let (mut done, total) = g.checkpoint_bytes();
             let mut percent = if total > 0 {
                 (done as f64 / total as f64) * 100.0
             } else {
                 0.0
             };
-            let mut bps = 0u64;
+            let mut phase = g.phase();
 
-            // Prefer the live VDL reading where we have one: the manifest lags,
-            // sometimes by minutes. Compare the PERCENTAGE rather than the byte
-            // count, because the two sources use different denominators (sum of
-            // staging EOFs vs BytesToStage) and a higher byte count can still be a
-            // lower ratio.
-            if let Some(entry) = self.live.get(&g.app_id) {
-                bps = entry.rate_bps;
-                if entry.vdl.is_usable() && entry.vdl.percent() >= percent {
-                    done = entry.vdl.valid_bytes;
-                    total = entry.vdl.total_bytes;
-                    percent = entry.vdl.percent();
+            // The live estimate wins while a download is running: the manifest is
+            // exact but is written so rarely that on a real 112 GB install it sat
+            // frozen for over three minutes and then jumped straight to 100%.
+            // Only for an ACTIVE app, so a paused or queued row keeps its exact
+            // checkpoint rather than a stale estimate.
+            if g.is_active()
+                && let Some(est) = self.estimator.as_ref()
+                && let Some(live) = est.percent_for(&g.app_id)
+            {
+                percent = live;
+                done = ((live / 100.0) * total as f64) as u64;
+                // Steam names its own phase in the log, which beats inferring it
+                // from byte counters.
+                if let Some(p) = est.phase_for(&g.app_id) {
+                    phase = p;
                 }
             }
-
-            // Monotonic clamp. Steam deletes staging files as it commits them, so
-            // the VDL sum genuinely falls late in an install; without this the bar
-            // visibly runs backwards.
-            if let Some(prev) = self.published_pct.get(&g.app_id)
-                && *prev > percent
-            {
-                percent = *prev;
-            }
-            new_marks.push((g.app_id.clone(), percent));
-
-            let eta = if bps > 0 && total > done {
-                (total - done) / bps
-            } else {
-                0
-            };
 
             // Quantise every field that would otherwise move on every single tick.
             // Raw byte counts and a raw ETA change constantly and force a publish
@@ -891,17 +864,16 @@ impl SteamSensor {
             games.push(serde_json::json!({
                 "appid": g.app_id.parse::<u64>().unwrap_or(0),
                 "name": g.name,
-                "state": g.phase(),
+                "state": phase,
                 "percent": (percent * 10.0).round() / 10.0,   // 0.1%
                 "bytes_done": done / QUANTISE_BYTES * QUANTISE_BYTES,
                 "bytes_total": total,
-                "bytes_rate": bps / QUANTISE_RATE * QUANTISE_RATE,
-                "eta": eta / QUANTISE_ETA * QUANTISE_ETA,
+                // Steam's log reports a transfer rate but attributes it to no app, so
+                // there is no honest per-app figure to publish. The dashboard reads
+                // these keys, so they stay present rather than breaking its template.
+                "bytes_rate": 0,
+                "eta": 0,
             }));
-        }
-
-        for (id, pct) in new_marks {
-            self.published_pct.insert(id, pct);
         }
 
         let state_str = games.len().to_string();
@@ -1212,6 +1184,7 @@ mod tests {
             bytes_to_download: to_dl,
             bytes_staged: st,
             bytes_to_stage: to_st,
+            registry_updating: None,
         }
     }
 
@@ -1222,6 +1195,50 @@ mod tests {
         let g = game_with(STATE_UPDATE_STARTED | STATE_UPDATE_PAUSED, 10, 100, 10, 100);
         assert_eq!(g.phase(), "paused");
         assert!(!g.is_active());
+    }
+
+    #[test]
+    fn phase_paused_from_registry_when_stateflags_lie() {
+        // THE BUG THAT SHIPPED IN v3.1.0. Steam does NOT set UpdatePaused (0x200)
+        // on a user pause: the manifest keeps reading 1026 (UpdateStarted|
+        // UpdateRequired) exactly as it does while running. Only the registry's
+        // Updating DWORD flips. Without this, a paused download displayed as
+        // "downloading" forever with a frozen percentage.
+        let mut g = game_with(1026, 3_950_000_000, 118_850_000_000, 0, 144_670_000_000);
+        assert_eq!(g.phase(), "downloading", "sanity: running looks running");
+        g.registry_updating = Some(false);
+        assert_eq!(g.phase(), "paused");
+        assert!(
+            !g.is_active(),
+            "a paused app must stop taking the live estimate too"
+        );
+    }
+
+    #[test]
+    fn phase_pending_not_paused_when_never_started() {
+        // An app with an available update that was never started ALSO reads
+        // Updating=0. It must stay "pending", not become "paused", which is why
+        // the registry check is gated on the started bits.
+        let mut g = game_with(STATE_UPDATE_REQUIRED, 0, 0, 0, 0);
+        g.registry_updating = Some(false);
+        assert_eq!(g.phase(), "pending");
+    }
+
+    #[test]
+    fn phase_missing_registry_key_falls_back_to_stateflags() {
+        // None means the key was absent; behaviour must be unchanged from before.
+        let mut g = game_with(1026, 1, 100, 0, 0);
+        g.registry_updating = None;
+        assert_eq!(g.phase(), "downloading");
+        assert!(g.is_active());
+    }
+
+    #[test]
+    fn phase_registry_true_keeps_it_running() {
+        let mut g = game_with(1026, 1, 100, 0, 0);
+        g.registry_updating = Some(true);
+        assert_eq!(g.phase(), "downloading");
+        assert!(g.is_active());
     }
 
     #[test]
@@ -1269,17 +1286,20 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_prefers_stage_basis() {
-        // VDL measures staging, so the fallback must use the same basis or the bar
-        // would jump when switching between them.
+    fn checkpoint_prefers_download_basis() {
+        // MUST match the live estimator's basis. A real patch had a stage total of
+        // 120.8 GB against a download total of 14.6 GB, so preferring stage made
+        // `percent` change meaning by a factor of 8.3 whenever a row switched
+        // between the estimator and the manifest.
         let g = game_with(1026, 50, 100, 25, 200);
-        assert_eq!(g.checkpoint_bytes(), (25, 200));
+        assert_eq!(g.checkpoint_bytes(), (50, 100));
     }
 
     #[test]
-    fn checkpoint_falls_back_to_download_basis() {
-        let g = game_with(1026, 50, 100, 0, 0);
-        assert_eq!(g.checkpoint_bytes(), (50, 100));
+    fn checkpoint_falls_back_to_stage_basis() {
+        // Only when the manifest carries no download totals at all.
+        let g = game_with(1026, 0, 0, 25, 200);
+        assert_eq!(g.checkpoint_bytes(), (25, 200));
     }
 
     #[test]
@@ -1296,13 +1316,6 @@ mod tests {
     }
 
     #[test]
-    fn staging_dir_is_sibling_of_manifest() {
-        let g = game_with(1026, 0, 0, 0, 0);
-        let dir = g.staging_dir().expect("manifest has a parent");
-        assert!(dir.ends_with("downloading/1086940") || dir.ends_with("downloading\\1086940"));
-    }
-
-    #[test]
     fn quantisation_settles_fields_that_would_churn_every_tick() {
         // A stalled-but-running download must produce a byte-identical payload so
         // the change gate can suppress it. Two samples a few MB apart (well inside
@@ -1312,20 +1325,6 @@ mod tests {
         assert_eq!(
             a_done / QUANTISE_BYTES * QUANTISE_BYTES,
             b_done / QUANTISE_BYTES * QUANTISE_BYTES
-        );
-
-        // Rate jitter of a few hundred KB/s must not force a republish.
-        let (a_rate, b_rate) = (98_000_000u64, 98_400_000u64);
-        assert_eq!(
-            a_rate / QUANTISE_RATE * QUANTISE_RATE,
-            b_rate / QUANTISE_RATE * QUANTISE_RATE
-        );
-
-        // ETA drifting by a few seconds must not force a republish.
-        let (a_eta, b_eta) = (1_435u64, 1_438u64);
-        assert_eq!(
-            a_eta / QUANTISE_ETA * QUANTISE_ETA,
-            b_eta / QUANTISE_ETA * QUANTISE_ETA
         );
     }
 
