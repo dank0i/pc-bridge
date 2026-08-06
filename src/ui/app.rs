@@ -17,8 +17,9 @@ use super::model::{
     library_to_games, reconcile_with_disk, registry, strip_launch_scheme,
 };
 use super::theme::{
-    ACCENT, AMBER, BG, BLOCK, GAP, GREEN, GREY, ORANGE, PAD_X, PAD_Y, PANEL, PURPLE, RED, ROW,
-    ROW_HOVER, ROW_OFF, TEXT, TEXT_DIM, TIGHT, badge, dot, kv, labeled, section, toggle,
+    ACCENT, AMBER, BG, BLOCK, CONTROLS_W, CONTROLS_W_REMOVABLE, GAP, GREEN, GREY, MIN_TEXT_W,
+    ORANGE, PAD_X, PAD_Y, PANEL, PURPLE, RED, ROW, ROW_HOVER, ROW_OFF, TEXT, TEXT_DIM, TIGHT,
+    badge, dot, kv, labeled, section, toggle,
 };
 
 /// Which view the Games tab is showing.
@@ -1363,24 +1364,39 @@ fn feature_row(
                 };
                 dot(ui, dot_col, 5.0);
                 ui.add_space(GAP);
-                ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        let title_col = if effective { TEXT } else { GREY };
-                        ui.label(RichText::new(f.name).strong().size(15.0).color(title_col));
-                        ui.add_space(TIGHT);
-                        match f.kind {
-                            Kind::Sensor => badge(ui, "SENSOR", ACCENT),
-                            Kind::Action => badge(ui, "ACTION", ORANGE),
-                        }
-                        if f.privileged {
-                            badge(ui, "ADMIN", RED);
-                        }
-                        if !f.requires.is_empty() {
-                            badge(ui, "SETUP", AMBER);
-                        }
-                    });
-                    ui.label(RichText::new(f.desc).size(12.0).color(TEXT_DIM));
-                });
+                // Reserve room for the right-hand controls BEFORE laying out the
+                // text. A plain ui.vertical() claims the whole remaining width,
+                // so the toggle and the details/remove buttons were painted on
+                // top of the wrapped description instead of beside it.
+                let reserved = if removable {
+                    CONTROLS_W_REMOVABLE
+                } else {
+                    CONTROLS_W
+                };
+                let text_w = (ui.available_width() - reserved).max(MIN_TEXT_W);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(text_w, 0.0),
+                    egui::Layout::top_down(egui::Align::LEFT),
+                    |ui| {
+                        ui.set_max_width(text_w);
+                        ui.horizontal(|ui| {
+                            let title_col = if effective { TEXT } else { GREY };
+                            ui.label(RichText::new(f.name).strong().size(15.0).color(title_col));
+                            ui.add_space(TIGHT);
+                            match f.kind {
+                                Kind::Sensor => badge(ui, "SENSOR", ACCENT),
+                                Kind::Action => badge(ui, "ACTION", ORANGE),
+                            }
+                            if f.privileged {
+                                badge(ui, "ADMIN", RED);
+                            }
+                            if !f.requires.is_empty() {
+                                badge(ui, "SETUP", AMBER);
+                            }
+                        });
+                        ui.label(RichText::new(f.desc).size(12.0).color(TEXT_DIM));
+                    },
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if removable {
                         if ui

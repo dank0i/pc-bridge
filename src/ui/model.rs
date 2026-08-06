@@ -510,7 +510,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
         s(
             "display_attached",
             "Display Attached",
-            "Whether a PHYSICAL monitor is connected. Distinct from Display State, which is monitor POWER: a headless PC with no monitor still reports its display as on. Virtual displays (Parsec) are excluded. Windows only.",
+            "Whether a PHYSICAL monitor is connected. Distinct from Display State, which is monitor POWER: a headless PC with no monitor still reports its display as on. Virtual displays (Parsec) are excluded. Windows and Linux.",
             Power,
             false,
             Running,

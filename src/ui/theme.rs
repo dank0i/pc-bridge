@@ -22,6 +22,15 @@ pub const ROW_OFF: Color32 = Color32::from_rgb(0x16, 0x18, 0x1d);
 // Uniform spacing scale. Only these three vertical gaps are used anywhere.
 pub const TIGHT: f32 = 4.0;
 pub const GAP: f32 = 8.0;
+
+/// Width reserved on the right of a feature row for the toggle plus the
+/// details button, and the same again with a remove button. The row's text
+/// column is sized to whatever is left, so the controls are never painted over
+/// the wrapped description.
+pub const CONTROLS_W: f32 = 130.0;
+pub const CONTROLS_W_REMOVABLE: f32 = 195.0;
+/// Never squeeze the text narrower than this, however cramped the window.
+pub const MIN_TEXT_W: f32 = 160.0;
 pub const BLOCK: f32 = 14.0;
 // Uniform frame padding.
 pub const PAD_X: f32 = 14.0;
