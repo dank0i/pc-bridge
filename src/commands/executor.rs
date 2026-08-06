@@ -1097,10 +1097,18 @@ mod tests {
 
     #[test]
     fn test_resolve_kill_shortcut_allowed_when_raw_disabled() {
+        // `.Kill()`, NOT CloseMainWindow - that is what `close:` does. This
+        // assertion was copy-pasted from the close: test above and has been
+        // wrong since v2.0.0; it never ran because CI did not test on Windows
+        // until v3.5.0, and these tests are Windows-only.
         let result = resolve_shell_command("Launch", "kill:notepad", false);
         assert!(
-            matches!(result, ShellResolution::LauncherShortcut(ref cmd) if cmd.contains("CloseMainWindow")),
+            matches!(result, ShellResolution::LauncherShortcut(ref cmd) if cmd.contains(".Kill()")),
             "kill: shortcut must work with allow_raw_commands=false: {result:?}"
+        );
+        assert!(
+            !matches!(result, ShellResolution::LauncherShortcut(ref cmd) if cmd.contains("CloseMainWindow")),
+            "kill: must not fall back to the graceful close path: {result:?}"
         );
     }
 
