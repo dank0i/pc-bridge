@@ -8,6 +8,9 @@ on:
     branches: [main]
   schedule:
     - cron: '0 0 * * 0'
+  # Manual trigger. Added because the v3.5.0 push and tag produced no runs at
+  # all, and there was no way to start one by hand.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
