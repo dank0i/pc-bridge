@@ -172,8 +172,9 @@ fn tray_thread(shutdown_tx: &broadcast::Sender<()>, hwnd_tx: tokio::sync::onesho
         }
         if !Shell_NotifyIconW(NIM_ADD, &raw const nid).as_bool() {
             error!("Shell_NotifyIcon(NIM_ADD) failed");
-            let _ = Box::from_raw(ctx_ptr);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             let _ = DestroyWindow(hwnd);
+            let _ = Box::from_raw(ctx_ptr);
             return;
         }
         info!("Tray icon added");
@@ -196,8 +197,10 @@ fn tray_thread(shutdown_tx: &broadcast::Sender<()>, hwnd_tx: tokio::sync::onesho
 
         // Remove the icon and clean up.
         let _ = Shell_NotifyIconW(NIM_DELETE, &raw const nid);
-        let _ = Box::from_raw(ctx_ptr);
+        // Clear then destroy then free - see power/events.rs for why.
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         let _ = DestroyWindow(hwnd);
+        let _ = Box::from_raw(ctx_ptr);
         debug!("Tray thread exiting");
     }
 }

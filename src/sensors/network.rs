@@ -53,7 +53,18 @@ impl NetworkSensor {
                     debug!("Network sensor shutting down");
                     break;
                 }
-                Ok(()) = reconnect_rx.recv() => {
+                r = reconnect_rx.recv() => {
+                    // Treat Lagged as a reconnect: the `Ok(())` pattern alone
+                    // silently skipped this arm when the 4-slot channel
+                    // overran, losing the republish on a flapping broker.
+                    // Closed means the sender is gone; `continue` would spin the
+                    // loop hot on an instantly-ready recv(). Exit instead.
+                    if !matches!(
+                        r,
+                        Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                    ) {
+                        break;
+                    }
                     prev_rx.clear();
                     prev_tx.clear();
                 }

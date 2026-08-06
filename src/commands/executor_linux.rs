@@ -149,15 +149,14 @@ impl CommandExecutor {
                         user: config.mqtt.user.clone(),
                         pass: config.mqtt.pass.clone(),
                         client_id: format!("{}-sleep", config.client_id()),
-                        sleep_topic: format!(
-                            "homeassistant/sensor/{}/sleep_state/state",
-                            config.device_name
+                        sleep_topic: crate::mqtt::sensor_state_topic_for(
+                            &config.device_name,
+                            "sleep_state",
                         ),
                         // Same topic as the async client's LWT; built inline
                         // because that helper is private to the mqtt module.
-                        availability_topic: format!(
-                            "homeassistant/sensor/{}/availability",
-                            config.device_name
+                        availability_topic: crate::mqtt::availability_topic_for(
+                            &config.device_name,
                         ),
                     }
                 };
@@ -169,10 +168,7 @@ impl CommandExecutor {
                     Err(e) => warn!("Sync publish task join error: {}", e),
                 }
                 // Also publish via async client as fallback
-                state
-                    .mqtt
-                    .publish_sensor_retained("sleep_state", "sleeping")
-                    .await;
+                state.mqtt.publish_sensor("sleep_state", "sleeping").await;
                 let cmd = if name == "Sleep" {
                     "systemctl suspend"
                 } else {
@@ -182,10 +178,34 @@ impl CommandExecutor {
                 // fast (systemd suspends asynchronously), but a polkit prompt or
                 // hung systemd could block, so run it off the single-threaded
                 // runtime.
-                let _ = tokio::task::spawn_blocking(move || {
-                    Command::new("bash").args(["-c", cmd]).status()
+                let suspended = tokio::task::spawn_blocking(move || {
+                    Command::new("bash")
+                        .args(["-c", cmd])
+                        .status()
+                        .map(|st| st.success())
+                        .unwrap_or(false)
                 })
-                .await;
+                .await
+                .unwrap_or(false);
+                // Same contract as the Windows path: the retained "sleeping" was
+                // published BEFORE this, and a refused suspend (polkit denial,
+                // failed systemctl) never produces a resume event, so nothing
+                // would ever correct it.
+                if !suspended {
+                    warn!(
+                        "{} was refused by the system - restoring sleep_state and availability",
+                        name
+                    );
+                    state.mqtt.publish_sensor("sleep_state", "awake").await;
+                    // sync_mqtt_publish_sleep above sends availability=offline as
+                    // well as sleep_state=sleeping, from a SEPARATE short-lived TCP
+                    // client. The async client never disconnected, so nothing else
+                    // will ever republish online - leaving EVERY entity on the
+                    // device Unavailable in HA indefinitely after one refused
+                    // suspend. On macOS `systemctl suspend` fails every time, so
+                    // that would happen on every press of the Sleep button.
+                    state.mqtt.publish_availability(true).await;
+                }
                 return Ok(());
             }
             "MonitorOff" => {

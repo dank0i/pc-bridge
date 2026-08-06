@@ -6,11 +6,14 @@
 //!
 //! Also publishes a `game_catalog` sensor listing all exposed games from config.
 
-use log::{debug, error, info};
+use log::{debug, info, warn};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::time::{Duration, interval};
+
+/// Latch so a permanently unreadable /proc warns once, not every tick.
+static PROC_ENUM_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 use crate::AppState;
 
@@ -56,6 +59,9 @@ impl GameSensor {
         Self { state }
     }
 
+    // Long event-loop body: splitting it would scatter tightly-coupled state
+    // across helpers for no readability gain. Reviewed, allowed deliberately.
+    #[allow(clippy::cognitive_complexity)]
     pub async fn run(self) {
         let config = self.state.config.read().await;
         let mut interval_secs = config.intervals.game_sensor.max(1); // Prevent panic on 0
@@ -73,11 +79,19 @@ impl GameSensor {
         let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
 
         // Publish initial state
-        let running = self.detect_game(&cached).await;
-        self.publish_game(&running).await;
-
-        // Track last published state (joined ids) to avoid duplicate messages
-        let mut last_game_id = running_state(&running).0;
+        // Skip only the INITIAL publish when enumeration failed. Returning here
+        // would kill the sensor permanently on a single transient /proc read at
+        // boot, when the system is busiest, and the supervisor would then respawn
+        // it forever on escalating backoff while inflating bridge_health's restart
+        // count. The loop below retries on its own.
+        let mut last_game_id = match self.detect_game(&cached).await {
+            Some(running) => {
+                self.publish_game(&running).await;
+                running_state(&running).0
+            }
+            // Nothing published yet; the loop retries and will publish then.
+            None => String::new(),
+        };
 
         loop {
             tokio::select! {
@@ -103,7 +117,9 @@ impl GameSensor {
                     cached = CachedGamePatterns::build(&games);
                     self.publish_game_catalog(&games).await;
                     debug!("Game sensor: rebuilt cached patterns");
-                    let running = self.detect_game(&cached).await;
+                    let Some(running) = self.detect_game(&cached).await else {
+                        continue;
+                    };
                     let key = running_state(&running).0;
                     if key != last_game_id {
                         self.publish_game(&running).await;
@@ -111,16 +127,31 @@ impl GameSensor {
                     }
                 }
                 // MQTT reconnected - force republish retained state
-                Ok(()) = reconnect_rx.recv() => {
+                r = reconnect_rx.recv() => {
+                    // Treat Lagged as a reconnect: the `Ok(())` pattern alone
+                    // silently skipped this arm when the 4-slot channel
+                    // overran, losing the republish on a flapping broker.
+                    // Closed means the sender is gone; `continue` would spin the
+                    // loop hot on an instantly-ready recv(). Exit instead.
+                    if !matches!(
+                        r,
+                        Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                    ) {
+                        break;
+                    }
                     info!("Game sensor: MQTT reconnected, republishing current state");
                     let games = self.state.config.read().await.games.clone();
                     self.publish_game_catalog(&games).await;
-                    let running = self.detect_game(&cached).await;
+                    let Some(running) = self.detect_game(&cached).await else {
+                        continue;
+                    };
                     self.publish_game(&running).await;
                     last_game_id = running_state(&running).0;
                 }
                 _ = tick.tick() => {
-                    let running = self.detect_game(&cached).await;
+                    let Some(running) = self.detect_game(&cached).await else {
+                        continue;
+                    };
                     let key = running_state(&running).0;
                     if key != last_game_id {
                         self.publish_game(&running).await;
@@ -133,10 +164,7 @@ impl GameSensor {
 
     async fn publish_game(&self, games: &[(String, String)]) {
         let (state, display_names) = running_state(games);
-        self.state
-            .mqtt
-            .publish_sensor_retained("runninggames", &state)
-            .await;
+        self.state.mqtt.publish_sensor("runninggames", &state).await;
 
         // Structured game list, built directly from the pairs (no re-split).
         let games_array: Vec<serde_json::Value> = games
@@ -177,7 +205,7 @@ impl GameSensor {
         let count = entries.len();
         self.state
             .mqtt
-            .publish_sensor_retained("game_catalog", &count.to_string())
+            .publish_sensor("game_catalog", &count.to_string())
             .await;
         let attrs = serde_json::json!({
             "games": entries,
@@ -190,18 +218,37 @@ impl GameSensor {
         debug!("Published game catalog with {} exposed games", count);
     }
 
-    async fn detect_game(&self, cached: &CachedGamePatterns) -> Vec<(String, String)> {
+    /// `None` when the process table could not be enumerated at all (no `/proc`,
+    /// as on macOS, or a restricted one). That is NOT the same as "no game is
+    /// running", and collapsing it to an empty Vec here would publish a confident
+    /// `runninggames: "none"` forever - defeating the Option that proc_linux
+    /// deliberately propagates for exactly this case.
+    async fn detect_game(&self, cached: &CachedGamePatterns) -> Option<Vec<(String, String)>> {
         // No configured patterns means nothing can match, so skip the hundreds of
         // /proc reads entirely (a no-games config would otherwise scan every tick).
         if cached.patterns.is_empty() {
-            return Vec::new();
+            // Genuinely nothing to match - that IS a real empty result.
+            return Some(Vec::new());
         }
         // Enumerate processes via /proc
         let processes = match self.get_process_names().await {
             Ok(p) => p,
             Err(e) => {
-                error!("Failed to enumerate processes: {}", e);
-                return Vec::new();
+                // Latched: this is called every tick, so an unreadable /proc
+                // (macOS, or a container with /proc masked) otherwise emits an
+                // error line per poll - 17k a day at the default interval. Every
+                // other persistent-failure path in the repo latches; this one was
+                // missed. warn!, not error!: the sensor recovers by itself the
+                // moment /proc becomes readable.
+                if PROC_ENUM_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    debug!("Failed to enumerate processes: {}", e);
+                } else {
+                    warn!(
+                        "Failed to enumerate processes: {} (further failures silent)",
+                        e
+                    );
+                }
+                return None;
             }
         };
 
@@ -220,7 +267,7 @@ impl GameSensor {
             }
         }
 
-        found_games
+        Some(found_games)
     }
 
     async fn get_process_names(&self) -> anyhow::Result<Vec<String>> {
@@ -234,12 +281,13 @@ impl GameSensor {
     fn get_process_names_blocking() -> anyhow::Result<Vec<String>> {
         // Name resolution (incl. the 15-char comm-truncation fallback) is shared
         // with the custom ProcessExists sensor and the close/kill command path.
-        Ok(
-            crate::sensors::proc_linux::resolve_processes(std::path::Path::new("/proc"))
-                .into_iter()
-                .map(|e| e.name)
-                .collect(),
-        )
+        // Err, not an empty Vec: an empty list is indistinguishable from "no game
+        // is running" and would publish a confident negative forever on a host
+        // with no /proc (macOS) or with the table hidden.
+        let entries =
+            crate::sensors::proc_linux::try_resolve_processes(std::path::Path::new("/proc"))
+                .ok_or_else(|| anyhow::anyhow!("cannot enumerate /proc"))?;
+        Ok(entries.into_iter().map(|e| e.name).collect())
     }
 }
 

@@ -30,7 +30,11 @@ impl DiskSensor {
         drop(config);
 
         if paths.is_empty() {
-            info!("Disk sensor enabled but no paths configured - skipping");
+            // Belt and braces: the supervisor gate already covers this, so
+            // reaching here means the config changed under us between the gate
+            // and this read. Returning is safe because the config-change
+            // reconcile re-evaluates the gate.
+            info!("Disk sensor has no paths configured - nothing to poll");
             return;
         }
 
@@ -53,7 +57,18 @@ impl DiskSensor {
                     debug!("Disk sensor shutting down");
                     break;
                 }
-                Ok(()) = reconnect_rx.recv() => {
+                r = reconnect_rx.recv() => {
+                    // Treat Lagged as a reconnect: the `Ok(())` pattern alone
+                    // silently skipped this arm when the 4-slot channel
+                    // overran, losing the republish on a flapping broker.
+                    // Closed means the sender is gone; `continue` would spin the
+                    // loop hot on an instantly-ready recv(). Exit instead.
+                    if !matches!(
+                        r,
+                        Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                    ) {
+                        break;
+                    }
                     prev_state.clear();
                 }
                 _ = tick.tick() => {
@@ -79,16 +94,20 @@ impl DiskSensor {
                     };
 
                     // State is the highest used_percent across all paths. If every
-                    // path failed to read (empty), report unavailable rather than a
+                    // path failed to read (empty), report unknown rather than a
                     // misleading 0% (which could read as a healthy empty disk).
+                    //
+                    // Whole percent, like every other percentage sensor: the
+                    // change guard compares the FORMATTED string, so a decimal
+                    // place means it effectively never suppresses anything.
                     let state = if entries.is_empty() {
-                        "unavailable".to_string()
+                        crate::mqtt::SENTINEL_UNKNOWN.to_string()
                     } else {
                         let max_used: f64 = entries
                             .iter()
                             .filter_map(|e| e["used_percent"].as_str()?.parse::<f64>().ok())
                             .fold(0.0_f64, f64::max);
-                        format!("{max_used:.1}")
+                        format!("{max_used:.0}")
                     };
 
                     if state != prev_state {

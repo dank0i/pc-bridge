@@ -13,6 +13,40 @@ use crate::config::{CustomCommand, CustomSensor};
 use std::collections::HashMap;
 
 pub(super) const DISCOVERY_PREFIX: &str = "homeassistant";
+/// The one value every sensor publishes when it cannot observe its subject.
+/// Registered as `payload_none` on every sensor's discovery config, so HA reads
+/// it as "no value" rather than as a literal state string.
+pub(crate) const SENTINEL_UNKNOWN: &str = "unknown";
+
+/// Discovery `value_template` that renders [`SENTINEL_UNKNOWN`] as HA's
+/// `PAYLOAD_NONE` (the literal string `None`) and passes everything else
+/// through untouched.
+/// Build the `bridge_info` attributes payload from the CURRENT config.
+///
+/// Must be recomputed whenever features change, not snapshotted at startup:
+/// v3.5.0 makes every flag live-toggleable, so a flag enabled in the settings
+/// window would otherwise still read `false` in
+/// `state_attr('sensor.<dev>_bridge_info','features')` until the agent restarts.
+pub(crate) fn bridge_info_attributes(features: &crate::config::FeatureConfig) -> String {
+    serde_json::json!({
+        "version": VERSION,
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        // Serialized straight from the struct, never hand-listed. This used to be
+        // 33 hand-written lines, and a flag missing from it did not publish
+        // `false` - it published NOTHING, so HA saw the key as absent and any
+        // template doing `is_state_attr(..., true)` silently took the wrong
+        // branch. FeatureConfig has no skip_serializing_if, so every flag is
+        // guaranteed present.
+        "features": features,
+    })
+    .to_string()
+}
+
+pub(crate) fn unknown_to_none_template() -> String {
+    format!("{{{{ 'None' if value == '{SENTINEL_UNKNOWN}' else value }}}}")
+}
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Command received from Home Assistant
@@ -39,11 +73,20 @@ pub struct MqttClient {
     /// reconnect too. `refresh_subscriptions` is the single writer. std RwLock is
     /// fine: writers are rare and the guard is never held across an await.
     subscribe_topics: Arc<RwLock<Vec<String>>>,
+    /// Current `bridge_info` attributes JSON. Rebuilt by `refresh_bridge_info`
+    /// on a config hot-reload and read by the ConnAck birth publish.
+    birth_attrs: Arc<RwLock<String>>,
+    /// Attributes topic for `bridge_info`, so `refresh_bridge_info` does not
+    /// rebuild it.
+    birth_attrs_topic: String,
 }
 
 mod discovery;
 mod payload;
 mod topics;
+pub(crate) use topics::{
+    availability_topic_for, sensor_attributes_topic_for, sensor_state_topic_for,
+};
 
 use payload::HADevice;
 #[cfg(test)]
@@ -189,46 +232,13 @@ impl MqttClient {
             DISCOVERY_PREFIX, device_name
         );
         let birth_payload = VERSION.to_string();
-        let birth_attrs_payload = serde_json::json!({
-            "version": VERSION,
-            "os": std::env::consts::OS,
-            "arch": std::env::consts::ARCH,
-            "features": {
-                "running_game": config.features.running_game,
-                "game_catalog": config.features.game_catalog,
-                "steam_library": config.features.steam_library,
-                "launch_game": config.features.launch_game,
-                "close_game": config.features.close_game,
-                "idle_tracking": config.features.idle_tracking,
-                "sleep_wake": config.features.sleep_wake,
-                "display_state": config.features.display_state,
-                "cmd_shutdown": config.features.cmd_shutdown,
-                "cmd_restart": config.features.cmd_restart,
-                "cmd_sleep": config.features.cmd_sleep,
-                "cmd_lock": config.features.cmd_lock,
-                "cmd_logoff": config.features.cmd_logoff,
-                "cmd_monitor": config.features.cmd_monitor,
-                "notifications": config.features.notifications,
-                "cpu_sensor": config.features.cpu_sensor,
-                "memory_sensor": config.features.memory_sensor,
-                "active_window": config.features.active_window,
-                "session_state": config.features.session_state,
-                "audio_device": config.features.audio_device,
-                "mic": config.features.mic,
-                "webcam": config.features.webcam,
-                "now_playing": config.features.now_playing,
-                "volume": config.features.volume,
-                "media_controls": config.features.media_controls,
-                "steam_updates": config.features.steam_updates,
-                "discord": config.features.discord,
-                "gpu_sensor": config.features.gpu_sensor,
-                "network_sensor": config.features.network_sensor,
-                "disk_sensor": config.features.disk_sensor,
-                "uptime_sensor": config.features.uptime_sensor,
-                "hwinfo_sensor": config.features.hwinfo_sensor,
-            }
-        })
-        .to_string();
+        // Shared so the ConnAck task republishes the CURRENT features, not the
+        // set that happened to be enabled when the client was constructed.
+        let birth_attrs: Arc<RwLock<String>> =
+            Arc::new(RwLock::new(bridge_info_attributes(&config.features)));
+        // Cloned before the event-loop task takes ownership of the originals.
+        let birth_attrs_for_client = Arc::clone(&birth_attrs);
+        let birth_attrs_topic_for_client = birth_attrs_topic.clone();
 
         // Spawn event loop handler
         tokio::spawn(async move {
@@ -311,8 +321,9 @@ impl MqttClient {
                         let avail = availability_topic_for_eventloop.clone();
                         let state_topic = birth_topic.clone();
                         let state_body = birth_payload.clone();
+                        let birth_attrs_conn = Arc::clone(&birth_attrs);
                         let attr_topic = birth_attrs_topic.clone();
-                        let attr_body = birth_attrs_payload.clone();
+                        let attr_body = birth_attrs_conn.read().unwrap().clone();
                         let rtx = reconnect_tx_for_eventloop.clone();
                         tokio::spawn(async move {
                             // Readiness contract: availability "online" means
@@ -403,6 +414,8 @@ impl MqttClient {
             device,
             reconnect_tx,
             subscribe_topics,
+            birth_attrs: birth_attrs_for_client,
+            birth_attrs_topic: birth_attrs_topic_for_client,
         };
 
         let cmd_rx = CommandReceiver { rx: command_rx };
@@ -461,6 +474,7 @@ impl MqttClient {
         "MediaPrevious",
         "MediaStop",
         "VolumeMute",
+        "VolumeSet",
     ];
 
     fn build_subscribe_topics(device_name: &str, config: &Config) -> Vec<String> {
@@ -505,6 +519,22 @@ impl MqttClient {
         // Seed the shared set so the ConnAck resubscribe and later refreshes diff
         // against what we actually subscribed here.
         *self.subscribe_topics.write().unwrap() = topics;
+    }
+
+    /// Rebuild and republish the `bridge_info` attributes after a config
+    /// hot-reload, so a feature toggled at runtime is visible to HA templates
+    /// immediately rather than at the next agent restart.
+    pub async fn refresh_bridge_info(&self, config: &Config) {
+        let body = bridge_info_attributes(&config.features);
+        {
+            let mut guard = self.birth_attrs.write().unwrap();
+            if *guard == body {
+                return;
+            }
+            (*guard).clone_from(&body);
+        }
+        self.publish_inner(self.birth_attrs_topic.clone(), true, body)
+            .await;
     }
 
     /// Reconcile the command-subscription set against the current config after a
@@ -561,15 +591,42 @@ impl MqttClient {
         self.reconnect_tx.subscribe()
     }
 
-    /// Publish a sensor value (non-retained)
+    /// Publish a sensor value, RETAINED.
+    ///
+    /// SENTINEL CONVENTION for every sensor in this agent:
+    ///
+    /// Publish [`SENTINEL_UNKNOWN`] when the producer is alive but cannot
+    /// determine a value. Do NOT publish the literal string `"unavailable"`:
+    /// every entity registered here carries an `availability_topic`, so an
+    /// `unavailable` STATE is indistinguishable in Home Assistant from the
+    /// bridge's LWT firing - which destroys the exact distinction these
+    /// sentinels exist to make. `unknown` is what HA reserves for "producer
+    /// alive, cannot say", and every sensor's discovery config carries a
+    /// `value_template` mapping it onto HA's own no-value payload.
+    ///
+    /// Publishing nothing at all is also acceptable when the previous value is
+    /// still the best available answer (see sensors/idle.rs), but never publish
+    /// a plausible-looking fabrication such as 0, "off" or "none".
+    ///
+    /// Retained because `publish_sensor_attributes` is. When they disagreed, a
+    /// broker restart that dropped retained state handed HA attributes with no
+    /// state: the entity read `unknown` with a populated, stale attribute dict.
+    ///
+    /// `publish_sensor_volatile` exists for the rare value that genuinely must
+    /// not survive a restart. There is deliberately no second retained variant:
+    /// `publish_sensor` used to exist, was byte-identical to this, and
+    /// split the call sites 46/21 on no principle at all - so half the codebase
+    /// never saw the convention documented above.
     pub async fn publish_sensor(&self, name: &str, value: &str) {
-        self.publish_inner(self.sensor_topic(name), false, value.to_owned())
+        self.publish_inner(self.sensor_topic(name), true, value.to_owned())
             .await;
     }
 
-    /// Publish a sensor value (retained)
-    pub async fn publish_sensor_retained(&self, name: &str, value: &str) {
-        self.publish_inner(self.sensor_topic(name), true, value.to_owned())
+    /// Publish a sensor value NON-retained, for values that must not outlive the
+    /// agent. Nothing uses this today; it exists so the choice stays explicit.
+    #[allow(dead_code)]
+    pub async fn publish_sensor_volatile(&self, name: &str, value: &str) {
+        self.publish_inner(self.sensor_topic(name), false, value.to_owned())
             .await;
     }
 
@@ -668,6 +725,10 @@ mod tests {
             device_name: device_name.to_string(),
             device_id: device_id.clone(),
             cached_topics: CachedTopics::new(device_name),
+            birth_attrs: Arc::new(RwLock::new(String::new())),
+            birth_attrs_topic: format!(
+                "{DISCOVERY_PREFIX}/sensor/{device_name}/bridge_info/attributes"
+            ),
             device: Arc::new(HADevice {
                 identifiers: vec![device_id],
                 name: device_name.to_string(),
@@ -783,7 +844,6 @@ mod tests {
             "disk_usage",
             "system_uptime",
             "bridge_info",
-            "hwinfo_diagnostic",
         ];
         for name in expected {
             assert!(
@@ -832,6 +892,10 @@ mod tests {
             icon: Some("mdi:cpu-64-bit".to_string()),
             device_class: None,
             unit_of_measurement: Some("%".to_string()),
+            min: None,
+            max: None,
+            step: None,
+            value_template: Some(crate::mqtt::unknown_to_none_template()),
             state_class: None,
         };
 
@@ -871,6 +935,10 @@ mod tests {
             icon: Some("mdi:power-sleep".to_string()),
             device_class: None,
             unit_of_measurement: None,
+            min: None,
+            max: None,
+            step: None,
+            value_template: None,
             state_class: None,
         };
 
@@ -911,6 +979,10 @@ mod tests {
             icon: Some("mdi:gamepad-variant".to_string()),
             device_class: None,
             unit_of_measurement: None,
+            min: None,
+            max: None,
+            step: None,
+            value_template: Some(crate::mqtt::unknown_to_none_template()),
             state_class: None,
         };
 
@@ -942,6 +1014,10 @@ mod tests {
             icon: None,
             device_class: None,
             unit_of_measurement: None,
+            min: None,
+            max: None,
+            step: None,
+            value_template: Some(crate::mqtt::unknown_to_none_template()),
             state_class: None,
         };
 
@@ -975,6 +1051,10 @@ mod tests {
             icon: Some("mdi:power-sleep".to_string()),
             device_class: None,
             unit_of_measurement: None,
+            min: None,
+            max: None,
+            step: None,
+            value_template: Some(crate::mqtt::unknown_to_none_template()),
             state_class: None,
         };
 
@@ -1012,6 +1092,10 @@ mod tests {
             icon: None,
             device_class: None,
             unit_of_measurement: None,
+            min: None,
+            max: None,
+            step: None,
+            value_template: None,
             state_class: None,
         };
 
@@ -1045,6 +1129,10 @@ mod tests {
             icon: Some("mdi:clock-outline".to_string()),
             device_class: Some("timestamp".to_string()),
             unit_of_measurement: None,
+            min: None,
+            max: None,
+            step: None,
+            value_template: Some(crate::mqtt::unknown_to_none_template()),
             state_class: None,
         };
 
@@ -1083,6 +1171,10 @@ mod tests {
             icon: sensor.icon.clone(),
             device_class: None,
             unit_of_measurement: sensor.unit.clone(),
+            min: None,
+            max: None,
+            step: None,
+            value_template: Some(crate::mqtt::unknown_to_none_template()),
             state_class: derive_state_class(None, sensor.unit.as_deref()),
             json_attributes_topic: None,
         };
@@ -1125,6 +1217,10 @@ mod tests {
             icon: cmd.icon.clone(),
             device_class: None,
             unit_of_measurement: None,
+            min: None,
+            max: None,
+            step: None,
+            value_template: None,
             state_class: None,
             json_attributes_topic: None,
         };
@@ -1181,6 +1277,27 @@ mod tests {
     }
 
     // ===== build_subscribe_topics tests =====
+
+    #[test]
+    fn test_volumeset_subscription_follows_volume_flag() {
+        // The number entity is registered under `features.volume`; if the command
+        // gate disagrees, HA gets a control whose presses are never subscribed
+        // (or a torn-down entity whose topic stays subscribed).
+        let mut config = Config::default();
+        config.features.volume = true;
+        let topics = MqttClient::build_subscribe_topics("test-pc", &config);
+        assert!(
+            topics.iter().any(|t| t.contains("/VolumeSet/")),
+            "VolumeSet not subscribed with volume on"
+        );
+
+        config.features.volume = false;
+        let topics = MqttClient::build_subscribe_topics("test-pc", &config);
+        assert!(
+            !topics.iter().any(|t| t.contains("/VolumeSet/")),
+            "VolumeSet still subscribed with volume off"
+        );
+    }
 
     #[test]
     fn test_subscribe_topics_default_features() {
@@ -1309,6 +1426,7 @@ mod tests {
             idle_tracking: true,
             sleep_wake: true,
             display_state: true,
+            display_attached: false,
             cmd_shutdown: true,
             cmd_restart: true,
             cmd_sleep: true,
@@ -1390,6 +1508,10 @@ mod tests {
             icon: Some("mdi:battery".to_string()),
             device_class: Some("battery".to_string()),
             unit_of_measurement: Some("%".to_string()),
+            min: None,
+            max: None,
+            step: None,
+            value_template: Some(crate::mqtt::unknown_to_none_template()),
             state_class: None,
         };
 
@@ -1432,7 +1554,7 @@ mod tests {
 
     #[test]
     fn test_sleep_state_content_awake() {
-        // Published at boot: publish_sensor_retained("sleep_state", "awake")
+        // Published at boot: publish_sensor("sleep_state", "awake")
         let value = "awake";
         let mqtt = test_client("dank0i-pc");
         let topic = mqtt.sensor_topic("sleep_state");
@@ -1536,7 +1658,7 @@ mod tests {
 
     #[test]
     fn test_display_state_content() {
-        // Published at boot: publish_sensor_retained("display", "on")
+        // Published at boot: publish_sensor("display", "on")
         let value = "on";
         let mqtt = test_client("dank0i-pc");
         let topic = mqtt.sensor_topic("display");
@@ -2052,6 +2174,7 @@ mod tests {
                 idle_tracking: true,
                 sleep_wake: true,
                 display_state: true,
+                display_attached: false,
                 cmd_shutdown: true,
                 cmd_restart: true,
                 cmd_sleep: true,
@@ -2649,6 +2772,10 @@ mod tests {
             icon: Some("mdi:flash".to_string()),
             device_class: Some("power".to_string()),
             unit_of_measurement: Some("W".to_string()),
+            min: None,
+            max: None,
+            step: None,
+            value_template: Some(crate::mqtt::unknown_to_none_template()),
             state_class: Some("measurement".to_string()),
         };
         let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
@@ -2671,10 +2798,102 @@ mod tests {
             icon: Some("mdi:power-sleep".to_string()),
             device_class: None,
             unit_of_measurement: None,
+            min: None,
+            max: None,
+            step: None,
+            value_template: Some(crate::mqtt::unknown_to_none_template()),
             state_class: None,
         };
         let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
         // String enum sensors should NOT have state_class serialized
         assert!(json.get("state_class").is_none());
+    }
+    #[test]
+    fn test_unknown_to_none_template_renders_ha_payload_none() {
+        // HA compares the RENDERED payload against the literal string "None"
+        // (homeassistant.const.PAYLOAD_NONE). Any other spelling leaves a
+        // non-numeric state on a measurement sensor, which HA rejects.
+        let t = unknown_to_none_template();
+        assert_eq!(t, "{{ 'None' if value == 'unknown' else value }}");
+        assert!(
+            t.contains("'None'"),
+            "must render HA's PAYLOAD_NONE exactly"
+        );
+    }
+
+    #[test]
+    fn test_every_sensor_discovery_config_maps_the_unknown_sentinel() {
+        // Guard against a new sensor being registered without the template: it
+        // would publish `unknown` into a measurement entity and freeze it.
+        let src = include_str!("discovery.rs");
+        let mut sensor_payloads = 0;
+        let mut templated = 0;
+        for block in src.split("HADiscoveryPayload {").skip(1) {
+            let head = &block[..block.len().min(1200)];
+            // `state_topic: Some(...)` covers the sensors; `state_topic: spec.`
+            // covers the `number`, which reads a sensor's topic and so can
+            // receive the sentinel too. The first version of this test only
+            // matched the former, so the one payload that was actually wrong
+            // was precisely the one it could not see.
+            if head.contains("state_topic: Some(") || head.contains("state_topic: spec.") {
+                sensor_payloads += 1;
+                // Match on the ABSENCE of the None spelling, not the presence
+                // of one particular Some spelling: the number builds its
+                // template from `spec`, and a matcher keyed to `Some(` missed
+                // exactly the payload that was wrong.
+                if !head.contains("value_template: None") {
+                    templated += 1;
+                }
+            }
+        }
+        assert!(sensor_payloads > 0, "found no state-carrying payloads");
+        assert_eq!(
+            sensor_payloads,
+            templated,
+            "{} discovery payload(s) have a state topic but no unknown->None template",
+            sensor_payloads - templated
+        );
+    }
+    /// A cfg-gated entity must carry the SAME cfg on its discovery registration
+    /// and on its `feature_entities` teardown row. When they drifted,
+    /// `display_attached` registered on Linux but was torn down only on Windows,
+    /// so disabling the flag left a retained discovery config behind and the
+    /// entity lived on in HA forever as unknown. Nothing caught it.
+    #[test]
+    fn test_cfg_gated_entities_have_matching_registration_and_teardown_gates() {
+        let src = include_str!("discovery.rs");
+
+        // Map entity name -> every cfg attribute that gates a mention of it.
+        let mut gates: std::collections::HashMap<&str, Vec<&str>> =
+            std::collections::HashMap::new();
+
+        let lines: Vec<&str> = src.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            let is_site = line.contains("entities.push((") || line.contains("config.features.");
+            if !is_site {
+                continue;
+            }
+            // Nearest preceding #[cfg(...)] within a couple of lines.
+            let cfg = lines[i.saturating_sub(3)..i]
+                .iter()
+                .rev()
+                .find(|l| l.trim_start().starts_with("#[cfg("))
+                .map_or("<none>", |l| l.trim());
+
+            for name in ["display_attached", "hwinfo_diagnostic"] {
+                if line.contains(name) {
+                    gates.entry(name).or_default().push(cfg);
+                }
+            }
+        }
+
+        for (name, found) in gates {
+            let first = found[0];
+            assert!(
+                found.iter().all(|c| *c == first),
+                "{name} is gated inconsistently across its registration and teardown \
+                 sites: {found:?} - a mismatch leaves a retained ghost entity in HA"
+            );
+        }
     }
 }

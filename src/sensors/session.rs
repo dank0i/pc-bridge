@@ -85,6 +85,7 @@ impl SessionSensor {
         // Skip duplicate publishes (e.g. a brief double-registration on rapid
         // re-enable emitting the same lock state twice).
         let mut prev: Option<&'static str> = None;
+        let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
 
         loop {
             tokio::select! {
@@ -99,6 +100,34 @@ impl SessionSensor {
                     }
                     break;
                 }
+                r = reconnect_rx.recv() => {
+                    // A broker without persistence loses every retained value on
+                    // restart, and this sensor is purely event-driven: without
+                    // this arm the entity stays blank until the user next locks
+                    // or unlocks, which can be days.
+                    //
+                    // Republish what we actually observed. main.rs used to reseed
+                    // "unknown" here instead, which CLOBBERED a known-good value
+                    // on every reconnect - including transient network blips
+                    // against a persistent broker that had not lost anything.
+                    // Lagged counts as a reconnect for the same reason as
+                    // everywhere else: the missed message may have been the one.
+                    if !matches!(r, Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)))
+                    {
+                        // Closed: BREAK, never continue. `biased` re-polls this
+                        // arm first every iteration and it is instantly ready,
+                        // so continuing spins at 100% CPU and the event arm
+                        // never runs again. Every other reconnect arm breaks.
+                        debug!("Reconnect channel closed; stopping session listener");
+                        break;
+                    }
+                    let value = prev.unwrap_or(crate::mqtt::SENTINEL_UNKNOWN);
+                    debug!("Reconnect: republishing session as {}", value);
+                    self.state
+                        .mqtt
+                        .publish_sensor("session", value)
+                        .await;
+                }
                 Some(event) = event_rx.recv() => {
                     let value = match event {
                         SessionEvent::Locked => "locked",
@@ -111,7 +140,7 @@ impl SessionSensor {
                     info!("Session event: {}", value);
                     self.state
                         .mqtt
-                        .publish_sensor_retained("session", value)
+                        .publish_sensor("session", value)
                         .await;
                 }
             }
@@ -180,8 +209,13 @@ impl SessionSensor {
             }
 
             let _ = WTSUnRegisterSessionNotification(hwnd);
-            let _ = Box::from_raw(ctx_ptr);
+            // ORDER IS LOAD-BEARING. DestroyWindow dispatches inbound SENT
+            // messages, and wnd_proc dereferences GWLP_USERDATA. Clear the
+            // pointer and destroy the window BEFORE freeing the context, or a
+            // message arriving mid-teardown reads freed memory.
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             let _ = DestroyWindow(hwnd);
+            let _ = Box::from_raw(ctx_ptr);
         }
     }
 

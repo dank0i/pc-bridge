@@ -72,11 +72,8 @@ pub(crate) fn is_non_game_exe(exe: &str) -> bool {
 
     let file = exe.rsplit(['/', '\\']).next().unwrap_or(exe);
     // Strip a case-insensitive .exe but keep original case for camelCase tokens.
-    let stem = if file.len() >= 4 && file[file.len() - 4..].eq_ignore_ascii_case(".exe") {
-        &file[..file.len() - 4]
-    } else {
-        file
-    };
+    // The shared helper, which uses `> 4` so a bare ".exe" is not collapsed to "".
+    let stem = crate::commands::strip_exe(file);
     let lower = stem.to_lowercase();
     let tokens = tokenize(stem);
 

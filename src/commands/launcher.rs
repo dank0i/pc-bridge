@@ -98,19 +98,33 @@ pub fn expand_launcher_shortcut(cmd: &str) -> Option<String> {
         }
 
         "close" | "kill" => {
-            let process_name = arg.trim_end_matches(".exe");
+            // Shared helper: case-insensitive strip, case-PRESERVING result.
+            let process_name = crate::commands::strip_exe(arg);
             if !is_safe_identifier(process_name) {
                 warn!("Invalid process name: {}", arg);
                 return None;
             }
-            info!("Closing process: {}", arg);
+            // close: graceful window-close request. kill: force terminate.
+            //
+            // Both used to map to CloseMainWindow(), which a hung or fullscreen
+            // game simply ignores - so `kill:` had NO force path on Windows at
+            // all, while on Linux it means SIGKILL. An automation written against
+            // `kill:` therefore behaved completely differently per platform.
+            //
             // Exact ProcessName match (not `-like '{name}*'`): the prefix wildcard
             // would also close unrelated processes that merely share the prefix
             // (closing "Rust" would hit "RustDesk"). ProcessName has no .exe, and
             // this matches the Linux `pkill -x` behavior + the CloseGame comment.
+            let action = if launcher == "kill" {
+                info!("Force-terminating process: {}", arg);
+                "$_.Kill()"
+            } else {
+                info!("Closing process: {}", arg);
+                "$_.CloseMainWindow()"
+            };
             Some(format!(
-                r#"Get-Process | Where-Object {{ $_.ProcessName -eq '{}' }} | ForEach-Object {{ $_.CloseMainWindow() }}"#,
-                process_name
+                r#"Get-Process | Where-Object {{ $_.ProcessName -eq '{}' }} | ForEach-Object {{ {} }}"#,
+                process_name, action
             ))
         }
 

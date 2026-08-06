@@ -26,10 +26,17 @@ pub(crate) fn command_feature_enabled(name: &str, f: &FeatureConfig) -> bool {
         "RefreshSteamGames" => f.steam_library,
         "Screensaver" | "Wake" => f.idle_tracking,
         "DiscordJoin" | "DiscordLeaveChannel" => f.discord,
-        // Audio buttons are all registered under media_controls (register_discovery);
-        // volume gates the volume_level sensor, not these commands.
+        // Transport keys and mute ride `media_controls`; that predates v3.5.0 and
+        // is left alone so existing installs don't lose buttons.
         "MediaPlayPause" | "MediaNext" | "MediaPrevious" | "MediaStop" => f.media_controls,
         "VolumeMute" => f.media_controls,
+        // `volume` gates both reading the level (volume_level sensor) and setting
+        // it (the `number` entity). Must stay in step with the registration gate
+        // in mqtt/discovery.rs, or the entity and its subscription disagree:
+        // pressing a registered control would go nowhere, or a torn-down entity
+        // would leave a live subscription behind. VolumeSet only became reachable
+        // in v3.5.0, so narrowing it here breaks nothing already deployed.
+        "VolumeSet" => f.volume,
         _ => true,
     }
 }
@@ -172,7 +179,8 @@ pub(crate) fn global_scheme_blocked(config: &crate::config::Config, payload: &st
             // path, NOT a bypass). Only an UNCONFIGURED target needs the explicit
             // allow_global_close opt-in. (Do not gate on the close_game feature
             // here: that flag governs the CloseGame button, not close: payloads.)
-            let target = target.trim().trim_end_matches(".exe");
+            // Shared helper, so the gate computes exactly what the resolver does.
+            let target = strip_exe(target.trim());
             !config.allow_global_close && config.matching_game_processes([target]).is_empty()
         }
         _ => false,
@@ -353,3 +361,65 @@ pub use executor::CommandExecutor;
 
 #[cfg(unix)]
 pub use executor_linux::CommandExecutor;
+
+/// Strip a trailing `.exe` case-INSENSITIVELY, preserving the rest of the case.
+///
+/// One implementation, shared by both launcher twins and the close/kill
+/// authorization gate, so the gate cannot compute a different target than the
+/// resolver it gates.
+///
+/// Case preservation matters: Linux `pkill -x` matches case-SENSITIVELY, so
+/// lowercasing the whole name (as an earlier attempt did) silently stopped
+/// matching any mixed-case process. PowerShell's `-eq` is case-insensitive, so
+/// Windows tolerated it and only the Linux tests caught the break.
+///
+/// `trim_end_matches(".exe")` is wrong twice over: case-sensitive, and it strips
+/// repeatedly, so `a.exe.exe` collapses to `a`.
+pub fn strip_exe(name: &str) -> &str {
+    let b = name.as_bytes();
+    if b.len() > 4 && b[b.len() - 4..].eq_ignore_ascii_case(b".exe") {
+        &name[..name.len() - 4]
+    } else {
+        name
+    }
+}
+
+/// Absolute path to a `System32` binary.
+///
+/// `Command::new("powershell")` resolves through a search order that includes the
+/// CALLING PROCESS's own directory, and ours must stay user-writable for the
+/// updater's rename-in-place. Anything already running as this user could drop a
+/// `powershell.exe` beside the agent and have it executed on the next command
+/// (CWE-426). Absolute paths remove that step.
+///
+/// Uses `GetSystemDirectoryW`, NOT `%SystemRoot%`: `HKCU\Environment` is
+/// user-writable and its values merge into the environment of every process the
+/// user starts afterwards (the same primitive as the known `windir` UAC
+/// bypasses), so an env-derived path would re-open the exact hole this closes -
+/// and more durably, since it survives reinstalling the agent.
+#[cfg(windows)]
+pub fn system32(exe: &str) -> String {
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+    let mut buf = [0u16; 260];
+    // SAFETY: buffer and length match; returns chars written, 0 on failure.
+    let len = unsafe { GetSystemDirectoryW(Some(&mut buf)) } as usize;
+    if len == 0 || len >= buf.len() {
+        return format!("C:\\Windows\\System32\\{exe}");
+    }
+    format!("{}\\{exe}", String::from_utf16_lossy(&buf[..len]))
+}
+
+/// Absolute path to a binary that lives in the Windows directory itself rather
+/// than `System32` (`explorer.exe` is the one we use). Same rationale as
+/// [`system32`]: read the kernel's path, never the environment.
+#[cfg(windows)]
+pub fn system_root(exe: &str) -> String {
+    use windows::Win32::System::SystemInformation::GetWindowsDirectoryW;
+    let mut buf = [0u16; 260];
+    // SAFETY: buffer and length match; returns chars written, 0 on failure.
+    let len = unsafe { GetWindowsDirectoryW(Some(&mut buf)) } as usize;
+    if len == 0 || len >= buf.len() {
+        return format!("C:\\Windows\\{exe}");
+    }
+    format!("{}\\{exe}", String::from_utf16_lossy(&buf[..len]))
+}

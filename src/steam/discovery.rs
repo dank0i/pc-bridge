@@ -309,10 +309,10 @@ impl SteamGameDiscovery {
             .unwrap_or(&executable);
 
         // Key: lowercase exe name without extension
-        let key = exe_name
-            .strip_suffix(".exe")
-            .unwrap_or(exe_name)
-            .to_lowercase();
+        let key = exe_name.to_lowercase();
+        // Lowercase FIRST: strip_suffix is case-sensitive, so stripping before
+        // lowercasing leaves ".EXE" attached and the key never matches.
+        let key = key.strip_suffix(".exe").unwrap_or(&key).to_string();
 
         // Skip if empty key
         if key.is_empty() {
@@ -589,11 +589,8 @@ impl SteamGameDiscovery {
         let mut games = HashMap::with_capacity(game_count);
         for _ in 0..game_count {
             let game = Self::read_game(&mut reader)?;
-            let key = game
-                .executable
-                .strip_suffix(".exe")
-                .unwrap_or(&game.executable)
-                .to_lowercase();
+            let key = game.executable.to_lowercase();
+            let key = key.strip_suffix(".exe").unwrap_or(&key).to_string();
             games.insert(key, game);
         }
 
@@ -766,12 +763,12 @@ impl SteamGameDiscovery {
     #[inline]
     pub fn lookup(&self, process_name: &str) -> Option<&SteamGame> {
         // Normalize: lowercase, remove .exe
-        let key = process_name
-            .strip_suffix(".exe")
-            .unwrap_or(process_name)
-            .to_lowercase();
+        // Lowercase FIRST: strip_suffix is case-sensitive, so ".EXE" would
+        // survive and never match the stored key.
+        let key = process_name.to_lowercase();
+        let key = key.strip_suffix(".exe").unwrap_or(&key);
 
-        self.games.get(&key)
+        self.games.get(key)
     }
 }
 

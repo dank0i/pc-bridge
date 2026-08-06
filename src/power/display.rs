@@ -196,21 +196,30 @@ fn prevent_sleep_temporary(duration: Duration) {
         .name("sleep-prevent".into())
         .stack_size(64 * 1024)
         .spawn(move || {
+            // Clear the latch on EVERY exit path including an unwind. Previously
+            // a panic between the two SetThreadExecutionState calls left
+            // SLEEP_PREVENTION_ACTIVE stuck true, silently disabling all future
+            // sleep prevention for the process lifetime.
+            struct LatchGuard;
+            impl Drop for LatchGuard {
+                fn drop(&mut self) {
+                    SLEEP_PREVENTION_ACTIVE.store(false, Ordering::SeqCst);
+                }
+            }
+            let _guard = LatchGuard;
             unsafe {
                 // Set execution state to prevent sleep
                 let state = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED;
                 let ret = SetThreadExecutionState(state);
 
                 if ret == EXECUTION_STATE::default() {
-                    SLEEP_PREVENTION_ACTIVE.store(false, Ordering::SeqCst);
-                    return;
+                    return; // LatchGuard clears the flag
                 }
 
                 std::thread::sleep(duration);
 
                 // Reset to allow sleep again
                 SetThreadExecutionState(ES_CONTINUOUS);
-                SLEEP_PREVENTION_ACTIVE.store(false, Ordering::SeqCst);
                 info!("WakeDisplay: Sleep prevention ended");
             }
         }) {
@@ -220,4 +229,27 @@ fn prevent_sleep_temporary(duration: Duration) {
             SLEEP_PREVENTION_ACTIVE.store(false, Ordering::SeqCst);
         }
     }
+}
+
+/// Twin of the Linux [`crate::power::observed_display_state`].
+///
+/// Windows exposes no supported query for console display power: the state is
+/// only ever delivered by `GUID_CONSOLE_DISPLAY_STATE`, which fires once on
+/// registration with the current value. So the honest answer here is an
+/// optimistic seed, corrected within milliseconds by that registration event -
+/// and if registration fails, the listener sends `DisplayUnobservable` and the
+/// sensor drops to "unknown" rather than asserting this forever.
+///
+/// Kept as a function purely so `main.rs` has a single seeding path instead of a
+/// `cfg` fork that hid the asymmetry.
+pub fn observed_display_state() -> Option<&'static str> {
+    Some("on")
+}
+
+/// Windows twin of the Linux live query. Always None: there is no supported
+/// Win32 call that reports console display power on demand - the state only
+/// arrives via `GUID_CONSOLE_DISPLAY_STATE`. Callers must therefore leave the
+/// retained value alone rather than re-asserting the optimistic seed.
+pub fn query_display_state() -> Option<&'static str> {
+    None
 }

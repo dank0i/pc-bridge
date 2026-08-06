@@ -54,9 +54,9 @@ pub fn start(cfg: &Config) -> LiveView {
 
 fn sub_topics(dev: &str) -> [String; 3] {
     [
-        format!("homeassistant/sensor/{dev}/availability"),
-        format!("homeassistant/sensor/{dev}/runninggames/state"),
-        format!("homeassistant/sensor/{dev}/steam_updating/attributes"),
+        crate::mqtt::availability_topic_for(dev),
+        crate::mqtt::sensor_state_topic_for(dev, "runninggames"),
+        crate::mqtt::sensor_attributes_topic_for(dev, "steam_updating"),
     ]
 }
 

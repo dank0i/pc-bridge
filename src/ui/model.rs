@@ -181,6 +181,14 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
     use Group::{Audio, Games, Hardware, Notifications, Power, Presence};
     use Status::{Error, Running};
     // interval 0 = event-driven; >0 = polled every N seconds.
+    // HA derives entity_id by slugifying the discovery payload's `name` field, so
+    // these must match the friendly names in mqtt/discovery.rs, NOT the internal
+    // object_ids. They were transcribed by hand and 17 had drifted (four had the
+    // wrong DOMAIN, one named an entity that does not exist). Re-derive with:
+    //   grep -oE 'register_sensor[^(]*\(\s*device,\s*"[a-z0-9_]+",\s*"[^"]+"' \
+    //     src/mqtt/discovery.rs
+    // and slugify the second capture.
+    //
     // The entity strings below use "dank0i_pc" as a placeholder device id; it is
     // rewritten to the configured device below so the UI shows the user's real
     // HA entity ids (unique_id = "{device_id}_{name}" in discovery).
@@ -221,7 +229,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             Running,
             "Steam 47 · Epic 3",
             0,
-            "sensor.dank0i_pc_steam_library",
+            "button.dank0i_pc_refreshsteamgames",
             "",
             "Watches libraryfolders.vdf and appinfo.vdf",
         ),
@@ -246,7 +254,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             false,
             true,
             "steam://run or path",
-            "button.dank0i_pc_launch_game",
+            "button.dank0i_pc_launch",
             "",
             "steam:// URIs or shortcut path",
         ),
@@ -258,7 +266,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             false,
             true,
             "graceful window close",
-            "button.dank0i_pc_close_game",
+            "button.dank0i_pc_closegame",
             "",
             "PowerShell CloseMainWindow()",
         ),
@@ -272,7 +280,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             Running,
             "RTX 4090 · 54C · 31%",
             5,
-            "sensor.dank0i_pc_gpu",
+            "sensor.dank0i_pc_gpu_usage",
             "",
             "NVML / driver query",
         ),
@@ -285,7 +293,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             Running,
             "9800X3D · 42C · 8%",
             5,
-            "sensor.dank0i_pc_cpu",
+            "sensor.dank0i_pc_cpu_usage",
             "",
             "OS performance counters",
         ),
@@ -298,7 +306,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             Running,
             "18.2 / 32 GB",
             10,
-            "sensor.dank0i_pc_memory",
+            "sensor.dank0i_pc_memory_usage",
             "",
             "",
         ),
@@ -311,7 +319,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             Running,
             "C 41% · D 72%",
             30,
-            "sensor.dank0i_pc_disks",
+            "sensor.dank0i_pc_disk_usage",
             "",
             "",
         ),
@@ -324,7 +332,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             Error,
             "adapter not found",
             5,
-            "sensor.dank0i_pc_network",
+            "sensor.dank0i_pc_network_throughput",
             "",
             "NIC counters",
         ),
@@ -337,7 +345,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             Running,
             "3d 4h",
             60,
-            "sensor.dank0i_pc_uptime",
+            "sensor.dank0i_pc_system_uptime",
             "",
             "",
         ),
@@ -349,10 +357,10 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             false,
             Running,
             "gpu_temp 64 C",
-            5,
+            1,
             "sensor.dank0i_pc_hwinfo_*",
             "HWiNFO open with 'Shared Memory Support' enabled (Settings)",
-            "Publishes ~21 mapped sensors: cpu/gpu package+hotspot+memory temps, cpu/gpu/soc power, cpu/gpu core+memory clocks, cpu/gpu load, vram %, gpu+case fans, VRM temp, framerate. Reads HWiNFO's shared memory.",
+            "Publishes ~20 mapped sensors: cpu/gpu package+hotspot+memory temps, cpu/gpu/soc power, cpu/gpu core+memory clocks, cpu/gpu load, vram %, gpu+case fans, VRM temp, framerate. Reads HWiNFO's shared memory: checks for a new snapshot every 0.5s while HWiNFO is open (every 10s while it is not), and only publishes a sensor when it moves past its change threshold.",
         ),
         // Audio & Media (event-driven)
         s(
@@ -364,7 +372,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             Running,
             "Speakers",
             0,
-            "sensor.dank0i_pc_audio_device",
+            "sensor.dank0i_pc_default_audio_device",
             "",
             "Device-change notifications",
         ),
@@ -377,7 +385,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             Running,
             "40%",
             0,
-            "sensor.dank0i_pc_volume",
+            "sensor.dank0i_pc_volume_level",
             "",
             "Endpoint volume notifications",
         ),
@@ -403,7 +411,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             Running,
             "no",
             0,
-            "binary_sensor.dank0i_pc_mic",
+            "sensor.dank0i_pc_microphone_in_use",
             "",
             "Capture-device activity",
         ),
@@ -416,7 +424,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             Running,
             "no",
             0,
-            "binary_sensor.dank0i_pc_webcam",
+            "sensor.dank0i_pc_webcam_in_use",
             "",
             "Camera-device activity",
         ),
@@ -442,7 +450,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             Running,
             "active",
             5,
-            "binary_sensor.dank0i_pc_active",
+            "sensor.dank0i_pc_last_active",
             "",
             "Input idle time",
         ),
@@ -468,7 +476,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             Running,
             "unlocked",
             0,
-            "sensor.dank0i_pc_session",
+            "sensor.dank0i_pc_session_state",
             "",
             "Session notifications",
         ),
@@ -495,9 +503,34 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             Running,
             "on",
             0,
-            "binary_sensor.dank0i_pc_display",
+            "sensor.dank0i_pc_display",
             "",
             "Display power notifications",
+        ),
+        s(
+            "display_attached",
+            "Display Attached",
+            "Whether a PHYSICAL monitor is connected. Distinct from Display State, which is monitor POWER: a headless PC with no monitor still reports its display as on. Virtual displays (Parsec) are excluded. Windows only.",
+            Power,
+            false,
+            Running,
+            "detached",
+            0,
+            "sensor.dank0i_pc_display_attached",
+            "",
+            "Monitor attach/detach events",
+        ),
+        a(
+            "discord",
+            "Discord Controls",
+            "Adds Join and Leave buttons. Join opens a configured Discord voice channel; Leave sends Discord's disconnect hotkey (Ctrl+F6 by default). Set discord_keybind in userConfig.json to change it.",
+            Power,
+            false,
+            true,
+            "",
+            "button.dank0i_pc_discordjoin",
+            "",
+            "Discord deep link + keypress",
         ),
         a(
             "shutdown",
@@ -567,7 +600,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             false,
             true,
             "display power",
-            "button.dank0i_pc_monitor",
+            "button.dank0i_pc_monitoroff",
             "",
             "Monitor power message",
         ),
@@ -808,6 +841,9 @@ pub fn reconcile_with_disk(
     cfg.discord_keybind = fresh.discord_keybind;
     cfg.allow_raw_commands = fresh.allow_raw_commands;
     cfg.mqtt.client_id = fresh.mqtt.client_id;
+    // Not surfaced in the UI, and now user-relevant since the default changed to
+    // `window` - a hand-edit made while this window is open must survive the save.
+    cfg.detection_backend = fresh.detection_backend;
     // Re-add games discovered externally since this window loaded (keys we never
     // had). `or_insert` never overwrites a game the user is actively editing.
     for (key, gc) in fresh.games {

@@ -70,6 +70,13 @@ pub struct ProcessState {
     scr_count: u32,
     /// Last update time (for diagnostics)
     last_updated: Instant,
+    /// Whether a successful enumeration has EVER completed.
+    ///
+    /// An empty `names` is ambiguous: it means either "no processes matched" or
+    /// "we have never managed to look". Consumers that publish a sensor must not
+    /// collapse the second into a confident negative, which is the same honesty
+    /// rule the Linux twin follows via `try_resolve_processes`.
+    enumerated: bool,
 }
 
 impl ProcessState {
@@ -80,7 +87,13 @@ impl ProcessState {
             name_counts: std::collections::HashMap::new(),
             scr_count: 0,
             last_updated: Instant::now(),
+            enumerated: false,
         }
+    }
+
+    /// Mark that a full enumeration has completed, however many processes it saw.
+    fn mark_enumerated(&mut self) {
+        self.enumerated = true;
     }
 
     fn add_process(&mut self, name: String, pid: u32) {
@@ -130,6 +143,11 @@ impl ProcessState {
     }
 
     /// Get process names without cloning the set
+    /// True once any enumeration has succeeded. See [`ProcessState::enumerated`].
+    pub fn has_enumerated(&self) -> bool {
+        self.enumerated
+    }
+
     pub fn names(&self) -> &HashSet<Arc<str>> {
         &self.names
     }
@@ -211,7 +229,14 @@ impl ProcessWatcher {
     /// Reuses `snapshot_all_processes` to avoid code duplication.
     async fn initial_enumeration(state: &Arc<RwLock<ProcessState>>) {
         let processes = match tokio::task::spawn_blocking(Self::snapshot_all_processes).await {
-            Ok(s) => s,
+            Ok(Some(s)) => s,
+            // Do NOT mark_enumerated here: a failed enumeration must stay
+            // indistinguishable from "not yet enumerated", or the game sensor
+            // publishes "none" on the strength of a snapshot that never happened.
+            Ok(None) => {
+                error!("Initial process enumeration returned no snapshot");
+                return;
+            }
             Err(e) => {
                 error!("Initial process enumeration failed: {}", e);
                 return;
@@ -222,6 +247,7 @@ impl ProcessWatcher {
         for (pid, name) in processes {
             guard.add_process(name, pid);
         }
+        guard.mark_enumerated();
 
         info!(
             "Initial process enumeration: {} processes",
@@ -465,11 +491,14 @@ impl ProcessWatcher {
     /// Returns (pruned, added) counts for callers to decide whether to notify.
     async fn reconcile(state: &Arc<RwLock<ProcessState>>) -> (usize, usize) {
         let snapshot = match tokio::task::spawn_blocking(Self::snapshot_all_processes).await {
-            Ok(s) => s,
-            Err(_) => return (0, 0),
+            Ok(Some(s)) => s,
+            // Skip BOTH the mark and the prune. Pruning against a snapshot that
+            // failed would expire every tracked PID at once.
+            _ => return (0, 0),
         };
 
         let mut guard = state.write().await;
+        guard.mark_enumerated();
 
         // Remove PIDs no longer running
         let expired: Vec<u32> = guard
@@ -508,13 +537,23 @@ impl ProcessWatcher {
     }
 
     /// Take a full process snapshot using ToolHelp API
-    fn snapshot_all_processes() -> std::collections::HashMap<u32, String> {
+    /// `None` means the enumeration FAILED, which is not the same as "no
+    /// processes are running". `CreateToolhelp32Snapshot` fails transiently with
+    /// `ERROR_BAD_LENGTH` under memory pressure and is documented as
+    /// retry-worthy. Collapsing that into an empty map made callers mark the
+    /// table enumerated with zero entries, prune every tracked PID, and publish
+    /// a confident "no game running" while a game was running.
+    fn snapshot_all_processes() -> Option<std::collections::HashMap<u32, String>> {
         let mut pids = std::collections::HashMap::new();
 
         // SAFETY: CreateToolhelp32Snapshot and Process32 enumeration are
         // standard Win32 APIs for process listing. Handle is properly closed.
         unsafe {
-            if let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+            let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+                warn!("CreateToolhelp32Snapshot failed; treating as unobserved");
+                return None;
+            };
+            {
                 let mut entry = PROCESSENTRY32W {
                     dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
                     ..Default::default()
@@ -543,7 +582,7 @@ impl ProcessWatcher {
             }
         }
 
-        pids
+        Some(pids)
     }
 
     /// Polling fallback if WMI events aren't available.
@@ -601,9 +640,11 @@ impl ProcessWatcher {
     pub async fn is_process_running(name: &str) -> bool {
         let name = name.to_owned();
         tokio::task::spawn_blocking(move || {
+            // A failed snapshot answers "not running", same as before this
+            // returned Option. Callers use this as a gate (is Steam up?), where
+            // failing closed is the safe direction.
             Self::snapshot_all_processes()
-                .values()
-                .any(|n| n.eq_ignore_ascii_case(&name))
+                .is_some_and(|p| p.values().any(|n| n.eq_ignore_ascii_case(&name)))
         })
         .await
         .unwrap_or(false)
@@ -871,13 +912,31 @@ async fn run_window_backend(
     tick.tick().await; // consume the immediate first tick
 
     info!("Process watcher using window events");
+    // Set when the hook thread dies (window creation or hook registration
+    // failed, or it exited unexpectedly). Without this the channel simply
+    // closes and detection goes blind for the whole process lifetime behind a
+    // single error line - the WMI backend has always had a polling fallback,
+    // and since `window` is now the default this one needs the same safety net.
+    let mut hook_failed = false;
     loop {
         tokio::select! {
             biased;
             _ = shutdown_rx.recv() => break,
             maybe = hwnd_rx.recv() => {
-                let Some(hwnd) = maybe else { break };
-                window_admit_hwnd(hwnd, &state, &change_tx, &app, exit.as_ref()).await;
+                match maybe {
+                    // None means the hook thread exited (window creation or hook
+                    // registration failed), dropping its sender. NOTE: the `0`
+                    // sentinel goes on the separate oneshot used for the HWND
+                    // handoff, not this mpsc, and win_event_proc filters invalid
+                    // HWNDs - so `None` is the only signal available here.
+                    None => {
+                        hook_failed = true;
+                        break;
+                    }
+                    Some(hwnd) => {
+                        window_admit_hwnd(hwnd, &state, &change_tx, &app, exit.as_ref()).await;
+                    }
+                }
             }
             Some(pid) = exited_rx.recv() => {
                 // A watched game's window process exited - drop it.
@@ -901,7 +960,28 @@ async fn run_window_backend(
         e.shutdown();
     }
     if let Some(h) = hook_waiter {
-        let _ = h.await;
+        if hook_failed {
+            // The waiter parks on the GLOBAL shutdown channel, so awaiting it
+            // here would block until the agent exits and the polling fallback
+            // below would never start - leaving detection blind, which is the
+            // exact failure this fallback exists to prevent. Abort instead.
+            h.abort();
+        } else {
+            let _ = h.await;
+        }
+    }
+
+    // Degrade rather than go blind. Polling costs more than window events but
+    // it keeps game/screensaver/idle detection alive, and the supervisor cannot
+    // help here because this task is still "running".
+    if hook_failed {
+        let poll_interval =
+            Duration::from_secs(app.config.read().await.intervals.game_sensor.max(5));
+        warn!(
+            "Window-event backend unavailable; falling back to polling every {}s",
+            poll_interval.as_secs()
+        );
+        ProcessWatcher::run_polling_fallback(&state, shutdown_rx, poll_interval, change_tx).await;
     }
 }
 
@@ -975,15 +1055,18 @@ async fn window_headless_poll(
     if headless.is_empty() {
         return;
     }
-    let stem = |name: &str| -> String {
-        name.strip_suffix(".exe")
-            .or_else(|| name.strip_suffix(".EXE"))
-            .unwrap_or(name)
-            .to_lowercase()
+    // MUST match Config::headless_watch_names, which produces the list this is
+    // compared against by exact string equality. The old form only handled
+    // all-lower and all-UPPER extensions, so a process named "Game.Exe"
+    // normalized to "game.exe" here but to "game" there, and a headless game
+    // with that casing was never detected or never cleared.
+    let stem = |name: &str| -> String { crate::commands::strip_exe(name).to_lowercase() };
+    // A failed snapshot must not be read as "the headless game exited".
+    let Ok(Some(snapshot)) =
+        tokio::task::spawn_blocking(ProcessWatcher::snapshot_all_processes).await
+    else {
+        return;
     };
-    let snapshot = tokio::task::spawn_blocking(ProcessWatcher::snapshot_all_processes)
-        .await
-        .unwrap_or_default();
     let mut changed = false;
     let mut guard = state.write().await;
     // Add headless matches not tracked.
@@ -1296,7 +1379,28 @@ fn spawn_window_event_thread(
                 WINEVENT_OUTOFCONTEXT,
             );
             if hook_fg.is_invalid() || hook_show.is_invalid() {
-                error!("Failed to set window-event hooks");
+                // RETURN, do not fall through into GetMessageW. Staying alive
+                // holds the mpsc sender open, so the backend's `hwnd_rx.recv()`
+                // never yields None, `hook_failed` never sets, and the polling
+                // fallback never runs - leaving detection blind for the process
+                // lifetime behind this one error line. Hook registration is also
+                // the MORE likely failure (session/desktop isolation, UIPI) than
+                // CreateWindowExW, so this is the case the fallback most needs.
+                error!("Failed to set window-event hooks; falling back to polling");
+                if !hook_fg.is_invalid() {
+                    let _ = UnhookWinEvent(hook_fg);
+                }
+                if !hook_show.is_invalid() {
+                    let _ = UnhookWinEvent(hook_show);
+                }
+                let _ = DestroyWindow(hwnd);
+                // Drop the sender EXPLICITLY. What arms the polling fallback is
+                // `hwnd_rx.recv()` yielding None, which needs this closed; relying
+                // on the thread_local destructor at thread exit would silently stop
+                // working if WIN_TX ever became a static/OnceLock, and the failure
+                // mode is detection going blind - the thing the fallback exists for.
+                WIN_TX.with(|tx| *tx.borrow_mut() = None);
+                return;
             }
 
             let _ = hwnd_tx.send(hwnd.0 as isize);

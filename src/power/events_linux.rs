@@ -15,6 +15,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::AppState;
+
+/// Latch so a gdbus that exits on every spawn warns once, not every 2s.
+static GDBUS_EXIT_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 use crate::power::sync_mqtt::{SyncMqttConfig, parse_broker_url, sync_mqtt_publish_sleep};
 
 /// Power-related events from D-Bus monitor threads
@@ -39,6 +42,20 @@ impl PowerEventListener {
     /// before actually suspending, giving us a window to publish "sleeping"
     /// before the NIC drops. Dropping the fd releases the lock. `None` if logind
     /// isn't reachable (non-systemd system).
+    /// Republish everything a resume invalidates.
+    ///
+    /// The suspend published retained `availability=offline` from the SEPARATE
+    /// short-lived sync client. If the async connection survived the suspend
+    /// (short sleep, LAN broker still inside keepalive) there is no ConnAck on
+    /// resume, and ConnAck is the only other writer of `online`. Without this
+    /// the PC is awake and publishing while every entity on the device reads
+    /// Unavailable in HA, indefinitely. Same fix as the refused-suspend path in
+    /// the executor.
+    async fn publish_wake(state: &Arc<AppState>) {
+        state.mqtt.publish_sensor("sleep_state", "awake").await;
+        state.mqtt.publish_availability(true).await;
+    }
+
     fn take_sleep_inhibitor() -> Option<zbus::zvariant::OwnedFd> {
         let conn = zbus::blocking::Connection::system().ok()?;
         let reply = conn
@@ -172,16 +189,10 @@ impl PowerEventListener {
                                     user: config.mqtt.user.clone(),
                                     pass: config.mqtt.pass.clone(),
                                     client_id: format!("{}-sleep", config.client_id()),
-                                    sleep_topic: format!(
-                                        "homeassistant/sensor/{}/sleep_state/state",
-                                        config.device_name
-                                    ),
+                                    sleep_topic: crate::mqtt::sensor_state_topic_for(&config.device_name, "sleep_state"),
                                     // Same topic as the async client's LWT; built
                                     // inline because that helper is private to mqtt.
-                                    availability_topic: format!(
-                                        "homeassistant/sensor/{}/availability",
-                                        config.device_name
-                                    ),
+                                    availability_topic: crate::mqtt::availability_topic_for(&config.device_name),
                                 }
                             };
                             match tokio::task::spawn_blocking(move || sync_mqtt_publish_sleep(&cfg))
@@ -191,14 +202,14 @@ impl PowerEventListener {
                                 Ok(Err(e)) => warn!("Sync MQTT sleep pre-publish failed: {}", e),
                                 Err(e) => warn!("Sync publish task join error: {}", e),
                             }
-                            self.state.mqtt.publish_sensor_retained("sleep_state", "sleeping").await;
+                            self.state.mqtt.publish_sensor("sleep_state", "sleeping").await;
                             // Drop the fd to release the delay-inhibitor: logind now
                             // proceeds to suspend.
                             drop(sleep_inhibitor.take());
                         }
                         PowerEvent::Wake => {
                             info!("Power event: WAKE");
-                            self.state.mqtt.publish_sensor_retained("sleep_state", "awake").await;
+                            Self::publish_wake(&self.state).await;
                             // Re-arm the inhibitor for the next suspend, off the
                             // runtime (the D-Bus connect+call is blocking).
                             sleep_inhibitor = tokio::task::spawn_blocking(Self::take_sleep_inhibitor)
@@ -208,11 +219,11 @@ impl PowerEventListener {
                         }
                         PowerEvent::DisplayOff => {
                             info!("Power event: DISPLAY OFF");
-                            self.state.mqtt.publish_sensor_retained("display", "off").await;
+                            self.state.mqtt.publish_sensor("display", "off").await;
                         }
                         PowerEvent::DisplayOn => {
                             info!("Power event: DISPLAY ON");
-                            self.state.mqtt.publish_sensor_retained("display", "on").await;
+                            self.state.mqtt.publish_sensor("display", "on").await;
                         }
                     }
                 }
@@ -319,7 +330,15 @@ impl PowerEventListener {
             if stop.load(Ordering::Relaxed) {
                 return;
             }
-            warn!("gdbus monitor exited, restarting in 2s");
+            // Latched: if gdbus spawns but exits immediately (no system bus,
+            // no logind) this loop runs forever, and an unlatched warn is
+            // 43k lines a day. The spawn-FAILURE path above already falls back
+            // to polling and returns once; only this exit path repeats.
+            if GDBUS_EXIT_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                debug!("gdbus monitor exited, restarting in 2s");
+            } else {
+                warn!("gdbus monitor exited, restarting every 2s (further exits silent)");
+            }
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
     }

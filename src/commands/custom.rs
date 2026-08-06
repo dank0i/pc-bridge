@@ -79,12 +79,12 @@ async fn execute_powershell(cmd: &CustomCommand) -> anyhow::Result<()> {
                 encoded
             );
 
-            Command::new("powershell")
+            Command::new(crate::commands::system32("WindowsPowerShell\\v1.0\\powershell.exe"))
                 .args(["-NoProfile", "-Command", &ps_cmd])
                 .creation_flags(CREATE_NO_WINDOW)
                 .spawn()?;
         } else {
-            Command::new("powershell")
+            Command::new(crate::commands::system32("WindowsPowerShell\\v1.0\\powershell.exe"))
                 .args(["-NoProfile", "-Command", &script])
                 .creation_flags(CREATE_NO_WINDOW)
                 .spawn()?;
@@ -132,10 +132,12 @@ async fn execute_executable(cmd: &CustomCommand) -> anyhow::Result<()> {
                 escaped_path, args_str
             );
 
-            Command::new("powershell")
-                .args(["-NoProfile", "-Command", &ps_cmd])
-                .creation_flags(CREATE_NO_WINDOW)
-                .spawn()?;
+            Command::new(crate::commands::system32(
+                "WindowsPowerShell\\v1.0\\powershell.exe",
+            ))
+            .args(["-NoProfile", "-Command", &ps_cmd])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()?;
         } else {
             Command::new(&path)
                 .args(&args)
@@ -196,12 +198,14 @@ async fn execute_shell(cmd: &CustomCommand) -> anyhow::Result<()> {
                 escaped
             );
 
-            Command::new("powershell")
-                .args(["-NoProfile", "-Command", &ps_cmd])
-                .creation_flags(CREATE_NO_WINDOW)
-                .spawn()?;
+            Command::new(crate::commands::system32(
+                "WindowsPowerShell\\v1.0\\powershell.exe",
+            ))
+            .args(["-NoProfile", "-Command", &ps_cmd])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()?;
         } else {
-            Command::new("cmd")
+            Command::new(crate::commands::system32("cmd.exe"))
                 .args(["/c", &command])
                 .creation_flags(CREATE_NO_WINDOW)
                 .spawn()?;

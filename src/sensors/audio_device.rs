@@ -44,7 +44,18 @@ impl AudioDeviceSensor {
                     debug!("Audio device sensor shutting down");
                     break;
                 }
-                Ok(()) = reconnect_rx.recv() => {
+                r = reconnect_rx.recv() => {
+                    // Treat Lagged as a reconnect: the `Ok(())` pattern alone
+                    // silently skipped this arm when the 4-slot channel
+                    // overran, losing the republish on a flapping broker.
+                    // Closed means the sender is gone; `continue` would spin the
+                    // loop hot on an instantly-ready recv(). Exit instead.
+                    if !matches!(
+                        r,
+                        Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                    ) {
+                        break;
+                    }
                     #[cfg(windows)]
                     {
                         last_gen = None;
@@ -68,11 +79,11 @@ impl AudioDeviceSensor {
                         .await
                         .ok()
                         .flatten()
-                        .unwrap_or_else(|| "unknown".to_string());
+                        .unwrap_or_else(|| crate::mqtt::SENTINEL_UNKNOWN.to_string());
                     if name != prev {
                         self.state
                             .mqtt
-                            .publish_sensor_retained("audio_device", &name)
+                            .publish_sensor("audio_device", &name)
                             .await;
                         prev = name;
                     }

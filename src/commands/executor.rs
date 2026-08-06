@@ -87,6 +87,9 @@ impl CommandExecutor {
         }
     }
 
+    // Long dispatch/event-loop body: splitting it would scatter tightly-coupled
+    // state across helpers for no readability gain. Reviewed, allowed deliberately.
+    #[allow(clippy::cognitive_complexity)]
     async fn execute_command(
         name: &str,
         payload: &str,
@@ -168,26 +171,37 @@ impl CommandExecutor {
                 // publish in wnd_proc's PBT_APMSUSPEND handler is the hard
                 // guarantee, but this async publish often lands too and gives
                 // an extra safety margin.
-                state
-                    .mqtt
-                    .publish_sensor_retained("sleep_state", "sleeping")
-                    .await;
+                state.mqtt.publish_sensor("sleep_state", "sleeping").await;
                 tokio::task::yield_now().await;
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 // SetSuspendState blocks until the machine RESUMES, so run it off
                 // the single-threaded runtime or MQTT keepalives/timers freeze for
                 // the whole suspend (and a vetoed/slow suspend would wedge them).
-                let _ = tokio::task::spawn_blocking(sleep).await;
+                // A vetoed suspend returns false and never fires PBT_APMSUSPEND,
+                // so the retained "sleeping" above would stand forever. Undo it.
+                if !tokio::task::spawn_blocking(sleep).await.unwrap_or(false) {
+                    warn!(
+                        "Sleep was refused by the system (SetSuspendState returned false) - \
+                         republishing sleep_state=awake"
+                    );
+                    state.mqtt.publish_sensor("sleep_state", "awake").await;
+                }
                 return Ok(());
             }
             "Hibernate" => {
-                state
-                    .mqtt
-                    .publish_sensor_retained("sleep_state", "sleeping")
-                    .await;
+                state.mqtt.publish_sensor("sleep_state", "sleeping").await;
                 tokio::task::yield_now().await;
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                let _ = tokio::task::spawn_blocking(hibernate).await;
+                if !tokio::task::spawn_blocking(hibernate)
+                    .await
+                    .unwrap_or(false)
+                {
+                    warn!(
+                        "Hibernate was refused by the system (SetSuspendState returned false) - \
+                         republishing sleep_state=awake"
+                    );
+                    state.mqtt.publish_sensor("sleep_state", "awake").await;
+                }
                 return Ok(());
             }
             "Restart" => {
@@ -401,10 +415,12 @@ impl CommandExecutor {
         };
 
         // Execute via PowerShell
-        let mut child = Command::new("powershell")
-            .args(["-NoProfile", "-Command", &ps_cmd])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()?;
+        let mut child = Command::new(crate::commands::system32(
+            "WindowsPowerShell\\v1.0\\powershell.exe",
+        ))
+        .args(["-NoProfile", "-Command", &ps_cmd])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()?;
 
         // Capture PID before moving child into spawn_blocking so we can kill
         // the process tree on timeout (calling .kill() is impossible once the
@@ -433,7 +449,7 @@ impl CommandExecutor {
                     );
                     // Kill the entire process tree. The spawn_blocking task
                     // blocked on child.wait() will unblock once the process dies.
-                    let _ = Command::new("taskkill")
+                    let _ = Command::new(crate::commands::system32("taskkill.exe"))
                         .args(["/F", "/T", "/PID", &pid.to_string()])
                         .creation_flags(CREATE_NO_WINDOW)
                         .spawn();
@@ -464,10 +480,12 @@ async fn close_running_games(state: &Arc<AppState>) {
             continue;
         };
         info!("CloseGame: closing {}", proc);
-        let _ = Command::new("powershell")
-            .args(["-NoProfile", "-Command", &cmd])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
+        let _ = Command::new(crate::commands::system32(
+            "WindowsPowerShell\\v1.0\\powershell.exe",
+        ))
+        .args(["-NoProfile", "-Command", &cmd])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn();
     }
 }
 
@@ -497,14 +515,16 @@ async fn wait_for_steam() {
     // initialized client. `steam://open/main` works cold because the protocol
     // handler is registered at install time, independent of Steam running.
     info!("Steam not running, starting it before launch...");
-    if let Err(e) = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            r#"Start-Process "steam://open/main""#,
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
+    if let Err(e) = Command::new(crate::commands::system32(
+        "WindowsPowerShell\\v1.0\\powershell.exe",
+    ))
+    .args([
+        "-NoProfile",
+        "-Command",
+        r#"Start-Process "steam://open/main""#,
+    ])
+    .creation_flags(CREATE_NO_WINDOW)
+    .spawn()
     {
         warn!("Failed to start Steam proactively: {}", e);
     }
@@ -889,9 +909,16 @@ fn shutdown() {
                 };
                 let _ = AdjustTokenPrivileges(token, false, Some(&raw const tp), 0, None, None);
             }
+            // Leaks per press if ExitWindowsEx is vetoed and we stay alive.
+            let _ = windows::Win32::Foundation::CloseHandle(token);
         }
 
-        let _ = ExitWindowsEx(EWX_SHUTDOWN | EWX_POWEROFF, SHUTDOWN_REASON(0));
+        // Routinely fails when an app blocks shutdown. Silently discarding it
+        // meant the user pressed Shutdown in HA, nothing happened, and the log
+        // said only "Executing command: Shutdown".
+        if let Err(e) = ExitWindowsEx(EWX_SHUTDOWN | EWX_POWEROFF, SHUTDOWN_REASON(0)) {
+            warn!("Shutdown request was refused by Windows: {e:?}");
+        }
     }
 }
 
@@ -904,21 +931,27 @@ fn logoff() {
     }
 }
 
-/// Sleep (native, no PowerShell)
-fn sleep() {
+/// Sleep (native, no PowerShell).
+///
+/// Returns false when the suspend was REFUSED (a driver or app vetoed it).
+/// Callers must republish `sleep_state=awake` on false: the retained "sleeping"
+/// is published before this call, and on a veto `PBT_APMSUSPEND` never fires, so
+/// nothing else would ever correct it and HA would believe the PC is asleep
+/// indefinitely.
+fn sleep() -> bool {
     use windows::Win32::System::Power::SetSuspendState;
     unsafe {
         // SetSuspendState(hibernate=false, force=false, wakeupEventsDisabled=false)
-        let _ = SetSuspendState(false, false, false);
+        SetSuspendState(false, false, false).as_bool()
     }
 }
 
-/// Hibernate (native, no PowerShell)
-fn hibernate() {
+/// Hibernate (native, no PowerShell). See [`sleep`] for the false-return contract.
+fn hibernate() -> bool {
     use windows::Win32::System::Power::SetSuspendState;
     unsafe {
         // SetSuspendState(hibernate=true, force=false, wakeupEventsDisabled=false)
-        let _ = SetSuspendState(true, false, false);
+        SetSuspendState(true, false, false).as_bool()
     }
 }
 
@@ -955,10 +988,13 @@ fn restart() {
                 };
                 let _ = AdjustTokenPrivileges(token, false, Some(&raw const tp), 0, None, None);
             }
+            let _ = windows::Win32::Foundation::CloseHandle(token);
         }
 
         // Restart
-        let _ = ExitWindowsEx(EWX_REBOOT, SHUTDOWN_REASON(0));
+        if let Err(e) = ExitWindowsEx(EWX_REBOOT, SHUTDOWN_REASON(0)) {
+            warn!("Restart request was refused by Windows: {e:?}");
+        }
     }
 }
 

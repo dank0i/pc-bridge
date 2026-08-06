@@ -175,10 +175,14 @@ impl DetectMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DetectionBackend {
-    /// Polling WMI intrinsic-event watcher (default until window mode is validated).
-    #[default]
+    /// Polling WMI intrinsic-event watcher. Kept as an opt-in fallback: it makes
+    /// WmiPrvSE diff the whole process table on a timer, which is the agent's only
+    /// genuinely always-on cost.
     Wmi,
     /// Event-driven window-event watcher plus a targeted poll for headless games.
+    /// Default: SetWinEventHook + WaitForMultipleObjects both block at 0% CPU, so
+    /// steady-state cost is zero.
+    #[default]
     Window,
 }
 
@@ -340,6 +344,78 @@ pub(crate) fn slugify_game_id(name: &str) -> String {
 /// to `true` since power state tracking and basic power control are
 /// fundamental. These were a single coarse `power_events` flag until they were
 /// split into per-feature flags so each can be turned off independently.
+/// The single registry mapping a settings-window feature id to its
+/// [`FeatureConfig`] field.
+///
+/// This exists because the getter and setter used to be two hand-written 33-arm
+/// `match` blocks in the settings window. Adding a flag meant editing both, and
+/// missing one produced a toggle that reads correctly but never saves (or the
+/// reverse) - a bug with no compile error and no failing test. Generating both
+/// from one list makes that class of divergence impossible, and gives the rest
+/// of the codebase [`FEATURE_FLAG_IDS`] to check completeness against.
+macro_rules! feature_flag_registry {
+    ($(($id:literal, $field:ident)),* $(,)?) => {
+        /// Every feature id the settings window can toggle. Used by the
+        /// completeness tests that keep the settings catalog and this registry
+        /// in sync; the running agent addresses flags by field, not by id.
+        #[cfg(test)]
+        pub const FEATURE_FLAG_IDS: &[&str] = &[$($id),*];
+
+        /// Read a flag by settings-window id. `None` means the id is unknown.
+        #[must_use]
+        pub fn flag_get(f: &FeatureConfig, id: &str) -> Option<bool> {
+            match id {
+                $($id => Some(f.$field),)*
+                _ => None,
+            }
+        }
+
+        /// Write a flag by settings-window id. Returns false if the id is unknown.
+        pub fn flag_set(f: &mut FeatureConfig, id: &str, v: bool) -> bool {
+            match id {
+                $($id => { f.$field = v; true })*
+                _ => false,
+            }
+        }
+    };
+}
+
+feature_flag_registry! {
+    ("gpu", gpu_sensor),
+    ("network", network_sensor),
+    ("disks", disk_sensor),
+    ("uptime", uptime_sensor),
+    ("hwinfo", hwinfo_sensor),
+    ("cpu", cpu_sensor),
+    ("memory", memory_sensor),
+    ("active_window", active_window),
+    ("session", session_state),
+    ("audio_device", audio_device),
+    ("mic", mic),
+    ("webcam", webcam),
+    ("now_playing", now_playing),
+    ("idle", idle_tracking),
+    ("running_game", running_game),
+    ("game_catalog", game_catalog),
+    ("steam_library", steam_library),
+    ("launch_game", launch_game),
+    ("close_game", close_game),
+    ("volume", volume),
+    ("media_controls", media_controls),
+    ("steam_downloads", steam_updates),
+    ("notifications", notifications),
+    ("sleep_wake", sleep_wake),
+    ("display_state", display_state),
+    ("display_attached", display_attached),
+    ("discord", discord),
+    ("shutdown", cmd_shutdown),
+    ("restart", cmd_restart),
+    ("sleep", cmd_sleep),
+    ("lock", cmd_lock),
+    ("logoff", cmd_logoff),
+    ("monitor", cmd_monitor),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureConfig {
     #[serde(default)]
@@ -358,6 +434,10 @@ pub struct FeatureConfig {
     pub sleep_wake: bool,
     #[serde(default = "default_true")]
     pub display_state: bool,
+    /// Physical monitor attach/detach. Opt-in: distinct from `display_state`,
+    /// which is display POWER. Windows-only (CfgMgr32).
+    #[serde(default)]
+    pub display_attached: bool,
     #[serde(default = "default_true")]
     pub cmd_shutdown: bool,
     #[serde(default = "default_true")]
@@ -419,6 +499,7 @@ impl Default for FeatureConfig {
             idle_tracking: false,
             sleep_wake: true,
             display_state: true,
+            display_attached: false,
             cmd_shutdown: true,
             cmd_restart: true,
             cmd_sleep: true,
@@ -608,13 +689,13 @@ impl Config {
         &self,
         process_names: impl IntoIterator<Item = &'a str>,
     ) -> Vec<String> {
-        fn strip_exe(s: &str) -> &str {
-            if s.len() >= 4 && s.as_bytes()[s.len() - 4..].eq_ignore_ascii_case(b".exe") {
-                &s[..s.len() - 4]
-            } else {
-                s
-            }
-        }
+        // The SHARED helper, not a private copy. The close/kill authorization
+        // gate strips with `commands::strip_exe` and then calls this, so a
+        // second, subtly different implementation here means the gate authorizes
+        // against one name while the resolver targets another. The old copy used
+        // `>= 4`, which collapsed the input ".exe" to "" where the shared helper
+        // keeps it.
+        use crate::commands::strip_exe;
         let patterns: Vec<String> = self
             .games
             .keys()
@@ -640,14 +721,13 @@ impl Config {
     /// When empty, the poll loop stays idle. Screensavers are windowed, so they are
     /// NOT here - the window backend catches them.
     pub fn headless_watch_names(&self) -> Vec<String> {
+        // The SHARED helper. This used `>= 4`, which turns a bare ".exe" into
+        // an EMPTY watch name - and an empty name then matches nothing (or, in a
+        // substring comparison, everything). It also has to agree with the
+        // consumer in process_watcher::window_headless_poll, which compares the
+        // two normalized forms by exact equality.
         fn norm(s: &str) -> String {
-            let stem = if s.len() >= 4 && s.as_bytes()[s.len() - 4..].eq_ignore_ascii_case(b".exe")
-            {
-                &s[..s.len() - 4]
-            } else {
-                s
-            };
-            stem.to_lowercase()
+            crate::commands::strip_exe(s).to_lowercase()
         }
         let mut out: Vec<String> = self
             .games
@@ -699,6 +779,70 @@ impl Config {
         Ok(!config_path.exists())
     }
 
+    /// Warn about keys in userConfig.json that no longer (or never did) mean
+    /// anything. A typo like `"steam_libary": true` in `features` otherwise
+    /// deserializes to nothing at all and silently leaves the feature off, which
+    /// is indistinguishable from the flag simply not working.
+    ///
+    /// This warns rather than failing, on purpose: `deny_unknown_fields` would
+    /// make a config written by a NEWER pc-bridge unloadable by an older one, so
+    /// a downgrade (or a rolled-back auto-update) would brick the agent instead
+    /// of degrading gracefully.
+    ///
+    /// Only the top level and `features` are checked. Those two are where typos
+    /// are silent and costly, and neither has any conditionally-serialized field
+    /// beyond the pair allowed for below, so the round-trip key diff is exact.
+    fn warn_unknown_keys(content: &str, config: &Self) {
+        let (unknown_top, unknown_features) = Self::unknown_keys(content, config);
+        if !unknown_top.is_empty() {
+            warn!(
+                "userConfig.json has {} unrecognized top-level key(s), ignored: {}",
+                unknown_top.len(),
+                unknown_top.join(", ")
+            );
+        }
+        if !unknown_features.is_empty() {
+            warn!(
+                "userConfig.json \"features\" has {} unrecognized flag(s), ignored (the feature \
+                 stays OFF): {}",
+                unknown_features.len(),
+                unknown_features.join(", ")
+            );
+        }
+    }
+
+    /// Split out from [`Self::warn_unknown_keys`] so the diff itself is testable
+    /// without capturing log output. Returns (top-level, `features`).
+    fn unknown_keys(content: &str, config: &Self) -> (Vec<String>, Vec<String>) {
+        // Fields with `skip_serializing_if` vanish from the probe when empty, so
+        // they would look unknown. Both are real top-level keys.
+        const CONDITIONALLY_SERIALIZED: &[&str] = &["discord_keybind", "removed_games"];
+
+        let Ok(serde_json::Value::Object(input)) =
+            serde_json::from_str::<serde_json::Value>(content)
+        else {
+            return (Vec::new(), Vec::new());
+        };
+        let Ok(serde_json::Value::Object(known)) = serde_json::to_value(config) else {
+            return (Vec::new(), Vec::new());
+        };
+
+        let top = input
+            .keys()
+            .filter(|k| !known.contains_key(*k) && !CONDITIONALLY_SERIALIZED.contains(&k.as_str()))
+            .cloned()
+            .collect();
+
+        let features = match (input.get("features"), known.get("features")) {
+            (Some(serde_json::Value::Object(i)), Some(serde_json::Value::Object(k))) => {
+                i.keys().filter(|f| !k.contains_key(*f)).cloned().collect()
+            }
+            _ => Vec::new(),
+        };
+
+        (top, features)
+    }
+
     /// Load configuration from userConfig.json
     pub fn load() -> Result<Self> {
         Self::migrate_config_location()?;
@@ -721,6 +865,8 @@ impl Config {
 
         let mut config: Config =
             serde_json::from_str(&content).with_context(|| "Failed to parse userConfig.json")?;
+
+        Self::warn_unknown_keys(&content, &config);
 
         // Load MQTT password from credential file (or migrate from inline JSON)
         Self::load_credential(&mut config, &config_path)?;
@@ -1075,7 +1221,13 @@ impl Config {
         // Manual entries may key on the full filename ("cs2.exe") while Steam keys
         // on the stripped, lowercased exe ("cs2"); normalize existing keys the same
         // way so a manual entry and its Steam twin don't both land in the map.
-        let normalize = |k: &str| k.trim().trim_end_matches(".exe").to_ascii_lowercase();
+        // trim_end_matches is case-SENSITIVE and repeating, so ".EXE" was never
+        // stripped and "a.exe.exe" collapsed to "a" - exactly the dedup this is
+        // meant to perform. Lowercase FIRST, then strip once.
+        let normalize = |k: &str| {
+            let lower = k.trim().to_ascii_lowercase();
+            lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
+        };
         let existing: std::collections::HashSet<String> =
             self.games.keys().map(|k| normalize(k)).collect();
         // Titles the user explicitly removed: don't resurrect them while installed.
@@ -1646,6 +1798,9 @@ async fn reload_hot_config(state: &AppState) {
             // Reconcile the live subscription set so a feature/custom command just
             // enabled actually receives its button presses this session.
             state.mqtt.refresh_subscriptions(&snapshot).await;
+            // Keep the bridge_info feature attributes in step, or a flag just
+            // enabled still reads false in HA templates until a restart.
+            state.mqtt.refresh_bridge_info(&snapshot).await;
         }
 
         // Log security-relevant changes (using captured locals - no lock needed)
@@ -2597,5 +2752,164 @@ mod tests {
         let json = "{}";
         let config: serde_json::Value = parse_config_json(json).expect("Failed to parse");
         assert!(config["device_name"].is_null());
+    }
+    // ===== unknown-key detection =====
+
+    #[test]
+    fn test_unknown_keys_flags_typoed_feature() {
+        let config = Config::default();
+        let json = r#"{"features": {"steam_libary": true, "running_game": true}}"#;
+        let (top, features) = Config::unknown_keys(json, &config);
+        assert!(top.is_empty());
+        assert_eq!(features, vec!["steam_libary".to_string()]);
+    }
+
+    #[test]
+    fn test_unknown_keys_flags_typoed_top_level() {
+        let config = Config::default();
+        let json = r#"{"device_nmae": "pc", "mqtt": {}}"#;
+        let (top, features) = Config::unknown_keys(json, &config);
+        assert_eq!(top, vec!["device_nmae".to_string()]);
+        assert!(features.is_empty());
+    }
+
+    /// `discord_keybind` and `removed_games` are skipped when empty, so a
+    /// naive round-trip diff reports them as unknown. If a new
+    /// `skip_serializing_if` field is added to Config without extending the
+    /// allow-list, it will start producing a bogus warning; this test at least
+    /// pins the two that exist today.
+    #[test]
+    fn test_unknown_keys_allows_conditionally_serialized_fields() {
+        let config = Config::default();
+        let json = r#"{"discord_keybind": "ctrl+f6", "removed_games": []}"#;
+        let (top, _) = Config::unknown_keys(json, &config);
+        assert!(top.is_empty(), "false positive: {top:?}");
+    }
+
+    #[test]
+    fn test_unknown_keys_clean_config_is_silent() {
+        let config = Config::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let (top, features) = Config::unknown_keys(&json, &config);
+        assert!(top.is_empty(), "{top:?}");
+        assert!(features.is_empty(), "{features:?}");
+    }
+
+    #[test]
+    fn test_unknown_keys_ignores_unparseable_input() {
+        let config = Config::default();
+        let (top, features) = Config::unknown_keys("not json", &config);
+        assert!(top.is_empty());
+        assert!(features.is_empty());
+    }
+    // ===== feature flag registry =====
+
+    #[test]
+    fn test_flag_get_set_round_trip_every_id() {
+        // Guards the failure this registry exists to prevent: a flag readable
+        // but not writable (or the reverse) because only one of two hand-written
+        // match blocks was updated.
+        for id in FEATURE_FLAG_IDS {
+            let mut f = FeatureConfig::default();
+            assert!(flag_set(&mut f, id, true), "flag_set rejected {id}");
+            assert_eq!(flag_get(&f, id), Some(true), "{id} did not read back true");
+            assert!(flag_set(&mut f, id, false), "flag_set rejected {id}");
+            assert_eq!(
+                flag_get(&f, id),
+                Some(false),
+                "{id} did not read back false"
+            );
+        }
+    }
+
+    #[test]
+    fn test_flag_ids_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for id in FEATURE_FLAG_IDS {
+            assert!(seen.insert(*id), "duplicate feature id: {id}");
+        }
+    }
+
+    #[test]
+    fn test_flag_registry_covers_every_feature_field() {
+        // Every bool in FeatureConfig must be reachable from the settings window.
+        // Serializing gives the field list without hand-maintaining one, so a
+        // newly added flag fails here until it is registered.
+        let json = serde_json::to_value(FeatureConfig::default()).unwrap();
+        let fields: Vec<&String> = json.as_object().unwrap().keys().collect();
+
+        let mut unreachable = Vec::new();
+        for field in fields {
+            // Flip the field directly, then see if ANY registered id observes it.
+            let mut f = FeatureConfig::default();
+            let mut v = serde_json::to_value(&f).unwrap();
+            let before = v[field].as_bool().unwrap();
+            v[field] = serde_json::Value::Bool(!before);
+            f = serde_json::from_value(v).unwrap();
+
+            let observed = FEATURE_FLAG_IDS
+                .iter()
+                .any(|id| flag_get(&f, id) == Some(!before));
+            if !observed {
+                unreachable.push(field.clone());
+            }
+        }
+        assert!(
+            unreachable.is_empty(),
+            "FeatureConfig fields with no settings-window id: {unreachable:?}"
+        );
+    }
+
+    #[test]
+    fn test_flag_get_rejects_unknown_id() {
+        assert_eq!(flag_get(&FeatureConfig::default(), "nope"), None);
+        assert!(!flag_set(&mut FeatureConfig::default(), "nope", true));
+    }
+
+    #[test]
+    fn test_birth_features_payload_contains_every_flag() {
+        // The bridge_info birth attributes serialize FeatureConfig directly. A
+        // missing key there reads in HA as "attribute absent", not "false".
+        let json = serde_json::to_value(FeatureConfig::default()).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(
+            obj.len() >= FEATURE_FLAG_IDS.len(),
+            "birth payload would carry {} keys for {} toggles",
+            obj.len(),
+            FEATURE_FLAG_IDS.len()
+        );
+        assert!(obj.values().all(serde_json::Value::is_boolean));
+    }
+    #[test]
+    fn test_matching_game_processes_uses_the_shared_strip_exe() {
+        // Regression guard: this used a private strip_exe with `>= 4` while the
+        // close/kill gate used the shared `> 4`. The gate strips first and then
+        // calls this, so a disagreement means it authorizes one target name and
+        // resolves a different one.
+        let mut config = Config::default();
+        config.games.insert(
+            "foo".to_string(),
+            crate::config::GameConfig::Simple("foo".to_string()),
+        );
+
+        // Both forms resolve; the INPUT name is what comes back, since that is
+        // what the caller has to kill.
+        assert_eq!(config.matching_game_processes(["foo"]), vec!["foo"]);
+        assert_eq!(config.matching_game_processes(["foo.exe"]), vec!["foo.exe"]);
+        assert_eq!(config.matching_game_processes(["FOO.EXE"]), vec!["FOO.EXE"]);
+        // Not a substring match: `fo` must not select `foo`.
+        assert!(config.matching_game_processes(["fo"]).is_empty());
+    }
+
+    #[test]
+    fn test_strip_exe_agrees_across_the_gate_and_the_resolver() {
+        use crate::commands::strip_exe;
+        // The bare suffix is the case the two implementations disagreed on.
+        assert_eq!(strip_exe(".exe"), ".exe");
+        assert_eq!(strip_exe("a.exe"), "a");
+        assert_eq!(strip_exe("A.EXE"), "A");
+        // Strips ONCE, unlike trim_end_matches.
+        assert_eq!(strip_exe("a.exe.exe"), "a.exe");
+        assert_eq!(strip_exe("noext"), "noext");
     }
 }

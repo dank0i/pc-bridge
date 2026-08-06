@@ -385,9 +385,13 @@ pub fn set_volume(level: f32) -> bool {
 
 #[cfg(unix)]
 pub fn get_mute() -> Option<bool> {
+    // Command::output() succeeds whenever pactl RAN, whatever its exit code. With
+    // no PulseAudio/PipeWire server, stdout is empty and the old code returned
+    // Some(false) - a confident "not muted" on a box with no audio server at all.
     if let Ok(output) = std::process::Command::new("pactl")
         .args(["get-sink-mute", "@DEFAULT_SINK@"])
         .output()
+        && output.status.success()
     {
         let stdout = String::from_utf8_lossy(&output.stdout);
         return Some(stdout.contains("yes"));

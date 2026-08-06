@@ -10,8 +10,8 @@
 //!   per-task shutdown SENDER into run() and use it (loop + their OS threads) in
 //!   place of the global shutdown, so firing it stops them and their threads.
 //!
-//! The supervisor fires a task's sender on disable and on global shutdown. HWiNFO
-//! (Windows-only) stays startup-gated in main.rs.
+//! Every sensor task is supervised, including HWiNFO (Windows-only),
+//! which used to be startup-gated in main.rs.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -24,6 +24,8 @@ use tokio::task::JoinHandle;
 
 use crate::AppState;
 use crate::config::Config;
+#[cfg(any(windows, target_os = "linux"))]
+use crate::power::DisplayAttachedSensor;
 use crate::power::PowerEventListener;
 use crate::sensors::{
     ActiveWindowSensor, AudioDeviceSensor, CaptureSensor, CustomSensorManager, DiskSensor,
@@ -67,7 +69,14 @@ const TASKS: &[TaskDef] = &[
     },
     TaskDef {
         name: "disk",
-        enabled: |c| c.features.disk_sensor,
+        // The path list is part of the gate, not just the flag. With the flag on
+        // and no paths, run() returned immediately, the supervisor saw a finished
+        // handle, and respawned forever - climbing the restart counter that
+        // bridge_health reports on an otherwise healthy agent. `disk_sensor_paths`
+        // defaults to empty and nothing in the wizard or settings UI fills it, so
+        // this was reachable just by ticking "Disk Usage". Same shape as
+        // custom_sensors below.
+        enabled: |c| c.features.disk_sensor && !c.disk_sensor_paths.is_empty(),
         spawn: |s, c| tokio::spawn(cancelable(DiskSensor::new(s).run(), c.subscribe())),
     },
     TaskDef {
@@ -141,6 +150,29 @@ const TASKS: &[TaskDef] = &[
         name: "power",
         enabled: |c| c.features.sleep_wake || c.features.display_state,
         spawn: |s, c| tokio::spawn(PowerEventListener::new(s).run(c)),
+    },
+    // Holds a file mapping into HWiNFO's shared memory, so run() takes the
+    // sender. Supervised (it was startup-gated and unsupervised) so toggling
+    // hwinfo_sensor at runtime actually starts and stops the producer.
+    #[cfg(windows)]
+    TaskDef {
+        name: "hwinfo",
+        enabled: |c| c.features.hwinfo_sensor,
+        spawn: |s, c| tokio::spawn(crate::sensors::hwinfo::HwInfoSensor::new(s).run(c)),
+    },
+    // Windows holds a CfgMgr32 notification registration and Linux polls DRM
+    // connectors; both take the sender directly so they can tear down their own
+    // registration / republish on reconnect, rather than being wrapped in
+    // cancelable().
+    //
+    // Gated to match the discovery registration exactly. macOS has no producer,
+    // and a task publishing to an entity that was never registered would leave a
+    // retained orphan on the broker.
+    #[cfg(any(windows, target_os = "linux"))]
+    TaskDef {
+        name: "display_attached",
+        enabled: |c| c.features.display_attached,
+        spawn: |s, c| tokio::spawn(DisplayAttachedSensor::new(s).run(c)),
     },
 ];
 

@@ -92,11 +92,17 @@ fn http_agent_no_redirect() -> ureq::Agent {
 /// Release asset filename for the current platform. These are fixed by the CI
 /// release workflow, so the updater can construct download URLs directly
 /// instead of enumerating assets from the API.
-fn platform_asset_name() -> &'static str {
+fn platform_asset_name() -> Option<&'static str> {
+    // macOS deliberately returns None. CI publishes no macOS asset, and the old
+    // `else` arm handed the LINUX ELF to macOS: it passes the SHA-256 check
+    // (it matches the real Linux manifest), gets chmod +x, and is renamed over
+    // the running binary - which then cannot exec. That bricks the install.
     if cfg!(windows) {
-        "pc-bridge-windows.exe"
+        Some("pc-bridge-windows.exe")
+    } else if cfg!(target_os = "linux") {
+        Some("pc-bridge-linux")
     } else {
-        "pc-bridge-linux"
+        None
     }
 }
 
@@ -144,8 +150,8 @@ pub fn cleanup_old_files() {
     // Leftover download from a failed install. Use the same name the download
     // path writes (<asset_name>.update), not current_exe.with_extension, which
     // produced a different name ("pc-bridge.update") that never matched.
-    if let Some(exe_dir) = current_exe.parent() {
-        let update_path = exe_dir.join(format!("{}.update", platform_asset_name()));
+    if let (Some(exe_dir), Some(asset)) = (current_exe.parent(), platform_asset_name()) {
+        let update_path = exe_dir.join(format!("{asset}.update"));
         if update_path.exists() {
             match std::fs::remove_file(&update_path) {
                 Ok(()) => info!("Cleaned up leftover update file: {:?}", update_path),
@@ -161,6 +167,15 @@ pub async fn check_for_updates(update_channel: String) {
     if update_channel == "disabled" {
         info!("Update checking disabled by config");
         return;
+    }
+    // Anything unrecognised silently behaved as "stable", so a typo like "Beta"
+    // quietly put the user on a channel they did not choose. Say so.
+    if update_channel != "stable" && update_channel != "beta" {
+        warn!(
+            "Unknown update_channel {:?} - treating as \"stable\". Valid values: \
+             stable, beta, disabled",
+            update_channel
+        );
     }
 
     // Stable resolves the version via the CDN-served redirect (no API limit).
@@ -192,7 +207,13 @@ pub async fn check_for_updates(update_channel: String) {
         CURRENT_VERSION, remote_version
     );
 
-    let asset_name = platform_asset_name();
+    let Some(asset_name) = platform_asset_name() else {
+        info!(
+            "No release asset is published for this platform - skipping self-update. \
+             Update manually instead."
+        );
+        return;
+    };
     let base = download_base_for(&remote_version);
     let asset_url = format!("{}/{}", base, asset_name);
 
@@ -538,6 +559,22 @@ fn install_and_restart(update_path: &Path) {
 
     if let Err(e) = cmd.spawn() {
         warn!("Failed to start updated exe: {}", e);
+        // Roll back. Both renames already landed, so `.old` holds the only known
+        // good binary and without this the install is left unrunnable - the Unix
+        // path restores here and Windows did not.
+        // MUST match `old_path` above: with_extension("old") on
+        // "pc-bridge.exe" yields "pc-bridge.old", which never exists, so the
+        // whole rollback was dead code. The backup is "pc-bridge.exe.old", and
+        // the next start's cleanup_old_files() deletes it - taking the only
+        // known-good binary with it.
+        let backup = current_exe.with_extension("exe.old");
+        if backup.exists() {
+            let _ = std::fs::remove_file(&current_exe);
+            match std::fs::rename(&backup, &current_exe) {
+                Ok(()) => warn!("Rolled back to the previous version"),
+                Err(e2) => warn!("Rollback failed: {e2} - manual intervention needed"),
+            }
+        }
         return;
     }
 
@@ -562,14 +599,35 @@ fn install_and_restart(update_path: &Path) {
         }
     };
 
-    // Make update executable
+    // Make update executable. FATAL, not a warning: download_update creates the
+    // file with default 0644, so if this fails and we rename anyway we overwrite
+    // the running binary with a non-executable file and brick the install.
     if let Err(e) = std::fs::set_permissions(update_path, std::fs::Permissions::from_mode(0o755)) {
-        warn!("Failed to set permissions: {}", e);
+        warn!("Failed to make update executable, aborting install: {}", e);
+        let _ = std::fs::remove_file(update_path);
+        return;
     }
+
+    // Keep a restorable copy, matching the Windows path. Without it there is
+    // nothing to roll back to if the replacement turns out to be unusable.
+    let backup = current_exe.with_extension("old");
+    let _ = std::fs::remove_file(&backup);
+    // Track whether we actually have one: a stale .old from an EARLIER update
+    // would otherwise be treated as this update's rollback target and silently
+    // restore an arbitrary older version.
+    let have_backup = match std::fs::hard_link(&current_exe, &backup) {
+        Ok(()) => true,
+        Err(e) => {
+            // warn, not debug: this is the one case where rollback is impossible.
+            warn!("Could not create rollback copy ({e}); installing without one");
+            false
+        }
+    };
 
     // Replace in place - Unix allows this while running
     if let Err(e) = std::fs::rename(update_path, &current_exe) {
         warn!("Failed to replace binary: {}", e);
+        let _ = std::fs::remove_file(&backup);
         return;
     }
 
@@ -581,8 +639,13 @@ fn install_and_restart(update_path: &Path) {
         .spawn()
     {
         warn!("Failed to start updated binary: {}", e);
+        // Roll back so the install is not left unrunnable.
+        if have_backup && std::fs::rename(&backup, &current_exe).is_ok() {
+            warn!("Rolled back to the previous binary");
+        }
         return;
     }
+    let _ = std::fs::remove_file(&backup);
 
     std::process::exit(0);
 }

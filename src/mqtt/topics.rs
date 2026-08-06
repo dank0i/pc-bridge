@@ -20,6 +20,27 @@ pub(super) struct CachedTopics {
     pub(super) sensor_attrs: HashMap<&'static str, Arc<str>>,
 }
 
+/// Free topic builders for code OUTSIDE the mqtt module.
+///
+/// These exist because `DISCOVERY_PREFIX` used to be private, so four modules
+/// hand-rolled the `homeassistant/sensor/<dev>/...` shape and three of them
+/// carried an apologetic comment saying exactly that. Nothing verified the
+/// hand-rolled forms matched, and a silent divergence here breaks sleep-state
+/// reporting in a way that is very hard to notice.
+pub(crate) fn sensor_state_topic_for(device_name: &str, sensor: &str) -> String {
+    format!("{DISCOVERY_PREFIX}/sensor/{device_name}/{sensor}/state")
+}
+
+/// Attributes topic for a sensor, for code outside the mqtt module.
+pub(crate) fn sensor_attributes_topic_for(device_name: &str, sensor: &str) -> String {
+    format!("{DISCOVERY_PREFIX}/sensor/{device_name}/{sensor}/attributes")
+}
+
+/// Device availability (LWT) topic, for code outside the mqtt module.
+pub(crate) fn availability_topic_for(device_name: &str) -> String {
+    format!("{DISCOVERY_PREFIX}/sensor/{device_name}/availability")
+}
+
 impl CachedTopics {
     pub(super) fn new(device_name: &str) -> Self {
         let mut sensor_state = HashMap::new();
@@ -31,6 +52,7 @@ impl CachedTopics {
             "lastactive",
             "screensaver",
             "display",
+            "display_attached",
             "volume_level",
             "cpu_usage",
             "memory_usage",
@@ -46,7 +68,6 @@ impl CachedTopics {
             "disk_usage",
             "system_uptime",
             "bridge_info",
-            "hwinfo_diagnostic",
         ];
 
         for name in sensors {

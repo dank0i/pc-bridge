@@ -65,7 +65,7 @@ impl IdleSensor {
         debug!("Initial screensaver state: {}", screensaver_state);
         self.state
             .mqtt
-            .publish_sensor_retained("screensaver", screensaver_state)
+            .publish_sensor("screensaver", screensaver_state)
             .await;
         let mut prev_screensaver_state = screensaver_active;
 
@@ -88,7 +88,18 @@ impl IdleSensor {
                     }
                 }
                 // MQTT reconnected: force republish current state
-                Ok(()) = reconnect_rx.recv() => {
+                r = reconnect_rx.recv() => {
+                    // Treat Lagged as a reconnect: the `Ok(())` pattern alone
+                    // silently skipped this arm when the 4-slot channel
+                    // overran, losing the republish on a flapping broker.
+                    // Closed means the sender is gone; `continue` would spin the
+                    // loop hot on an instantly-ready recv(). Exit instead.
+                    if !matches!(
+                        r,
+                        Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                    ) {
+                        break;
+                    }
                     info!("Idle sensor: MQTT reconnected, republishing current state");
                     prev_last_active.clear();
                     prev_idle_secs = -1;
@@ -105,7 +116,7 @@ impl IdleSensor {
                     if screensaver_active != prev_screensaver_state {
                         let state_str = if screensaver_active { "on" } else { "off" };
                         debug!("Screensaver state changed: {}", state_str);
-                        self.state.mqtt.publish_sensor_retained("screensaver", state_str).await;
+                        self.state.mqtt.publish_sensor("screensaver", state_str).await;
                         prev_screensaver_state = screensaver_active;
                     }
                 }

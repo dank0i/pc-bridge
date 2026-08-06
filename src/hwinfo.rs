@@ -9,12 +9,14 @@
 //! versions. Every offset is bounds-checked against the mapped view; parse
 //! errors return `anyhow::Result` instead of panicking.
 //!
-//! The producer (HWiNFO) writes a new snapshot periodically; consumers poll
-//! the `pollTime` field at offset 16 to detect updates without doing a full
-//! parse on every tick.
+//! The producer (HWiNFO) writes a new snapshot periodically; consumers read
+//! the revision/poll words in the header to detect updates without walking the
+//! reading table on every tick, then use [`for_each_reading`] to visit the
+//! table in place. Nothing is copied out of the mapping except the handful of
+//! readings that actually match a rule.
 
-// On non-Windows targets the binary never instantiates `HwInfoClient` or
-// invokes `parse_snapshot`, but the tests still exercise the pure parser. The
+// On non-Windows targets the binary never instantiates `HwInfoClient`, but the
+// tests still exercise the pure parsing helpers. The
 // module-level allow keeps clippy quiet on those targets without hiding real
 // dead code on Windows (where everything is wired up via `sensors::hwinfo`).
 #![cfg_attr(not(windows), allow(dead_code))]
@@ -86,6 +88,12 @@ const RE_VALUE_AVG: usize = 308;
 /// A single parsed reading from HWiNFO.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reading {
+    /// Plain `String`. This was `Arc<str>` when the parser materialized all ~363
+    /// readings and the same ~18 sensor names were duplicated across them. The
+    /// borrowing parser only ever builds the ~20 MATCHED readings and nothing
+    /// clones a `Reading`, so there is no sharing left to exploit: `Arc<str>`
+    /// would cost the same allocation plus a refcount header and an atomic
+    /// decrement on drop.
     pub sensor_name: String,
     pub label: String,
     pub unit: String,
@@ -96,33 +104,15 @@ pub struct Reading {
     pub reading_type: u32,
 }
 
-/// A full snapshot of HWiNFO's current shared-memory state.
-#[derive(Debug, Clone)]
-pub struct Snapshot {
-    /// HWiNFO's `pollTime` (FILETIME) at the moment this snapshot was parsed.
-    /// Currently informational - the sensor task uses
-    /// `HwInfoClient::read_poll_time` for cheap pre-parse change detection.
-    #[allow(dead_code)]
-    pub poll_time: i64,
-    pub readings: Vec<Reading>,
-}
-
 /// Parsed header values.
 #[derive(Debug, Clone, Copy)]
 struct Header {
-    poll_time: i64,
     sensor_section: usize,
     sensor_elem_size: usize,
     num_sensors: usize,
     reading_section: usize,
     reading_elem_size: usize,
     num_readings: usize,
-}
-
-/// Trim a fixed-size NUL-padded UTF-8 field into an owned `String`.
-fn trim_cstr(bytes: &[u8]) -> String {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
 fn read_u32(view: &[u8], offset: usize) -> Result<u32> {
@@ -189,7 +179,6 @@ fn parse_header(view: &[u8]) -> Result<Header> {
         return Err(anyhow!("hwinfo: unsupported header version {}", version));
     }
 
-    let poll_time = read_i64(view, OFF_POLLTIME)?;
     let sensor_section = read_u32(view, OFF_SENSOR_SECTION)? as usize;
     let sensor_elem_size = read_u32(view, OFF_SENSOR_ELEM_SIZE)? as usize;
     let num_sensors = read_u32(view, OFF_NUM_SENSORS)? as usize;
@@ -211,7 +200,6 @@ fn parse_header(view: &[u8]) -> Result<Header> {
     }
 
     Ok(Header {
-        poll_time,
         sensor_section,
         sensor_elem_size,
         num_sensors,
@@ -221,96 +209,127 @@ fn parse_header(view: &[u8]) -> Result<Header> {
     })
 }
 
-/// Parse all sensor names into a vector indexed by sensor element index.
-fn parse_sensor_names(view: &[u8], header: &Header) -> Result<Vec<String>> {
-    let total = header
+/// A reading BORROWED from the mapped view, for the match scan.
+///
+/// Tier-3 of the parser work: only ~20 of HWiNFO's ~363 readings are ever
+/// consumed, but `parse_readings` allocated 3 Strings for every one of them on
+/// every poll (roughly 600-800 allocations/sec sustained). `Cow` borrows straight
+/// out of the mapped bytes when they are valid UTF-8, which is the overwhelmingly
+/// common case, and only allocates for the rare invalid byte (HWiNFO's szUnit is
+/// ANSI CP-1252, so a degree sign is one such byte).
+///
+/// Only valid while the mapped view slice it borrows from is alive. Call
+/// [`ReadingRef::to_owned_reading`] for the handful you actually keep.
+pub struct ReadingRef<'a> {
+    pub sensor_name: &'a str,
+    pub label: std::borrow::Cow<'a, str>,
+    pub unit: std::borrow::Cow<'a, str>,
+    pub value: f64,
+    pub min: f64,
+    pub max: f64,
+    pub avg: f64,
+    pub reading_type: u32,
+}
+
+impl ReadingRef<'_> {
+    /// Materialize an owned `Reading`. Call this ONLY for matched readings.
+    pub fn to_owned_reading(&self) -> Reading {
+        Reading {
+            sensor_name: self.sensor_name.to_string(),
+            label: self.label.clone().into_owned(),
+            unit: self.unit.clone().into_owned(),
+            value: self.value,
+            min: self.min,
+            max: self.max,
+            avg: self.avg,
+            reading_type: self.reading_type,
+        }
+    }
+}
+
+/// Trim a fixed-size NUL-padded field, borrowing when the bytes are valid UTF-8.
+///
+/// The borrow points into memory HWiNFO writes CONCURRENTLY, and UTF-8 validity
+/// is checked once here then assumed for the borrow's lifetime. The old copying
+/// parser closed that window in nanoseconds; borrowing widens it to the length of
+/// one scan. `contains_icase` is byte-based and unaffected, but
+/// `ascii_tail_ends_with` decodes with `.chars()`. A torn write could in
+/// principle yield a `&str` whose bytes are no longer valid UTF-8. Not observed,
+/// and the cross-process race predates this design, but it is the one place
+/// throughput was traded against safety margin.
+fn trim_cstr_ref(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end])
+}
+
+/// Visit every reading in the view without building a `Vec`.
+///
+/// The callback sees a borrowed `ReadingRef`; nothing is allocated per reading
+/// unless the callback chooses to keep one. Sensor names are still materialized
+/// once (there are only ~18 of them, versus ~363 readings).
+pub fn for_each_reading<F>(view: &[u8], mut f: F) -> Result<()>
+where
+    F: FnMut(&ReadingRef<'_>),
+{
+    let header = parse_header(view)?;
+
+    // Bounds check BEFORE any allocation. parse_header does not bound
+    // num_sensors, so a header with a garbage dwNumSensorElements would have
+    // with_capacity reserve up to 4.29e9 * 24 B = ~103 GB. On Windows (no
+    // overcommit, and the only shipping target) that is handle_alloc_error, i.e.
+    // an ABORT that spawn_blocking's JoinError handler cannot catch. It only
+    // looks harmless on macOS because overcommit grants the reservation.
+    let sensors_total = header
         .sensor_elem_size
         .checked_mul(header.num_sensors)
         .and_then(|s| s.checked_add(header.sensor_section))
         .ok_or_else(|| anyhow!("hwinfo: sensor section size overflow"))?;
-    if total > view.len() {
-        return Err(anyhow!(
-            "hwinfo: sensor section out of bounds ({} > {})",
-            total,
-            view.len()
-        ));
+    if sensors_total > view.len() {
+        return Err(anyhow!("hwinfo: sensor section out of bounds"));
     }
-
-    let mut names = Vec::with_capacity(header.num_sensors);
+    // ~18 entries, so the one-time cost here is irrelevant next to the readings.
+    let mut names: Vec<std::borrow::Cow<'_, str>> = Vec::with_capacity(header.num_sensors);
     for i in 0..header.num_sensors {
         let base = header.sensor_section + i * header.sensor_elem_size;
-        // Prefer the user-renamed name (HWiNFO lets users rename sensors in
-        // its UI); fall back to the original when the user field is empty.
-        // dwSensorID at offset 0 is intentionally not read - we key on
-        // positional index, so skipping it avoids ~10 redundant reads per
-        // snapshot.
-        let orig = trim_cstr(read_field(view, base + SE_NAME_ORIG, SE_NAME_LEN)?);
-        let user = trim_cstr(read_field(view, base + SE_NAME_USER, SE_NAME_LEN)?);
-        let name = if user.is_empty() { orig } else { user };
-        names.push(name);
+        let user = trim_cstr_ref(read_field(view, base + SE_NAME_USER, SE_NAME_LEN)?);
+        names.push(if user.is_empty() {
+            trim_cstr_ref(read_field(view, base + SE_NAME_ORIG, SE_NAME_LEN)?)
+        } else {
+            user
+        });
     }
-    Ok(names)
-}
 
-/// Parse all readings and join them with their owning sensor's name.
-fn parse_readings(view: &[u8], header: &Header, sensor_names: &[String]) -> Result<Vec<Reading>> {
-    let total = header
+    let readings_total = header
         .reading_elem_size
         .checked_mul(header.num_readings)
         .and_then(|s| s.checked_add(header.reading_section))
         .ok_or_else(|| anyhow!("hwinfo: reading section size overflow"))?;
-    if total > view.len() {
-        return Err(anyhow!(
-            "hwinfo: reading section out of bounds ({} > {})",
-            total,
-            view.len()
-        ));
+    if readings_total > view.len() {
+        return Err(anyhow!("hwinfo: reading section out of bounds"));
     }
 
-    let mut out = Vec::with_capacity(header.num_readings);
     for i in 0..header.num_readings {
         let base = header.reading_section + i * header.reading_elem_size;
-
-        let reading_type = read_u32(view, base + RE_TYPE)?;
         let sensor_index = read_u32(view, base + RE_SENSOR_INDEX)? as usize;
-        let label_orig = trim_cstr(read_field(view, base + RE_LABEL_ORIG, RE_LABEL_LEN)?);
-        let label_user = trim_cstr(read_field(view, base + RE_LABEL_USER, RE_LABEL_LEN)?);
-        let label = if !label_user.is_empty() {
-            label_user
+        let label_user = trim_cstr_ref(read_field(view, base + RE_LABEL_USER, RE_LABEL_LEN)?);
+        let label = if label_user.is_empty() {
+            trim_cstr_ref(read_field(view, base + RE_LABEL_ORIG, RE_LABEL_LEN)?)
         } else {
-            label_orig
+            label_user
         };
-        let unit = trim_cstr(read_field(view, base + RE_UNIT, RE_UNIT_LEN)?);
-        let value = read_f64(view, base + RE_VALUE)?;
-        let min = read_f64(view, base + RE_VALUE_MIN)?;
-        let max = read_f64(view, base + RE_VALUE_MAX)?;
-        let avg = read_f64(view, base + RE_VALUE_AVG)?;
-
-        let sensor_name = sensor_names.get(sensor_index).cloned().unwrap_or_default();
-
-        out.push(Reading {
-            sensor_name,
+        let r = ReadingRef {
+            sensor_name: names.get(sensor_index).map_or("", |c| c.as_ref()),
             label,
-            unit,
-            value,
-            min,
-            max,
-            avg,
-            reading_type,
-        });
+            unit: trim_cstr_ref(read_field(view, base + RE_UNIT, RE_UNIT_LEN)?),
+            value: read_f64(view, base + RE_VALUE)?,
+            min: read_f64(view, base + RE_VALUE_MIN)?,
+            max: read_f64(view, base + RE_VALUE_MAX)?,
+            avg: read_f64(view, base + RE_VALUE_AVG)?,
+            reading_type: read_u32(view, base + RE_TYPE)?,
+        };
+        f(&r);
     }
-    Ok(out)
-}
-
-/// Parse a complete `Snapshot` from a mapped view.
-pub fn parse_snapshot(view: &[u8]) -> Result<Snapshot> {
-    let header = parse_header(view)?;
-    let sensor_names = parse_sensor_names(view, &header)?;
-    let readings = parse_readings(view, &header, &sensor_names)?;
-    Ok(Snapshot {
-        poll_time: header.poll_time,
-        readings,
-    })
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -319,9 +338,8 @@ pub fn parse_snapshot(view: &[u8]) -> Result<Snapshot> {
 
 #[cfg(windows)]
 mod win {
-    use super::{HEADER_SIZE, MAX_VIEW_SIZE, OFF_POLLTIME, parse_snapshot, read_i64, read_u32};
+    use super::{HEADER_SIZE, MAX_VIEW_SIZE, OFF_POLLTIME, read_i64, read_u32};
     use super::{OFF_NUM_READINGS, OFF_READING_ELEM_SIZE, OFF_READING_SECTION};
-    use anyhow::{Context, Result};
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::Memory::{
         FILE_MAP_READ, MEMORY_BASIC_INFORMATION, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
@@ -446,12 +464,6 @@ mod win {
             unsafe { std::slice::from_raw_parts(self.view.Value.cast::<u8>(), size) }
         }
 
-        /// Current view size in bytes (re-probed from the live header). Used
-        /// by the diagnostic publisher.
-        pub fn view_size_bytes(&self) -> usize {
-            self.current_size()
-        }
-
         /// Read just the 8-byte `pollTime` field. Cheap lazy-poll primitive.
         /// Returns `None` if the view is somehow too small (should never
         /// happen - `as_slice()` always returns at least `HEADER_SIZE` bytes).
@@ -463,9 +475,13 @@ mod win {
             read_i64(slice, OFF_POLLTIME).ok()
         }
 
-        /// Parse a full snapshot from the current view.
-        pub fn snapshot(&self) -> Result<super::Snapshot> {
-            parse_snapshot(self.as_slice()).with_context(|| "hwinfo: parse_snapshot failed")
+        /// Run `f` against the mapped view.
+        ///
+        /// Exists so the rule-matching aggregation can be driven from a plain
+        /// `&[u8]` in tests rather than requiring a live HWiNFO mapping, which
+        /// would make it structurally untestable.
+        pub fn with_view<T>(&self, f: impl FnOnce(&[u8]) -> T) -> T {
+            f(self.as_slice())
         }
     }
 
@@ -509,7 +525,10 @@ impl HwInfoClient {
     pub fn view_size_bytes(&self) -> usize {
         0
     }
-    pub fn snapshot(&self) -> Result<Snapshot> {
+    pub fn for_each_reading<F>(&self, _f: F) -> Result<()>
+    where
+        F: FnMut(&ReadingRef<'_>),
+    {
         Err(anyhow!("hwinfo: shared memory is Windows-only"))
     }
 }
@@ -524,10 +543,14 @@ mod tests {
 
     /// One reading row in the test buffer.
     /// Tuple shape: (sensor_id, sensor_index, label, unit, value, min, max, avg)
-    type TestReading<'a> = (u32, usize, &'a str, &'a str, f64, f64, f64, f64);
+    pub(super) type TestReading<'a> = (u32, usize, &'a str, &'a str, f64, f64, f64, f64);
 
     /// Build a minimal HWiNFO-format byte buffer for testing.
-    fn build_test_buffer(version: u32, sensors: &[&str], readings: &[TestReading]) -> Vec<u8> {
+    pub(super) fn build_test_buffer(
+        version: u32,
+        sensors: &[&str],
+        readings: &[TestReading],
+    ) -> Vec<u8> {
         // Packed layout: sensor element is dwSensorID(4) + dwSensorInst(4) +
         // szSensorNameOrig[128] + szSensorNameUser[128] = 264 bytes (no padding).
         // Reading element is RE_VALUE_AVG(308) + 8 = 316 bytes (packed; Value
@@ -558,13 +581,20 @@ mod tests {
         buf[OFF_NUM_READINGS..OFF_NUM_READINGS + 4]
             .copy_from_slice(&(readings.len() as u32).to_le_bytes());
 
-        // Sensor elements
+        // Sensor elements. A name prefixed "user:" is written to the USER field
+        // instead of ORIG, so the user-vs-orig precedence branch is reachable
+        // from tests: it had NEVER executed, because this fixture only ever wrote
+        // the ORIG fields.
         for (i, name) in sensors.iter().enumerate() {
             let base = sensor_section + i * sensor_elem_size;
             buf[base + SE_ID..base + SE_ID + 4].copy_from_slice(&(i as u32).to_le_bytes());
-            let bytes = name.as_bytes();
+            let (field, text) = match name.strip_prefix("user:") {
+                Some(rest) => (SE_NAME_USER, rest),
+                None => (SE_NAME_ORIG, *name),
+            };
+            let bytes = text.as_bytes();
             let len = bytes.len().min(SE_NAME_LEN - 1);
-            buf[base + SE_NAME_ORIG..base + SE_NAME_ORIG + len].copy_from_slice(&bytes[..len]);
+            buf[base + field..base + field + len].copy_from_slice(&bytes[..len]);
         }
 
         // Reading elements
@@ -574,9 +604,14 @@ mod tests {
             buf[base + RE_SENSOR_INDEX..base + RE_SENSOR_INDEX + 4]
                 .copy_from_slice(&(sidx as u32).to_le_bytes());
 
-            let lbytes = label.as_bytes();
+            // Same "user:" convention for reading labels.
+            let (lfield, ltext) = match label.strip_prefix("user:") {
+                Some(rest) => (RE_LABEL_USER, rest),
+                None => (RE_LABEL_ORIG, label),
+            };
+            let lbytes = ltext.as_bytes();
             let llen = lbytes.len().min(RE_LABEL_LEN - 1);
-            buf[base + RE_LABEL_ORIG..base + RE_LABEL_ORIG + llen].copy_from_slice(&lbytes[..llen]);
+            buf[base + lfield..base + lfield + llen].copy_from_slice(&lbytes[..llen]);
 
             let ubytes = unit.as_bytes();
             let ulen = ubytes.len().min(RE_UNIT_LEN - 1);
@@ -595,7 +630,6 @@ mod tests {
     fn test_parse_header_extracts_fields() {
         let buf = build_test_buffer(2, &["CPU [#0]: AMD 9800X3D"], &[]);
         let header = parse_header(&buf).expect("header");
-        assert_eq!(header.poll_time, 123_456_789);
         assert_eq!(header.num_sensors, 1);
         assert_eq!(header.num_readings, 0);
         assert_eq!(header.sensor_elem_size, 264);
@@ -616,85 +650,133 @@ mod tests {
         assert!(err.to_string().contains("view too small"));
     }
 
+    /// (sensor, label, unit, value, min, max, avg, reading_type)
+    type Seen = (String, String, String, f64, f64, f64, f64, u32);
+
     #[test]
     fn test_parse_sensor_and_reading_join() {
+        // Two sensors, and readings that reference them OUT of order, so a
+        // `names.first()` style bug cannot pass.
         let buf = build_test_buffer(
             2,
             &["CPU [#0]: AMD 9800X3D", "GPU [#0]: NVIDIA GeForce RTX 4090"],
             &[
-                (1, 0, "CPU (Tctl/Tdie)", "°C", 65.5, 30.0, 90.0, 50.0),
-                (5, 0, "CPU Package Power", "W", 95.0, 10.0, 142.0, 80.0),
-                (1, 1, "GPU Temperature", "°C", 55.0, 30.0, 80.0, 60.0),
                 (
-                    6,
+                    1,
                     1,
                     "GPU Memory Clock",
                     "MHz",
                     10501.0,
-                    0.0,
+                    405.0,
                     10501.0,
-                    9000.0,
+                    9800.0,
                 ),
+                (2, 0, "CPU (Tctl/Tdie)", "\u{00B0}C", 61.0, 30.0, 90.0, 55.0),
             ],
         );
+        let mut seen: Vec<Seen> = Vec::new();
+        for_each_reading(&buf, |r| {
+            seen.push((
+                r.sensor_name.to_string(),
+                r.label.to_string(),
+                r.unit.to_string(),
+                r.value,
+                r.min,
+                r.max,
+                r.avg,
+                r.reading_type,
+            ));
+        })
+        .expect("for_each_reading");
 
-        let snap = parse_snapshot(&buf).expect("snapshot");
-        assert_eq!(snap.poll_time, 123_456_789);
-        assert_eq!(snap.readings.len(), 4);
+        assert_eq!(seen.len(), 2, "every reading must be visited");
 
-        let cpu_temp = &snap.readings[0];
-        assert_eq!(cpu_temp.sensor_name, "CPU [#0]: AMD 9800X3D");
-        assert_eq!(cpu_temp.label, "CPU (Tctl/Tdie)");
-        assert_eq!(cpu_temp.unit, "°C");
-        assert!((cpu_temp.value - 65.5).abs() < f64::EPSILON);
-        assert!((cpu_temp.max - 90.0).abs() < f64::EPSILON);
-        assert_eq!(cpu_temp.reading_type, 1);
+        // Index correspondence: reading 0 belongs to sensor 1, reading 1 to sensor 0.
+        assert_eq!(seen[0].0, "GPU [#0]: NVIDIA GeForce RTX 4090");
+        assert_eq!(seen[1].0, "CPU [#0]: AMD 9800X3D");
+        assert_eq!(seen[0].1, "GPU Memory Clock");
+        assert_eq!(seen[1].1, "CPU (Tctl/Tdie)");
+        // Unit round-trips including the non-ASCII degree sign.
+        assert_eq!(seen[0].2, "MHz");
+        assert_eq!(seen[1].2, "\u{00B0}C");
+        // Numeric fields and reading_type are not transposed.
+        assert!((seen[1].3 - 61.0).abs() < f64::EPSILON, "value");
+        assert!((seen[1].4 - 30.0).abs() < f64::EPSILON, "min");
+        assert!((seen[1].5 - 90.0).abs() < f64::EPSILON, "max");
+        assert!((seen[1].6 - 55.0).abs() < f64::EPSILON, "avg");
+        assert_eq!(seen[1].7, 2, "reading_type");
+    }
 
-        let gpu_mem_clock = &snap.readings[3];
-        assert_eq!(
-            gpu_mem_clock.sensor_name,
-            "GPU [#0]: NVIDIA GeForce RTX 4090"
+    /// The user-vs-orig precedence branch, which this fixture could not reach
+    /// until it learned to write the USER fields.
+    #[test]
+    fn test_user_fields_take_precedence_over_orig() {
+        let buf = build_test_buffer(
+            2,
+            &["user:Renamed CPU"],
+            &[(1, 0, "user:Renamed Label", "W", 1.0, 0.0, 2.0, 1.0)],
         );
-        assert_eq!(gpu_mem_clock.label, "GPU Memory Clock");
-        assert_eq!(gpu_mem_clock.unit, "MHz");
+        let mut seen = Vec::new();
+        for_each_reading(&buf, |r| {
+            seen.push((r.sensor_name.to_string(), r.label.to_string()));
+        })
+        .expect("for_each_reading");
+        assert_eq!(
+            seen,
+            vec![("Renamed CPU".to_string(), "Renamed Label".to_string())]
+        );
+    }
+
+    /// A garbage sensor count must be REJECTED before anything is allocated.
+    /// Reserving for it would be ~103 GB, which aborts the process on Windows.
+    #[test]
+    fn test_rejects_absurd_sensor_count_without_allocating() {
+        let mut buf = build_test_buffer(2, &["CPU"], &[]);
+        buf[OFF_NUM_SENSORS..OFF_NUM_SENSORS + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let err = for_each_reading(&buf, |_| {}).expect_err("should reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("out of bounds") || msg.contains("overflow"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
     fn test_trim_cstr_truncates_at_nul() {
         let mut field = vec![0u8; 32];
         field[..5].copy_from_slice(b"Hello");
-        assert_eq!(trim_cstr(&field), "Hello");
+        assert_eq!(trim_cstr_ref(&field), "Hello");
     }
 
     #[test]
     fn test_trim_cstr_handles_no_nul() {
         let field = b"abcdef".to_vec();
-        assert_eq!(trim_cstr(&field), "abcdef");
+        assert_eq!(trim_cstr_ref(&field), "abcdef");
     }
 
     #[test]
     fn test_trim_cstr_handles_empty() {
         let field = vec![0u8; 16];
-        assert_eq!(trim_cstr(&field), "");
+        assert_eq!(trim_cstr_ref(&field), "");
     }
 
     #[test]
-    fn test_parse_snapshot_rejects_reading_section_out_of_bounds() {
+    fn test_for_each_reading_rejects_reading_section_out_of_bounds() {
         // Build a valid buffer then corrupt num_readings to claim more readings
         // than the buffer holds. Parser should return Err, not panic.
         let mut buf =
             build_test_buffer(2, &["CPU"], &[(1, 0, "Tctl", "°C", 50.0, 0.0, 100.0, 50.0)]);
         buf[OFF_NUM_READINGS..OFF_NUM_READINGS + 4].copy_from_slice(&9999u32.to_le_bytes());
-        let err = parse_snapshot(&buf).expect_err("should reject");
+        let err = for_each_reading(&buf, |_| {}).expect_err("should reject");
         let msg = err.to_string();
         assert!(msg.contains("out of bounds"), "msg was: {}", msg);
     }
 
     #[test]
-    fn test_parse_snapshot_rejects_sensor_section_out_of_bounds() {
+    fn test_for_each_reading_rejects_sensor_section_out_of_bounds() {
         let mut buf = build_test_buffer(2, &["CPU"], &[]);
         buf[OFF_NUM_SENSORS..OFF_NUM_SENSORS + 4].copy_from_slice(&9999u32.to_le_bytes());
-        let err = parse_snapshot(&buf).expect_err("should reject");
+        let err = for_each_reading(&buf, |_| {}).expect_err("should reject");
         assert!(err.to_string().contains("out of bounds"));
     }
 
@@ -712,5 +794,20 @@ mod tests {
         let buf = build_test_buffer(1, &["CPU"], &[]);
         let header = parse_header(&buf).expect("v1 header");
         assert_eq!(header.num_sensors, 1);
+    }
+}
+
+/// Test-only fixture builders, reachable from other modules' tests.
+#[cfg(test)]
+pub mod test_support {
+    /// Build a view with the given sensor names and `(sensor_index, label, unit,
+    /// value)` readings. Wraps the in-module fixture so the sensor tests can
+    /// drive `match_all_borrowed` without a live HWiNFO mapping.
+    pub fn buffer_with(sensors: &[&str], readings: &[(usize, &str, &str, f64)]) -> Vec<u8> {
+        let full: Vec<super::tests::TestReading> = readings
+            .iter()
+            .map(|&(idx, label, unit, value)| (1u32, idx, label, unit, value, value, value, value))
+            .collect();
+        super::tests::build_test_buffer(2, sensors, &full)
     }
 }

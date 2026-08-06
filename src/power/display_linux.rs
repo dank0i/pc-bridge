@@ -7,9 +7,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The display power state to seed at startup, or None when it can't be observed
 /// on this stack (GNOME/KDE Wayland with no wlr power protocol). A None must seed
-/// the sensor "unavailable" rather than a confident "on" that never updates -
+/// the sensor "unknown" rather than a confident "on" that never updates -
 /// MonitorOff is also a no-op there, so a persistent retained "on" is a lie.
 pub fn observed_display_state() -> Option<&'static str> {
+    query_display_state()
+}
+
+/// A LIVE query of the current display power state, or None where the stack
+/// cannot answer (GNOME/KDE Wayland with no wlr power protocol).
+///
+/// Separate from [`observed_display_state`] because the two differ on Windows:
+/// there the startup seed is an optimistic guess corrected milliseconds later by
+/// a registration event, and re-asserting it at an arbitrary later moment (say,
+/// an MQTT reconnect) would publish a wrong retained value that stands until the
+/// next real power transition. On Linux this genuinely reads the hardware, so it
+/// IS safe to call at reconnect. Callers that need "tell me the truth right now
+/// or say nothing" want this one.
+pub fn query_display_state() -> Option<&'static str> {
     let wayland = crate::linux_wayland::is_wayland_session();
     if !wayland && let Some(on) = crate::linux_x11::dpms_on() {
         return Some(if on { "on" } else { "off" });

@@ -38,19 +38,37 @@ impl SessionSensor {
                     debug!("Session sensor shutting down");
                     break;
                 }
-                Ok(()) = reconnect_rx.recv() => {
+                r = reconnect_rx.recv() => {
+                    // Treat Lagged as a reconnect: the `Ok(())` pattern alone
+                    // silently skipped this arm when the 4-slot channel
+                    // overran, losing the republish on a flapping broker.
+                    // Closed means the sender is gone; `continue` would spin the
+                    // loop hot on an instantly-ready recv(). Exit instead.
+                    if !matches!(
+                        r,
+                        Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                    ) {
+                        break;
+                    }
                     prev = "";
                 }
                 _ = tick.tick() => {
-                    // Fall back to "unlocked" (not "unknown") so the value vocab
-                    // matches the Windows producer, which only emits locked/unlocked.
+                    // "unknown" when we genuinely cannot tell. The old fallback to
+                    // "unlocked" was justified as vocabulary parity with Windows,
+                    // but the startup seed now publishes "unknown" for exactly this
+                    // honesty reason - so the parity argument no longer holds, and
+                    // reporting a confident "unlocked" (permanent on macOS, where
+                    // loginctl does not exist) silently defeats any automation
+                    // gated on the session being locked.
                     let value = tokio::task::spawn_blocking(read_locked)
                         .await
                         .ok()
                         .flatten()
-                        .map_or("unlocked", |locked| if locked { "locked" } else { "unlocked" });
+                        .map_or(crate::mqtt::SENTINEL_UNKNOWN, |locked| {
+                            if locked { "locked" } else { "unlocked" }
+                        });
                     if value != prev {
-                        self.state.mqtt.publish_sensor_retained("session", value).await;
+                        self.state.mqtt.publish_sensor("session", value).await;
                         prev = value;
                     }
                 }
@@ -74,7 +92,7 @@ fn read_locked() -> Option<bool> {
                 && !LOGINCTL_WARNED.swap(true, Ordering::Relaxed)
             {
                 log::warn!(
-                    "loginctl not found; session state will report 'unlocked' (needs systemd-logind)"
+                    "loginctl not found; session state will report 'unknown' (needs systemd-logind)"
                 );
             }
             return None;

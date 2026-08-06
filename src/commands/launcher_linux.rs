@@ -82,7 +82,9 @@ pub fn expand_launcher_shortcut(cmd: &str) -> Option<String> {
         }
 
         "close" | "kill" => {
-            let process_name = arg.trim_end_matches(".exe");
+            // Shared helper: case-insensitive strip, case-PRESERVING result.
+            // Case matters here - pkill -x is case-sensitive.
+            let process_name = crate::commands::strip_exe(arg);
             if !is_safe_identifier(process_name) {
                 warn!("Invalid process name: {}", arg);
                 return None;

@@ -402,6 +402,63 @@ async fn run_agent() -> anyhow::Result<()> {
                             // repeating the ~3x-per-entity teardown on every reconnect is
                             // pure churn on a flapping broker.
                             state.mqtt.register_discovery(&config).await;
+                            // Custom entities are NOT part of register_discovery, so
+                            // without these they stay orphaned in HA after a broker
+                            // restart with no persistence, while built-ins recover.
+                            if config.custom_sensors_enabled && !config.custom_sensors.is_empty() {
+                                state
+                                    .mqtt
+                                    .register_custom_sensors(&config.custom_sensors)
+                                    .await;
+                            }
+                            if config.custom_commands_enabled
+                                && !config.custom_commands.is_empty()
+                            {
+                                state
+                                    .mqtt
+                                    .register_custom_commands(&config.custom_commands)
+                                    .await;
+                            }
+
+                            // Retained STATE seeds were startup-only, so a broker
+                            // restart without persistence dropped them and nothing
+                            // republished until the next real change. Reseed the
+                            // ones whose producers are purely event-driven.
+                            if config.features.sleep_wake {
+                                state
+                                    .mqtt
+                                    .publish_sensor("sleep_state", "awake")
+                                    .await;
+                            }
+                            // NOT reseeding `session` here. That was wrong: at
+                            // startup "unknown" is true by construction, but at
+                            // reconnect the producer may well know the real value,
+                            // and overwriting it with "unknown" destroyed it. Both
+                            // session sensors now subscribe to this same broadcast
+                            // and republish what they actually observed.
+                            // Republish `display` ONLY where it can actually be
+                            // queried. On Linux that is a live DPMS read, so a
+                            // broker that lost retained state gets the truth back
+                            // immediately instead of waiting for the next real
+                            // power transition (potentially days on a desktop).
+                            // On Windows query_display_state() is None by
+                            // construction: re-asserting the optimistic startup
+                            // seed at an arbitrary later moment would publish a
+                            // wrong retained value that stands until the monitor
+                            // next changes state.
+                            if config.features.display_state
+                                && let Some(v) = crate::power::query_display_state()
+                            {
+                                state.mqtt.publish_sensor("display", v).await;
+                            }
+                            // NOT reseeding hwinfo availability here. The hwinfo
+                            // task subscribes to the same reconnect broadcast and
+                            // publishes its REAL state; both enqueue into one FIFO,
+                            // so whichever lands last wins the retained value. A
+                            // losing `false` would mark all ~20 HWiNFO entities
+                            // unavailable permanently, because the task only
+                            // republishes availability on a transition and a
+                            // healthy open client never transitions.
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },
@@ -410,18 +467,10 @@ async fn run_agent() -> anyhow::Result<()> {
         }));
     }
 
-    // All sensors except HWiNFO are now started/stopped live by the supervisor
+    // Every sensor is started/stopped live by the supervisor
     // (see its spawn below) as their feature flags change - including the
     // thread-holding ones (system, session, now_playing, power), which take a
-    // per-task shutdown into run(). Only HWiNFO (Windows-only) stays startup-gated.
-
-    #[cfg(windows)]
-    if config.features.hwinfo_sensor {
-        use crate::sensors::hwinfo::HwInfoSensor;
-        let sensor = HwInfoSensor::new(Arc::clone(&state));
-        handles.push(tokio::spawn(sensor.run()));
-        info!("  HWiNFO sensor enabled (Global\\HWiNFO_SENS_SM2 lazy poll @ 500ms)");
-    }
+    // per-task shutdown into run(). Every sensor is supervised, including HWiNFO.
 
     // (all no-persistent-thread sensors are supervised; see the supervisor spawn below)
 
@@ -439,7 +488,7 @@ async fn run_agent() -> anyhow::Result<()> {
     }
 
     // Runtime supervisor: starts/stops every sensor task live as feature flags
-    // change (no restart). Only HWiNFO stays startup-gated above.
+    // change (no restart). Every sensor is supervised, HWiNFO included.
     handles.push(tokio::spawn(
         supervisor::Supervisor::new(Arc::clone(&state)).run(),
     ));
@@ -484,26 +533,30 @@ async fn run_agent() -> anyhow::Result<()> {
 
     // Seed initial sensor states, each gated by its own flag.
     if config.features.sleep_wake {
-        state
-            .mqtt
-            .publish_sensor_retained("sleep_state", "awake")
-            .await;
+        state.mqtt.publish_sensor("sleep_state", "awake").await;
     }
     if config.features.display_state {
-        // Windows tracks display power via GUID_CONSOLE_DISPLAY_STATE events, so
-        // "on" is a safe seed. On Linux the DPMS state may be unobservable
-        // (GNOME/KDE Wayland): seed the real value if a source answers, else
-        // "unavailable" rather than a confident "on" that never updates.
-        #[cfg(windows)]
-        let seed = "on";
-        #[cfg(not(windows))]
-        let seed = crate::power::observed_display_state().unwrap_or("unavailable");
-        state.mqtt.publish_sensor_retained("display", seed).await;
+        // Windows has no way to POLL display power, only the event, so this seed
+        // is the sole guarantee the entity has a value when the notification
+        // never fires (registration failure) or delivers a state we cannot map.
+        // It cannot clobber a real value: the pump only starts dispatching after
+        // GWLP_USERDATA is stored, so a registration-time event is delivered
+        // after this point, not before.
+        //
+        // On Linux the DPMS state may be unobservable (GNOME/KDE Wayland): seed
+        // the real value if a source answers, else "unknown" rather than a
+        // confident "on" that never updates.
+        let seed = crate::power::observed_display_state().unwrap_or(crate::mqtt::SENTINEL_UNKNOWN);
+        state.mqtt.publish_sensor("display", seed).await;
     }
     if config.features.session_state {
+        // "unknown" not "unlocked": the Windows sensor is purely event-driven and
+        // never queries the current lock state, so restarting (including an
+        // auto-update) while the workstation is locked would otherwise report
+        // unlocked until the next real toggle. Linux self-corrects on its poll.
         state
             .mqtt
-            .publish_sensor_retained("session", "unlocked")
+            .publish_sensor("session", crate::mqtt::SENTINEL_UNKNOWN)
             .await;
     }
 
@@ -597,6 +650,7 @@ fn log_enabled_features(config: &Config) {
         f.idle_tracking,
         f.sleep_wake,
         f.display_state,
+        f.display_attached,
         f.cmd_shutdown,
         f.cmd_restart,
         f.cmd_sleep,

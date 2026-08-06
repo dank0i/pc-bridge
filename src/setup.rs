@@ -410,6 +410,7 @@ pub fn save_setup_config(config: &SetupConfig) -> std::io::Result<PathBuf> {
             idle_tracking: config.idle_tracking,
             sleep_wake: config.power_events,
             display_state: config.power_events,
+            display_attached: false,
             cmd_shutdown: config.power_events,
             cmd_restart: config.power_events,
             cmd_sleep: config.power_events,

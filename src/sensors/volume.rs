@@ -36,7 +36,18 @@ impl VolumeSensor {
                     debug!("Volume sensor shutting down");
                     break;
                 }
-                Ok(()) = reconnect_rx.recv() => {
+                r = reconnect_rx.recv() => {
+                    // Treat Lagged as a reconnect: the `Ok(())` pattern alone
+                    // silently skipped this arm when the 4-slot channel
+                    // overran, losing the republish on a flapping broker.
+                    // Closed means the sender is gone; `continue` would spin the
+                    // loop hot on an instantly-ready recv(). Exit instead.
+                    if !matches!(
+                        r,
+                        Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                    ) {
+                        break;
+                    }
                     prev.clear();
                 }
                 _ = tick.tick() => {
@@ -47,7 +58,7 @@ impl VolumeSensor {
                         .ok()
                         .flatten()
                         .map(|v| (v.round() as i64).clamp(0, 100).to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
+                        .unwrap_or_else(|| crate::mqtt::SENTINEL_UNKNOWN.to_string());
                     if value != prev {
                         self.state.mqtt.publish_sensor("volume_level", &value).await;
                         prev = value;

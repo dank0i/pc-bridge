@@ -42,15 +42,26 @@ impl UptimeSensor {
                     debug!("Uptime sensor shutting down");
                     break;
                 }
-                Ok(()) = reconnect_rx.recv() => {
+                r = reconnect_rx.recv() => {
+                    // Treat Lagged as a reconnect: the `Ok(())` pattern alone
+                    // silently skipped this arm when the 4-slot channel
+                    // overran, losing the republish on a flapping broker.
+                    // Closed means the sender is gone; `continue` would spin the
+                    // loop hot on an instantly-ready recv(). Exit instead.
+                    if !matches!(
+                        r,
+                        Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                    ) {
+                        break;
+                    }
                     prev_uptime.clear();
                 }
                 _ = tick.tick() => {
-                    // Report unavailable on a read failure rather than 0, which
+                    // Report unknown on a read failure rather than 0, which
                     // would look like a fresh boot and fire "PC rebooted" automations.
                     let uptime_str = match get_system_uptime() {
                         Some(secs) => secs.to_string(),
-                        None => "unavailable".to_string(),
+                        None => crate::mqtt::SENTINEL_UNKNOWN.to_string(),
                     };
                     if uptime_str != prev_uptime {
                         self.state.mqtt.publish_sensor("system_uptime", &uptime_str).await;

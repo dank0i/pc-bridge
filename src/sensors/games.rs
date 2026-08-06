@@ -59,6 +59,9 @@ impl GameSensor {
         Self { state }
     }
 
+    // Long dispatch/event-loop body: splitting it would scatter tightly-coupled
+    // state across helpers for no readability gain. Reviewed, allowed deliberately.
+    #[allow(clippy::cognitive_complexity)]
     pub async fn run(self) {
         let mut shutdown_rx = self.state.shutdown_tx.subscribe();
         let mut process_rx = self.state.process_watcher.subscribe();
@@ -72,12 +75,17 @@ impl GameSensor {
         let mut cached = CachedGamePatterns::build(&games);
         self.publish_game_catalog(&games).await;
 
-        // Publish initial state
-        let games = self.detect_game(&cached).await;
-        self.publish_game(&games).await;
-
-        // Track last published state (joined ids) to avoid duplicate messages
-        let mut last_game_id = running_state(&games).0;
+        // Publish initial state. Skip the publish (do NOT publish an empty set,
+        // which reads as "none") when the process table has not been enumerated
+        // yet; the loop retries. Returning here would kill the sensor
+        // permanently, which is the mistake the Linux twin made first.
+        let mut last_game_id = match self.detect_game(&cached).await {
+            Some(games) => {
+                self.publish_game(&games).await;
+                running_state(&games).0
+            }
+            None => String::new(),
+        };
 
         info!("Game sensor started (push-based)");
 
@@ -100,7 +108,9 @@ impl GameSensor {
                     self.publish_game_catalog(&games).await;
                     debug!("Game sensor: rebuilt cached patterns");
                     // Re-detect with new patterns
-                    let games = self.detect_game(&cached).await;
+                    let Some(games) = self.detect_game(&cached).await else {
+                        continue;
+                    };
                     let key = running_state(&games).0;
                     if key != last_game_id {
                         self.publish_game(&games).await;
@@ -108,11 +118,24 @@ impl GameSensor {
                     }
                 }
                 // MQTT reconnected - force republish retained state
-                Ok(()) = reconnect_rx.recv() => {
+                r = reconnect_rx.recv() => {
+                    // Treat Lagged as a reconnect: the `Ok(())` pattern alone
+                    // silently skipped this arm when the 4-slot channel
+                    // overran, losing the republish on a flapping broker.
+                    // Closed means the sender is gone; `continue` would spin the
+                    // loop hot on an instantly-ready recv(). Exit instead.
+                    if !matches!(
+                        r,
+                        Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                    ) {
+                        break;
+                    }
                     info!("Game sensor: MQTT reconnected, republishing current state");
                     let games = self.state.config.read().await.games.clone();
                     self.publish_game_catalog(&games).await;
-                    let games = self.detect_game(&cached).await;
+                    let Some(games) = self.detect_game(&cached).await else {
+                        continue;
+                    };
                     self.publish_game(&games).await;
                     last_game_id = running_state(&games).0;
                 }
@@ -120,7 +143,9 @@ impl GameSensor {
                     match result {
                         Ok(_notification) => {
                             // Process list changed - re-detect and publish if different
-                            let games = self.detect_game(&cached).await;
+                            let Some(games) = self.detect_game(&cached).await else {
+                        continue;
+                    };
                             let key = running_state(&games).0;
                             if key != last_game_id {
                                 self.publish_game(&games).await;
@@ -130,7 +155,9 @@ impl GameSensor {
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             // Missed some notifications, just re-detect
                             debug!("Game sensor lagged {} notifications, re-detecting", n);
-                            let games = self.detect_game(&cached).await;
+                            let Some(games) = self.detect_game(&cached).await else {
+                        continue;
+                    };
                             let key = running_state(&games).0;
                             if key != last_game_id {
                                 self.publish_game(&games).await;
@@ -149,10 +176,7 @@ impl GameSensor {
 
     async fn publish_game(&self, games: &[(String, String)]) {
         let (state, display_names) = running_state(games);
-        self.state
-            .mqtt
-            .publish_sensor_retained("runninggames", &state)
-            .await;
+        self.state.mqtt.publish_sensor("runninggames", &state).await;
 
         // Structured game list, built directly from the pairs (no re-split).
         let games_array: Vec<serde_json::Value> = games
@@ -194,7 +218,7 @@ impl GameSensor {
         let count = entries.len();
         self.state
             .mqtt
-            .publish_sensor_retained("game_catalog", &count.to_string())
+            .publish_sensor("game_catalog", &count.to_string())
             .await;
         let attrs = serde_json::json!({
             "games": entries,
@@ -207,11 +231,18 @@ impl GameSensor {
         debug!("Published game catalog with {} exposed games", count);
     }
 
-    async fn detect_game(&self, cached: &CachedGamePatterns) -> Vec<(String, String)> {
+    /// `None` when the process table has never been successfully enumerated,
+    /// mirroring the Linux twin's `try_resolve_processes`. An empty name set is
+    /// otherwise ambiguous, and publishing `"none"` for "we have never managed to
+    /// look" is a fabrication.
+    async fn detect_game(&self, cached: &CachedGamePatterns) -> Option<Vec<(String, String)>> {
         // Access process list by reference - no HashSet clone
         let proc_state = self.state.process_watcher.state();
         let proc_guard = proc_state.read().await;
-        match_games_pairs(proc_guard.names(), cached)
+        if !proc_guard.has_enumerated() {
+            return None;
+        }
+        Some(match_games_pairs(proc_guard.names(), cached))
     }
 }
 

@@ -49,31 +49,33 @@ impl CaptureSensor {
         &self,
         mic: bool,
         webcam: bool,
-        prev_mic: &mut Option<bool>,
-        prev_cam: &mut Option<bool>,
+        prev_mic: &mut Option<&'static str>,
+        prev_cam: &mut Option<&'static str>,
     ) {
-        let (m, w) =
-            tokio::task::spawn_blocking(move || (mic.then(mic_in_use), webcam.then(webcam_in_use)))
-                .await
-                .unwrap_or((None, None));
+        // Outer Option: is the feature enabled. Inner: could the probe tell.
+        let (m, w) = tokio::task::spawn_blocking(move || {
+            (
+                if mic { Some(mic_in_use()) } else { None },
+                if webcam { Some(webcam_in_use()) } else { None },
+            )
+        })
+        .await
+        .unwrap_or((None, None));
 
-        if let Some(on) = m
-            && *prev_mic != Some(on)
-        {
-            self.state
-                .mqtt
-                .publish_sensor_retained("mic", bool_state(on))
-                .await;
-            *prev_mic = Some(on);
+        // Dedup on the published string: it now has three values, not two.
+        if let Some(v) = m {
+            let value = bool_state(v);
+            if *prev_mic != Some(value) {
+                self.state.mqtt.publish_sensor("mic", value).await;
+                *prev_mic = Some(value);
+            }
         }
-        if let Some(on) = w
-            && *prev_cam != Some(on)
-        {
-            self.state
-                .mqtt
-                .publish_sensor_retained("webcam", bool_state(on))
-                .await;
-            *prev_cam = Some(on);
+        if let Some(v) = w {
+            let value = bool_state(v);
+            if *prev_cam != Some(value) {
+                self.state.mqtt.publish_sensor("webcam", value).await;
+                *prev_cam = Some(value);
+            }
         }
     }
 
@@ -89,8 +91,8 @@ impl CaptureSensor {
         let mut tick = interval(Duration::from_secs(5));
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
-        let mut prev_mic: Option<bool> = None;
-        let mut prev_cam: Option<bool> = None;
+        let mut prev_mic: Option<&'static str> = None;
+        let mut prev_cam: Option<&'static str> = None;
 
         info!("Capture (mic/webcam) sensor started (polled every 5s)");
 
@@ -101,7 +103,18 @@ impl CaptureSensor {
                     debug!("Capture sensor shutting down");
                     break;
                 }
-                Ok(()) = reconnect_rx.recv() => {
+                r = reconnect_rx.recv() => {
+                    // Treat Lagged as a reconnect: the `Ok(())` pattern alone
+                    // silently skipped this arm when the 4-slot channel
+                    // overran, losing the republish on a flapping broker.
+                    // Closed means the sender is gone; `continue` would spin the
+                    // loop hot on an instantly-ready recv(). Exit instead.
+                    if !matches!(
+                        r,
+                        Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                    ) {
+                        break;
+                    }
                     prev_mic = None;
                     prev_cam = None;
                 }
@@ -126,15 +139,14 @@ impl CaptureSensor {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        use windows::Win32::Foundation::{CloseHandle, HANDLE};
         use windows::Win32::System::Threading::{CreateEventW, SetEvent};
         use windows::core::PCWSTR;
 
         let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
 
-        // Manual-reset stop event. We keep only its raw value (isize, Send) in the
-        // async scope so the future stays Send, rebuilding the HANDLE for the
-        // (non-await) SetEvent calls. The watch thread owns and closes the object.
+        // Manual-reset stop event, owned by a refcounted `StopEvent` shared with
+        // the watch thread. Whoever drops last closes it, so no caller can signal
+        // a handle another has already closed.
         let stop_event = match unsafe { CreateEventW(None, true, false, PCWSTR::null()) } {
             Ok(h) => h,
             Err(e) => {
@@ -142,18 +154,19 @@ impl CaptureSensor {
                 return;
             }
         };
-        let stop_raw = stop_event.0 as isize;
+        let stop = Arc::new(StopEvent(stop_event));
 
         let (poke_tx, mut poke_rx) = tokio::sync::mpsc::channel::<()>(4);
         if let Err(e) = std::thread::Builder::new()
             .name("capture-consent".into())
             .stack_size(256 * 1024)
-            .spawn(move || consent_watch_thread(stop_raw, poke_tx))
+            .spawn({
+                let stop = Arc::clone(&stop);
+                move || consent_watch_thread(stop, poke_tx)
+            })
         {
             log::error!("Capture: failed to spawn consent watch thread: {e}");
-            unsafe {
-                let _ = CloseHandle(stop_event);
-            }
+            // `stop` drops here and closes the event.
             return;
         }
 
@@ -167,19 +180,24 @@ impl CaptureSensor {
         {
             let mut wait_rx = shutdown.subscribe();
             let signaled = Arc::clone(&signaled);
+            // Hold an Arc, not the raw isize: this task is the one SetEvent caller
+            // that sat OUTSIDE the refcount, so "use-after-close is not
+            // representable" was not actually true for it. Safe today only because
+            // the runtime is current-thread; an Arc makes it true unconditionally.
+            let stop = Arc::clone(&stop);
             tokio::spawn(async move {
                 let _ = wait_rx.recv().await;
                 if !signaled.swap(true, Ordering::SeqCst) {
                     unsafe {
-                        let _ = SetEvent(HANDLE(stop_raw as *mut _));
+                        let _ = SetEvent(stop.0);
                     }
                 }
             });
         }
 
         info!("Capture (mic/webcam) sensor started (event-driven)");
-        let mut prev_mic: Option<bool> = None;
-        let mut prev_cam: Option<bool> = None;
+        let mut prev_mic: Option<&'static str> = None;
+        let mut prev_cam: Option<&'static str> = None;
 
         loop {
             tokio::select! {
@@ -188,12 +206,25 @@ impl CaptureSensor {
                     debug!("Capture sensor shutting down");
                     if !signaled.swap(true, Ordering::SeqCst) {
                         unsafe {
-                            let _ = SetEvent(HANDLE(stop_raw as *mut _));
+                            // Refcounted handle, not a rebuilt raw one - see the
+                            // note on the shutdown waiter above.
+                            let _ = SetEvent(stop.0);
                         }
                     }
                     break;
                 }
-                Ok(()) = reconnect_rx.recv() => {
+                r = reconnect_rx.recv() => {
+                    // Treat Lagged as a reconnect: the `Ok(())` pattern alone
+                    // silently skipped this arm when the 4-slot channel
+                    // overran, losing the republish on a flapping broker.
+                    // Closed means the sender is gone; `continue` would spin the
+                    // loop hot on an instantly-ready recv(). Exit instead.
+                    if !matches!(
+                        r,
+                        Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                    ) {
+                        break;
+                    }
                     // Force a republish: clear the dedup state and rescan now.
                     prev_mic = None;
                     prev_cam = None;
@@ -207,12 +238,43 @@ impl CaptureSensor {
     }
 }
 
+/// Shared owner for the stop event.
+///
+/// Previously the async task held only the raw `isize` and the watch thread
+/// closed the object on every exit path, while the async side still called
+/// `SetEvent` on it. The `signaled` AtomicBool only de-duplicated the two ASYNC
+/// callers; it gave no ordering against the thread's own close. If the thread
+/// exited early (`RegOpenKeyExW` failing on Server/LTSC/a fresh profile) the
+/// async side then signalled a RECYCLED handle value for the rest of the
+/// session, and this process churns handles constantly.
+///
+/// Refcounting it means the last holder closes it, so a use-after-close is not
+/// representable.
+#[cfg(windows)]
+pub(crate) struct StopEvent(pub(crate) windows::Win32::Foundation::HANDLE);
+
+// SAFETY: a Windows event HANDLE is usable from any thread; we only ever
+// SetEvent / wait on it, and Drop runs exactly once when the last Arc goes.
+#[cfg(windows)]
+unsafe impl Send for StopEvent {}
+#[cfg(windows)]
+unsafe impl Sync for StopEvent {}
+
+#[cfg(windows)]
+impl Drop for StopEvent {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
 /// Dedicated OS thread: block on a `RegNotifyChangeKeyValue` change event for the
 /// CapabilityAccessManager consent store and poke the async task to re-read on any
 /// change. Exits when the stop event (rebuilt from `stop_raw`) is signaled.
 #[cfg(windows)]
-fn consent_watch_thread(stop_raw: isize, poke_tx: tokio::sync::mpsc::Sender<()>) {
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+fn consent_watch_thread(stop: std::sync::Arc<StopEvent>, poke_tx: tokio::sync::mpsc::Sender<()>) {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
     use windows::Win32::System::Registry::{
         HKEY, HKEY_CURRENT_USER, KEY_NOTIFY, REG_NOTIFY_CHANGE_LAST_SET, REG_NOTIFY_CHANGE_NAME,
         RegCloseKey, RegNotifyChangeKeyValue, RegOpenKeyExW,
@@ -221,7 +283,8 @@ fn consent_watch_thread(stop_raw: isize, poke_tx: tokio::sync::mpsc::Sender<()>)
     use windows::core::{PCWSTR, w};
 
     unsafe {
-        let stop = HANDLE(stop_raw as *mut _);
+        // Borrowed from the shared owner; this thread must NOT close it.
+        let stop = stop.0;
 
         // Watch the ConsentStore parent with a subtree notification, so one watch
         // covers both microphone and webcam (and every app nested under them).
@@ -231,7 +294,6 @@ fn consent_watch_thread(stop_raw: isize, poke_tx: tokio::sync::mpsc::Sender<()>)
         );
         if RegOpenKeyExW(HKEY_CURRENT_USER, path, 0, KEY_NOTIFY, &raw mut hkey).is_err() {
             log::error!("Capture: failed to open ConsentStore key for notifications");
-            let _ = CloseHandle(stop);
             return;
         }
 
@@ -242,7 +304,6 @@ fn consent_watch_thread(stop_raw: isize, poke_tx: tokio::sync::mpsc::Sender<()>)
             Err(e) => {
                 log::error!("Capture: CreateEventW (change) failed: {e:?}");
                 let _ = RegCloseKey(hkey);
-                let _ = CloseHandle(stop);
                 return;
             }
         };
@@ -272,29 +333,40 @@ fn consent_watch_thread(stop_raw: isize, poke_tx: tokio::sync::mpsc::Sender<()>)
 
         let _ = CloseHandle(change);
         let _ = RegCloseKey(hkey);
-        let _ = CloseHandle(stop);
     }
 }
 
-fn bool_state(on: bool) -> &'static str {
-    if on { "on" } else { "off" }
+/// `None` means the probe could not determine the state (no `/proc` on macOS,
+/// `hidepid=2` hiding every process on Linux). Publishing a confident "off"
+/// there is a lie the user cannot distinguish from a real "not in use".
+///
+/// "unknown", NOT "unavailable": these sensors carry an availability topic, so a
+/// literal `unavailable` state is indistinguishable in HA from the bridge's LWT
+/// firing - which would destroy the exact distinction this tri-state creates.
+/// `unknown` is what HA reserves for "the producer is alive but cannot say".
+fn bool_state(on: Option<bool>) -> &'static str {
+    match on {
+        Some(true) => "on",
+        Some(false) => "off",
+        None => crate::mqtt::SENTINEL_UNKNOWN,
+    }
 }
 
 // ── Windows: consent store ─────────────────────────────────────────────────
 
 #[cfg(windows)]
-fn mic_in_use() -> bool {
+fn mic_in_use() -> Option<bool> {
     capability_in_use("microphone")
 }
 
 #[cfg(windows)]
-fn webcam_in_use() -> bool {
+fn webcam_in_use() -> Option<bool> {
     capability_in_use("webcam")
 }
 
 /// True if any app currently holds the given capability ("microphone"/"webcam").
 #[cfg(windows)]
-fn capability_in_use(capability: &str) -> bool {
+fn capability_in_use(capability: &str) -> Option<bool> {
     use winreg::RegKey;
     use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
 
@@ -302,8 +374,11 @@ fn capability_in_use(capability: &str) -> bool {
     let path = format!(
         r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\{capability}"
     );
+    // None, not false: the ConsentStore key is absent on Server/LTSC and on a
+    // fresh profile before any app has requested the capability. Reporting a
+    // confident "off" there is the same lie the Linux twin was fixed for.
     let Ok(store) = hkcu.open_subkey_with_flags(&path, KEY_READ) else {
-        return false;
+        return None;
     };
     for app in store.enum_keys().flatten() {
         let Ok(app_key) = store.open_subkey_with_flags(&app, KEY_READ) else {
@@ -315,14 +390,14 @@ fn capability_in_use(capability: &str) -> bool {
                 if let Ok(np_key) = app_key.open_subkey_with_flags(&np, KEY_READ)
                     && key_in_use(&np_key)
                 {
-                    return true;
+                    return Some(true);
                 }
             }
         } else if key_in_use(&app_key) {
-            return true;
+            return Some(true);
         }
     }
-    false
+    Some(false)
 }
 
 /// `LastUsedTimeStop == 0` means the capability is in use at this moment.
@@ -336,18 +411,19 @@ fn key_in_use(key: &winreg::RegKey) -> bool {
 // ── Linux: /proc heuristics ────────────────────────────────────────────────
 
 #[cfg(unix)]
-fn webcam_in_use() -> bool {
+fn webcam_in_use() -> Option<bool> {
     // A webcam is in use if any process has a /dev/video* device open.
+    // None when /proc is absent (macOS) or unreadable (hidepid=2).
     proc_has_open_path("/dev/video")
 }
 
 #[cfg(unix)]
-fn mic_in_use() -> bool {
+fn mic_in_use() -> Option<bool> {
     // ALSA capture substreams report "RUNNING" in their status file while
     // recording. Approximate on PipeWire, which may keep the device open.
     use std::fs;
     let Ok(cards) = fs::read_dir("/proc/asound") else {
-        return false;
+        return None; // no /proc/asound: cannot tell, do not claim "off"
     };
     for card in cards.flatten() {
         let Ok(pcms) = fs::read_dir(card.path()) else {
@@ -367,32 +443,65 @@ fn mic_in_use() -> bool {
                 if let Ok(content) = fs::read_to_string(sub.path().join("status"))
                     && content.contains("RUNNING")
                 {
-                    return true;
+                    return Some(true);
                 }
             }
         }
     }
-    false
+    Some(false)
 }
 
-/// True if any process has an open file descriptor whose target starts with
-/// `prefix` (e.g. "/dev/video").
+/// `Some(true)` if any process has an open file descriptor whose target starts
+/// with `prefix` (e.g. "/dev/video"). `None` when /proc cannot be read at all
+/// (macOS has none; `hidepid=2` hides every process), because reporting a
+/// definite "not in use" there is indistinguishable from a real negative.
 #[cfg(unix)]
-fn proc_has_open_path(prefix: &str) -> bool {
+fn proc_has_open_path(prefix: &str) -> Option<bool> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        return false;
+        return None;
     };
+    // With hidepid=2 (or systemd ProtectProc=invisible), and in any ordinary
+    // multi-user case, /proc itself reads fine but every foreign fd dir gives
+    // EACCES. Falling through to `false` there is exactly the confident lie this
+    // tri-state exists to avoid, so track whether we could open ANY fd dir.
+    let mut pids_seen = 0usize;
+    let mut fd_dirs_opened = 0usize;
     for entry in entries.flatten() {
+        // Only numeric entries are PIDs; /proc also holds many non-PID files.
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .chars()
+            .all(|c| c.is_ascii_digit())
+        {
+            continue;
+        }
+        pids_seen += 1;
         let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
             continue;
         };
+        fd_dirs_opened += 1;
         for fd in fds.flatten() {
             if let Ok(target) = std::fs::read_link(fd.path())
                 && target.to_string_lossy().starts_with(prefix)
             {
-                return true;
+                return Some(true);
             }
         }
     }
-    false
+    // Under hidepid=2 / ProtectProc=invisible a process still sees its OWN pid and
+    // can always open its own fd dir, so `fd_dirs_opened == 0` never happens and
+    // the old guard was dead. What actually distinguishes "restricted" from
+    // "genuinely idle" is seeing many pids but being able to inspect ~none of them.
+    //
+    // The threshold has to be RELATIVE. A fixed `fd_dirs_opened <= 1` only
+    // catches total blindness: running as a dedicated service user, pc-bridge
+    // typically owns two or three processes of its own, clears the fixed bar,
+    // and then confidently answers "no, the camera is not in use" without having
+    // been able to look at a single desktop-session process. Requiring a real
+    // fraction of visible pids to be inspectable keeps the tri-state honest.
+    if pids_seen > 4 && fd_dirs_opened * 5 < pids_seen {
+        return None;
+    }
+    Some(false)
 }

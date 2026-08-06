@@ -9,7 +9,7 @@ use eframe::egui;
 use egui::{Color32, RichText, Rounding};
 
 use crate::config::{
-    Config, CustomCommand, CustomCommandType, CustomSensor, CustomSensorType, FeatureConfig,
+    Config, CustomCommand, CustomCommandType, CustomSensor, CustomSensorType, flag_get, flag_set,
 };
 
 use super::model::{
@@ -359,6 +359,11 @@ impl App {
         if let Ok(fresh) = Config::load() {
             reconcile_with_disk(&mut self.cfg, fresh, &baseline_keys);
         }
+        // Validate BEFORE writing. Config::save() does not validate but
+        // Config::load() does, so an invalid save wedges the agent on next start -
+        // and this window then refuses to save again, stranding the user in
+        // hand-edit territory. The CLI wizard already guards this the same way.
+        self.cfg.validate()?;
         self.cfg.save()
     }
 
@@ -447,16 +452,25 @@ fn in_view(f: &Feature, g: Group, ct: Kind) -> bool {
 /// greyed out: the window/DPMS/monitor features when neither X11 nor the wlr
 /// Wayland protocols are available (e.g. GNOME/KDE Wayland). Empty elsewhere.
 fn unsupported_features() -> Vec<&'static str> {
+    // display_attached has a producer on Windows (CfgMgr32 monitor-interface
+    // notifications) and on Linux (DRM connector status), but not on macOS.
+    // Offering the toggle there would present a switch backed by nothing.
+    #[cfg(any(windows, target_os = "linux"))]
+    #[allow(unused_mut)]
+    let mut out: Vec<&'static str> = Vec::new();
+    #[cfg(not(any(windows, target_os = "linux")))]
+    #[allow(unused_mut)]
+    let mut out: Vec<&'static str> = vec!["display_attached"];
+
     #[cfg(target_os = "linux")]
     {
         // A real X11 session (NOT XWayland under a Wayland compositor - that would
         // report x11 as reachable while the X11 backends only see XWayland): the
         // X11 backends handle everything.
         if !crate::linux_wayland::is_wayland_session() && crate::linux_x11::is_available() {
-            return Vec::new();
+            return out;
         }
         // Wayland (or headless): window/DPMS/monitor need the wlr protocols.
-        let mut out = Vec::new();
         if !crate::linux_wayland::has_foreign_toplevel() {
             out.push("active_window");
         }
@@ -464,12 +478,9 @@ fn unsupported_features() -> Vec<&'static str> {
             out.push("display_state");
             out.push("monitor");
         }
-        out
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        Vec::new()
-    }
+
+    out
 }
 
 /// The shared IntervalConfig field a polled feature reads, if any. Several
@@ -520,80 +531,6 @@ fn interval_field_set(iv: &mut crate::config::IntervalConfig, field: &str, v: u3
         "last_active" => iv.last_active = v,
         "steam_check" => iv.steam_check = v,
         "game_sensor" => iv.game_sensor = v,
-        _ => {}
-    }
-}
-
-fn flag_get(f: &FeatureConfig, id: &str) -> Option<bool> {
-    Some(match id {
-        "gpu" => f.gpu_sensor,
-        "network" => f.network_sensor,
-        "disks" => f.disk_sensor,
-        "uptime" => f.uptime_sensor,
-        "hwinfo" => f.hwinfo_sensor,
-        "cpu" => f.cpu_sensor,
-        "memory" => f.memory_sensor,
-        "active_window" => f.active_window,
-        "session" => f.session_state,
-        "audio_device" => f.audio_device,
-        "mic" => f.mic,
-        "webcam" => f.webcam,
-        "now_playing" => f.now_playing,
-        "idle" => f.idle_tracking,
-        "running_game" => f.running_game,
-        "game_catalog" => f.game_catalog,
-        "steam_library" => f.steam_library,
-        "launch_game" => f.launch_game,
-        "close_game" => f.close_game,
-        "volume" => f.volume,
-        "media_controls" => f.media_controls,
-        "steam_downloads" => f.steam_updates,
-        "notifications" => f.notifications,
-        "sleep_wake" => f.sleep_wake,
-        "display_state" => f.display_state,
-        "shutdown" => f.cmd_shutdown,
-        "restart" => f.cmd_restart,
-        "sleep" => f.cmd_sleep,
-        "lock" => f.cmd_lock,
-        "logoff" => f.cmd_logoff,
-        "monitor" => f.cmd_monitor,
-        _ => return None,
-    })
-}
-
-fn flag_set(f: &mut FeatureConfig, id: &str, v: bool) {
-    match id {
-        "gpu" => f.gpu_sensor = v,
-        "network" => f.network_sensor = v,
-        "disks" => f.disk_sensor = v,
-        "uptime" => f.uptime_sensor = v,
-        "hwinfo" => f.hwinfo_sensor = v,
-        "cpu" => f.cpu_sensor = v,
-        "memory" => f.memory_sensor = v,
-        "active_window" => f.active_window = v,
-        "session" => f.session_state = v,
-        "audio_device" => f.audio_device = v,
-        "mic" => f.mic = v,
-        "webcam" => f.webcam = v,
-        "now_playing" => f.now_playing = v,
-        "idle" => f.idle_tracking = v,
-        "running_game" => f.running_game = v,
-        "game_catalog" => f.game_catalog = v,
-        "steam_library" => f.steam_library = v,
-        "launch_game" => f.launch_game = v,
-        "close_game" => f.close_game = v,
-        "volume" => f.volume = v,
-        "media_controls" => f.media_controls = v,
-        "steam_downloads" => f.steam_updates = v,
-        "notifications" => f.notifications = v,
-        "sleep_wake" => f.sleep_wake = v,
-        "display_state" => f.display_state = v,
-        "shutdown" => f.cmd_shutdown = v,
-        "restart" => f.cmd_restart = v,
-        "sleep" => f.cmd_sleep = v,
-        "lock" => f.cmd_lock = v,
-        "logoff" => f.cmd_logoff = v,
-        "monitor" => f.cmd_monitor = v,
         _ => {}
     }
 }
@@ -734,7 +671,9 @@ impl eframe::App for App {
 /// Open a folder/file path or URL with the OS default handler.
 fn os_open(target: &str) {
     #[cfg(windows)]
-    let _ = std::process::Command::new("explorer").arg(target).spawn();
+    let _ = std::process::Command::new(crate::commands::system_root("explorer.exe"))
+        .arg(target)
+        .spawn();
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(target).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -1915,7 +1854,14 @@ fn save_one_game(app: &mut App, i: usize) {
 fn spawn_steam_scan(app: &mut App) {
     // Save current edits first so the scan merges into them. This also flushes any
     // just-changed suppression list to disk before the scan reads it back.
-    let _ = app.persist(true);
+    //
+    // persist() now validates, so this CAN fail - and if it does the scan would
+    // read a stale suppression list and silently discard the user's pending
+    // edits. Surface it and bail instead.
+    if let Err(e) = app.persist(true) {
+        app.save_error = Some(format!("Cannot scan: config is invalid - {e}"));
+        return;
+    }
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let merged = crate::steam::SteamGameDiscovery::discover_fresh()

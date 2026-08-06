@@ -44,9 +44,17 @@ pub(crate) fn resolve_name(pid_dir: &Path) -> Option<String> {
 /// `proc_root` is injectable so the resolution rule can be unit-tested against a
 /// fake `/proc` layout.
 pub(crate) fn resolve_processes(proc_root: &Path) -> Vec<ProcEntry> {
+    try_resolve_processes(proc_root).unwrap_or_default()
+}
+
+/// `None` when the process table could not be enumerated at all (no `/proc`, as
+/// on macOS). Callers that publish a sensor MUST distinguish that from "nothing
+/// matched": returning an empty list made game detection report a confident
+/// "no game running" forever on any host without /proc.
+pub(crate) fn try_resolve_processes(proc_root: &Path) -> Option<Vec<ProcEntry>> {
     let mut out = Vec::new();
     let Ok(dir) = std::fs::read_dir(proc_root) else {
-        return out;
+        return None;
     };
     for entry in dir.flatten() {
         let path = entry.path();
@@ -62,7 +70,7 @@ pub(crate) fn resolve_processes(proc_root: &Path) -> Vec<ProcEntry> {
             out.push(ProcEntry { pid, name });
         }
     }
-    out
+    Some(out)
 }
 
 /// Whether `name` matches `pattern` under the same relaxed rule the Windows
@@ -81,8 +89,13 @@ pub(crate) fn name_matches(name: &str, pattern: &str) -> bool {
 /// close/kill path: signalling is destructive, so `close:vlc` must match only
 /// `vlc`/`vlc.exe`, never `vlc-wrapper`.
 pub(crate) fn name_matches_exact(name: &str, pattern: &str) -> bool {
-    let name_stem = name.strip_suffix(".exe").unwrap_or(name);
-    let pat_stem = pattern.strip_suffix(".exe").unwrap_or(pattern);
+    // strip_exe, not strip_suffix(".exe"): the latter is CASE-SENSITIVE, so
+    // "GAME.EXE" vs pattern "game" did not match here while the Windows twin
+    // (Config::matching_game_processes -> commands::strip_exe) did. Proton and
+    // Wine processes are literally named *.exe and the casing is whatever the
+    // publisher shipped.
+    let name_stem = crate::commands::strip_exe(name);
+    let pat_stem = crate::commands::strip_exe(pattern);
     name.eq_ignore_ascii_case(pattern) || name_stem.eq_ignore_ascii_case(pat_stem)
 }
 

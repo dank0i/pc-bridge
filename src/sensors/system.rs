@@ -21,6 +21,14 @@ pub struct SystemSensor {
 /// Tracks previous sensor values to skip duplicate MQTT publishes
 struct PrevSystemValues {
     cpu: String,
+    /// True until the first CPU sample has been ATTEMPTED. Deliberately not
+    /// derived from `cpu.is_empty()`: that only becomes non-empty after a
+    /// SUCCESSFUL publish, so on a host where sampling always fails (macOS has
+    /// no /proc/stat, or /proc is masked in a container) the "this is just the
+    /// first sample" excuse would apply forever and the sensor would never
+    /// report anything - including never correcting a stale retained value left
+    /// by an earlier run.
+    cpu_first_sample: bool,
     mem: String,
     battery_level: String,
     battery_charging: String,
@@ -30,6 +38,7 @@ impl PrevSystemValues {
     fn new() -> Self {
         Self {
             cpu: String::new(),
+            cpu_first_sample: true,
             mem: String::new(),
             battery_level: String::new(),
             battery_charging: String::new(),
@@ -193,8 +202,22 @@ impl SystemSensor {
     }
 
     async fn publish_cpu(&self, prev_cpu: &mut CpuTimes, prev: &mut PrevSystemValues) {
-        let cpu = calculate_cpu_usage(prev_cpu);
-        let cpu_str = format!("{cpu:.1}");
+        // Whole percent: dedup compares the FORMATTED string, so 0.1 resolution meant
+        // the first decimal moved every sample and the change-guard never fired,
+        // publishing every tick and flooding the HA recorder.
+        let cpu_str = match calculate_cpu_usage(prev_cpu) {
+            Some(cpu) => format!("{cpu:.0}"),
+            // The very FIRST sample legitimately has no delta yet (the seed and
+            // this call are microseconds apart, inside one clock tick), so staying
+            // quiet avoids a spurious availability hole at startup. Any later
+            // failure is real and must report "unknown" - the shared sentinel
+            // (see the convention on MqttClient::publish_sensor) - rather
+            // than silence, which on macOS (no /proc/stat) left the entity blank
+            // forever.
+            None if std::mem::take(&mut prev.cpu_first_sample) => return,
+            None => crate::mqtt::SENTINEL_UNKNOWN.to_string(),
+        };
+        prev.cpu_first_sample = false;
         if cpu_str != prev.cpu {
             self.state.mqtt.publish_sensor("cpu_usage", &cpu_str).await;
             prev.cpu = cpu_str;
@@ -202,11 +225,11 @@ impl SystemSensor {
     }
 
     async fn publish_memory(&self, prev: &mut PrevSystemValues) {
-        // Memory usage (percentage); unavailable on a read/parse failure rather
+        // Memory usage (percentage); unknown on a read/parse failure rather
         // than a misleading 0% or 100%.
         let mem_str = match get_memory_percent() {
-            Some(m) => format!("{m:.1}"),
-            None => "unavailable".to_string(),
+            Some(m) => format!("{m:.0}"),
+            None => crate::mqtt::SENTINEL_UNKNOWN.to_string(),
         };
         if mem_str != prev.mem {
             self.state
@@ -645,8 +668,13 @@ fn start_battery_monitor(
             if let Some(h) = acdc_notify {
                 let _ = UnregisterPowerSettingNotification(h);
             }
-            let _ = Box::from_raw(event_tx_ptr);
+            // ORDER IS LOAD-BEARING. DestroyWindow dispatches inbound SENT
+            // messages, and wnd_proc dereferences GWLP_USERDATA. Clear the
+            // pointer and destroy the window BEFORE freeing the context, or a
+            // message arriving mid-teardown reads freed memory.
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             let _ = DestroyWindow(hwnd);
+            let _ = Box::from_raw(event_tx_ptr);
         }) {
         Ok(_) => {}
         Err(e) => {
@@ -745,7 +773,11 @@ fn get_cpu_times() -> CpuTimes {
     CpuTimes::default()
 }
 
-fn calculate_cpu_usage(prev: &mut CpuTimes) -> f64 {
+/// `None` when the OS could not be sampled (or on the very first call, which has
+/// no delta yet), so callers can publish `unknown` rather than a confident 0%. Matters most on macOS, where the unix branch
+/// reads a /proc/stat that does not exist and would otherwise report a flat 0
+/// forever. Mirrors what `publish_memory` already does.
+fn calculate_cpu_usage(prev: &mut CpuTimes) -> Option<f64> {
     let curr = get_cpu_times();
 
     let idle_delta = curr.idle.saturating_sub(prev.idle);
@@ -758,19 +790,27 @@ fn calculate_cpu_usage(prev: &mut CpuTimes) -> f64 {
     #[cfg(unix)]
     let total = idle_delta + kernel_delta + user_delta;
 
-    let usage = if total > 0 {
-        #[cfg(windows)]
-        let busy = total - idle_delta;
-        #[cfg(unix)]
-        let busy = kernel_delta + user_delta;
+    if total == 0 {
+        // Either the very first sample (no delta yet) or the OS call failed and
+        // get_cpu_times returned a default. Both are "cannot tell", not 0%.
+        //
+        // Only advance `prev` when the reading is plausible. Storing an all-zero
+        // `curr` from a failed read makes the NEXT sample compute its delta
+        // against zero and publish average-usage-since-boot as a current value.
+        if curr.idle != 0 || curr.kernel != 0 || curr.user != 0 {
+            *prev = curr;
+        }
+        return None;
+    }
 
-        (busy as f64 / total as f64) * 100.0
-    } else {
-        0.0
-    };
+    #[cfg(windows)]
+    let busy = total - idle_delta;
+    #[cfg(unix)]
+    let busy = kernel_delta + user_delta;
 
+    let usage = (busy as f64 / total as f64) * 100.0;
     *prev = curr;
-    usage.clamp(0.0, 100.0)
+    Some(usage.clamp(0.0, 100.0))
 }
 
 // ============================================================================

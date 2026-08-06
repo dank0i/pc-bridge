@@ -31,7 +31,22 @@ jobs:
         with:
           packages: libssl-dev pkg-config libxdo-dev
       - run: cargo fmt --check
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all-features
+
+  # Windows is the PRIMARY target, but the job above only ever compiled the
+  # cfg(unix) half - so Windows-only code was never linted anywhere and could
+  # (and did) accumulate clippy failures and even hard compile errors unnoticed.
+  quality-windows:
+    name: Lint & Test (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all-features
 
   # ============================================
@@ -218,14 +233,19 @@ jobs:
             exit 0
           fi
           sudo apt-get update && sudo apt-get install -y minisign
-          printf '%s' "$MINISIGN_SECRET_KEY" > minisign.key
+          # `run:` executes under `bash -e`, so a minisign failure would abort
+          # BEFORE a trailing `rm` and leave the unencrypted signing key in the
+          # workspace. Trap it so cleanup runs on every exit path.
+          # EXIT alone misses job cancellation/timeout, which sends INT/TERM.
+          trap 'rm -f minisign.key' EXIT INT TERM
+          # umask before the write: chmod afterwards leaves a world-readable window.
+          (umask 077; printf '%s' "$MINISIGN_SECRET_KEY" > minisign.key)
           VERSION="${GITHUB_REF_NAME#v}"
           for asset in pc-bridge-windows.exe pc-bridge-linux; do
             HASH=$(sha256sum "$asset" | awk '{print $1}')
             printf '{"version":"%s","sha256":"%s"}' "$VERSION" "$HASH" > "$asset.manifest"
             minisign -S -s minisign.key -m "$asset.manifest"
           done
-          rm -f minisign.key
 
       - name: Upload assets to release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2

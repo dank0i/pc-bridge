@@ -116,13 +116,48 @@ impl SteamSensor {
             .unwrap_or_default();
 
         if self.library_folders.is_empty() {
-            warn!("No Steam library folders found, steam sensor disabled");
-            // Publish initial "off" state
+            warn!("No Steam library folders found; steam_updating will report unknown");
+            // "unknown", not "off". Having found no library to look at is the
+            // cannot-determine case, and "off" is a confident "no download is
+            // running" from a producer that cannot see any. Same reasoning as
+            // session_linux.rs, which removed its equivalent fallback.
             self.state
                 .mqtt
-                .publish_sensor_retained("steam_updating", "off")
+                .publish_sensor("steam_updating", crate::mqtt::SENTINEL_UNKNOWN)
                 .await;
-            return;
+            // Do NOT return: a finished handle is indistinguishable from a crash
+            // to the supervisor, which respawns, gets another immediate return,
+            // and ping-pongs forever on escalating backoff while bridge_health
+            // reports a climbing restart count for a healthy agent.
+            //
+            // Do NOT park forever either: the old respawn loop was accidentally
+            // providing rediscovery, so Steam installed after the agent started
+            // was picked up within ~5 minutes. Poll for the library appearing.
+            //
+            // Reuses the receiver subscribed above; a fresh subscribe() here
+            // would miss a shutdown sent during the discovery await.
+            let mut retry = tokio::time::interval(std::time::Duration::from_secs(300));
+            retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            retry.tick().await; // consume the immediate first tick
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = shutdown_rx.recv() => return,
+                    _ = retry.tick() => {
+                        self.library_folders =
+                            tokio::task::spawn_blocking(discover_library_folders_blocking)
+                                .await
+                                .unwrap_or_default();
+                        if !self.library_folders.is_empty() {
+                            info!(
+                                "Steam library appeared ({} folder(s)) - resuming",
+                                self.library_folders.len()
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
         info!(
@@ -440,7 +475,7 @@ impl SteamSensor {
 
         self.state
             .mqtt
-            .publish_sensor_retained("steam_updating", state_str)
+            .publish_sensor("steam_updating", state_str)
             .await;
 
         // Publish attributes with game names

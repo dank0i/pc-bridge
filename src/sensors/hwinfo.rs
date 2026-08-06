@@ -18,202 +18,7 @@
 // dead-code lint on those targets without masking issues on Windows.
 #![cfg_attr(not(windows), allow(dead_code))]
 
-use crate::hwinfo::{Reading, Snapshot};
-
-/// Maximum number of sensor names and labels to include in the diagnostic
-/// payload. Bounded so a machine with hundreds of sensors doesn't produce a
-/// 100 KB MQTT message every 5 seconds.
-const DIAGNOSTIC_SAMPLE_CAP: usize = 32;
-
-/// The result of a single snapshot attempt, as exposed to the diagnostic
-/// builder. `Ok` carries a borrowed `Snapshot`; `Err` carries the human
-/// formatted error string.
-pub enum DiagnosticInput<'a> {
-    Ok(&'a Snapshot),
-    Err(&'a str),
-    /// No client open yet (HWiNFO not running, or never successfully opened).
-    NotOpen,
-}
-
-/// Diagnostic payload built from a snapshot attempt + match results.
-///
-/// `state` is the short summary that goes into the MQTT state topic.
-/// `attributes` is the JSON object delivered to HA via `json_attributes_topic`.
-pub struct DiagnosticPayload {
-    pub state: String,
-    pub attributes: serde_json::Value,
-}
-
-/// Build the diagnostic payload published to
-/// `homeassistant/sensor/<device>/hwinfo_diagnostic/state` (and matching
-/// attributes topic). Pure function - exercised by unit tests below.
-///
-/// `matched_keys`/`unmatched_keys` describe how the `MATCH_RULES` table mapped
-/// against the snapshot's readings (or the last-known-good snapshot when this
-/// call is for an error/not-open state - in which case both should be empty).
-pub fn build_diagnostic_payload(
-    input: &DiagnosticInput<'_>,
-    view_size_bytes: usize,
-    matched_keys: &[&str],
-    unmatched_keys: &[&str],
-) -> DiagnosticPayload {
-    let total_rules = MATCH_RULES.len();
-    match input {
-        DiagnosticInput::Ok(snap) => {
-            let sensor_names = sample_sensor_names(&snap.readings, DIAGNOSTIC_SAMPLE_CAP);
-            let labels = sample_labels(&snap.readings, DIAGNOSTIC_SAMPLE_CAP);
-            let sensors_count = unique_sensor_count(&snap.readings);
-            let readings_count = snap.readings.len();
-            let unmatched_candidates = build_unmatched_candidates(&snap.readings, unmatched_keys);
-            let attributes = serde_json::json!({
-                "snapshot_ok": true,
-                "error": serde_json::Value::Null,
-                "sensors_count": sensors_count,
-                "readings_count": readings_count,
-                "view_size_bytes": view_size_bytes,
-                "first_sensor_names": sensor_names,
-                "sample_labels": labels,
-                "matched_count": matched_keys.len(),
-                "unmatched_keys": unmatched_keys,
-                "unmatched_candidates": unmatched_candidates,
-            });
-            let state = format!("ok: {}/{} matched", matched_keys.len(), total_rules);
-            DiagnosticPayload { state, attributes }
-        }
-        DiagnosticInput::Err(msg) => {
-            let attributes = serde_json::json!({
-                "snapshot_ok": false,
-                "error": msg,
-                "sensors_count": 0,
-                "readings_count": 0,
-                "view_size_bytes": view_size_bytes,
-                "first_sensor_names": Vec::<String>::new(),
-                "sample_labels": Vec::<String>::new(),
-                "matched_count": 0,
-                "unmatched_keys": all_rule_keys(),
-                "unmatched_candidates": serde_json::Value::Object(serde_json::Map::new()),
-            });
-            // Truncate the error to keep state value under HA's 255-char cap.
-            let trimmed: String = msg.chars().take(200).collect();
-            let state = format!("err: {}", trimmed);
-            DiagnosticPayload { state, attributes }
-        }
-        DiagnosticInput::NotOpen => {
-            let attributes = serde_json::json!({
-                "snapshot_ok": false,
-                "error": "hwinfo shared memory not open",
-                "sensors_count": 0,
-                "readings_count": 0,
-                "view_size_bytes": view_size_bytes,
-                "first_sensor_names": Vec::<String>::new(),
-                "sample_labels": Vec::<String>::new(),
-                "matched_count": 0,
-                "unmatched_keys": all_rule_keys(),
-                "unmatched_candidates": serde_json::Value::Object(serde_json::Map::new()),
-            });
-            DiagnosticPayload {
-                state: "err: shared memory not open".to_string(),
-                attributes,
-            }
-        }
-    }
-}
-
-/// First `cap` distinct sensor names encountered while scanning readings.
-fn sample_sensor_names(readings: &[Reading], cap: usize) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for r in readings {
-        if out.iter().any(|n| n == &r.sensor_name) {
-            continue;
-        }
-        out.push(r.sensor_name.clone());
-        if out.len() >= cap {
-            break;
-        }
-    }
-    out
-}
-
-/// First `cap` labels (in reading order, not deduplicated - labels reveal what
-/// HWiNFO is reporting, and duplicates are informative).
-fn sample_labels(readings: &[Reading], cap: usize) -> Vec<String> {
-    readings.iter().take(cap).map(|r| r.label.clone()).collect()
-}
-
-/// Count of distinct sensor names in the snapshot.
-fn unique_sensor_count(readings: &[Reading]) -> usize {
-    let mut seen: Vec<&str> = Vec::new();
-    for r in readings {
-        if !seen.iter().any(|n| *n == r.sensor_name) {
-            seen.push(&r.sensor_name);
-        }
-    }
-    seen.len()
-}
-
-/// All keys from `MATCH_RULES`, in declaration order.
-fn all_rule_keys() -> Vec<&'static str> {
-    MATCH_RULES.iter().map(|r| r.key).collect()
-}
-
-/// Maximum candidate readings to surface per unmatched key. Bounded to keep
-/// the diagnostic MQTT payload from ballooning if every sensor is "close".
-const UNMATCHED_CANDIDATES_PER_KEY: usize = 24;
-
-/// For each unmatched key, surface candidate readings the label-match step
-/// rejected, so the user can see *what HWiNFO is actually publishing* and tune
-/// the rule (or their HWiNFO config).
-///
-/// A reading is a candidate when it passes the rule's `sensor_substrings`
-/// filter AND (if the rule has a `unit_suffix`) its unit matches. The unit
-/// gate matters for rules with an empty sensor filter - e.g. `vrm_temp` would
-/// otherwise flood the list with the first N unrelated readings (memory, etc.)
-/// instead of the `°C` readings that actually contain the VRM temperature.
-///
-/// The returned JSON shape: `{key: [{sensor, label, unit, value}, ...], ...}`
-fn build_unmatched_candidates(readings: &[Reading], unmatched_keys: &[&str]) -> serde_json::Value {
-    let mut out = serde_json::Map::new();
-    for &key in unmatched_keys {
-        let Some(rule) = MATCH_RULES.iter().find(|r| r.key == key) else {
-            continue;
-        };
-        let mut cands: Vec<serde_json::Value> = Vec::new();
-        for r in readings {
-            if cands.len() >= UNMATCHED_CANDIDATES_PER_KEY {
-                break;
-            }
-            // Sensor filter (empty filter = no constraint).
-            let sensor_ok = rule.sensor_substrings.is_empty()
-                || rule
-                    .sensor_substrings
-                    .iter()
-                    .any(|s| contains_icase(&r.sensor_name, s));
-            if !sensor_ok {
-                continue;
-            }
-            // Unit gate: only narrow when the rule constrains by unit. Keeps
-            // empty-sensor-filter rules from drowning in unrelated readings.
-            if let Some(suffix) = rule.unit_suffix
-                && !r.unit.ends_with(suffix)
-            {
-                continue;
-            }
-            cands.push(serde_json::json!({
-                "sensor": r.sensor_name,
-                "label": r.label,
-                "unit": r.unit,
-                "value": r.value,
-            }));
-        }
-        out.insert(key.to_string(), serde_json::Value::Array(cands));
-    }
-    serde_json::Value::Object(out)
-}
-
-/// MQTT discovery key for the diagnostic sensor. Kept here so both the
-/// publisher (in the `win` module) and the discovery registration in
-/// `crate::mqtt` reference the same identifier.
-pub const DIAGNOSTIC_KEY: &str = "hwinfo_diagnostic";
+use crate::hwinfo::Reading;
 
 /// Per-key thresholds for change-based publishing.
 ///
@@ -265,7 +70,35 @@ pub struct MatchRule {
     pub label_excludes: &'static [&'static str],
     /// If set, the reading's szUnit must end with this string. Used to pick the
     /// percentage variant of `GPU Memory Usage` over the MB variant.
-    pub unit_suffix: Option<&'static str>,
+    /// Accepted unit suffixes, compared on their ASCII tail. Empty means no
+    /// constraint. A slice rather than a single value so a rule can accept more
+    /// than one legitimate unit (temperatures are °C or °F depending on how the
+    /// user configured HWiNFO).
+    pub unit_suffix: &'static [&'static str],
+}
+
+/// True when `haystack` ends with `needle`, comparing only ASCII characters on
+/// both sides.
+///
+/// Lets a unit compare equal whether its degree sign survived decoding or became
+/// a replacement char (HWiNFO's szUnit is ANSI CP-1252, but it is read with
+/// from_utf8_lossy). Allocation-free: this runs per candidate reading per rule,
+/// and `match_reading` documents itself as zero-alloc on the hot path.
+fn ascii_tail_ends_with(haystack: &str, needle: &str) -> bool {
+    // Compare from the right, skipping non-ASCII on both sides. No allocation:
+    // this runs per candidate reading per unit-pinned rule, and `match_reading`
+    // documents itself as zero-alloc on the hot path.
+    let mut h = haystack.chars().rev().filter(char::is_ascii);
+    let mut n = needle.chars().rev().filter(char::is_ascii);
+    let mut matched_any = false;
+    loop {
+        match (n.next(), h.next()) {
+            (None, _) => return matched_any,
+            (Some(_), None) => return false,
+            (Some(nc), Some(hc)) if nc == hc => matched_any = true,
+            (Some(_), Some(_)) => return false,
+        }
+    }
 }
 
 /// Hardcoded sensor → HWiNFO match table.
@@ -275,28 +108,37 @@ pub const MATCH_RULES: &[MatchRule] = &[
         sensor_substrings: &["9800x3d", "ryzen"],
         label_substrings: &["CPU (Tctl/Tdie)", "CPU Package"],
         label_excludes: &[],
-        unit_suffix: None,
+        // MUST be pinned: "CPU Package" is also a substring of "CPU Package
+        // Power" (watts), and the entity is declared device_class temperature.
+        // "C" alone would make the rule vanish for users who configured HWiNFO
+        // in Fahrenheit, so accept either degree unit.
+        unit_suffix: &["C", "F"],
     },
     MatchRule {
         key: "cpu_package_power",
         sensor_substrings: &["9800x3d", "ryzen"],
         label_substrings: &["CPU Package Power", "CPU PPT"],
         label_excludes: &[],
-        unit_suffix: None,
+        unit_suffix: &[],
     },
     MatchRule {
         key: "cpu_soc_power",
         sensor_substrings: &["9800x3d", "ryzen"],
         label_substrings: &["CPU SoC Power", "SoC Power"],
         label_excludes: &[],
-        unit_suffix: None,
+        unit_suffix: &[],
     },
     MatchRule {
         key: "cpu_effective_clock",
         sensor_substrings: &["9800x3d", "ryzen"],
-        label_substrings: &["Core Effective Clock (avg)", "CPU Clock"],
+        // Verified against HWiNFO's live shared memory on a Ryzen 9800X3D: the
+        // aggregate reading is literally "Average Effective Clock". The old
+        // needles ("Core Effective Clock (avg)", "CPU Clock") match nothing HWiNFO
+        // emits - the per-core readings are "Core N T0/T1 Effective Clock", and
+        // matching one arbitrary core would be misleading, so target the average.
+        label_substrings: &["Average Effective Clock"],
         label_excludes: &[],
-        unit_suffix: None,
+        unit_suffix: &["MHz"],
     },
     MatchRule {
         // CPU Usage can come from any sensor (System / OS / per-CPU)
@@ -304,77 +146,81 @@ pub const MATCH_RULES: &[MatchRule] = &[
         sensor_substrings: &[],
         label_substrings: &["Total CPU Usage"],
         label_excludes: &[],
-        unit_suffix: None,
+        unit_suffix: &[],
     },
     MatchRule {
         key: "gpu_temp",
         sensor_substrings: &["geforce", "rtx", "radeon", "gpu"],
         label_substrings: &["GPU Temperature"],
         label_excludes: &["Hot Spot", "Memory"],
-        unit_suffix: None,
+        unit_suffix: &[],
     },
     MatchRule {
         key: "gpu_hotspot_temp",
         sensor_substrings: &["geforce", "rtx", "radeon", "gpu"],
         label_substrings: &["GPU Hot Spot Temperature"],
         label_excludes: &[],
-        unit_suffix: None,
+        unit_suffix: &[],
     },
     MatchRule {
         key: "gpu_memory_temp",
         sensor_substrings: &["geforce", "rtx", "radeon", "gpu"],
         label_substrings: &["GPU Memory Junction Temperature", "GPU Memory Temperature"],
         label_excludes: &[],
-        unit_suffix: None,
+        unit_suffix: &[],
     },
     MatchRule {
         key: "gpu_power",
         sensor_substrings: &["geforce", "rtx", "radeon", "gpu"],
         label_substrings: &["GPU Power (Total)", "GPU Total Board Power", "GPU Power"],
         label_excludes: &[],
-        unit_suffix: None,
+        // Pinned: the bare "GPU Power" needle is a substring of readings in other
+        // units (percent-of-limit, for one), and the entity is declared watts.
+        unit_suffix: &["W"],
     },
     MatchRule {
         key: "gpu_core_clock",
         sensor_substrings: &["geforce", "rtx", "radeon", "gpu"],
         label_substrings: &["GPU Clock"],
         label_excludes: &["Memory"],
-        unit_suffix: None,
+        unit_suffix: &[],
     },
     MatchRule {
         key: "gpu_memory_clock",
         sensor_substrings: &["geforce", "rtx", "radeon", "gpu"],
         label_substrings: &["GPU Memory Clock"],
         label_excludes: &[],
-        unit_suffix: None,
+        unit_suffix: &[],
     },
     MatchRule {
         key: "gpu_core_load",
         sensor_substrings: &["geforce", "rtx", "radeon", "gpu"],
         label_substrings: &["GPU Core Load", "GPU Utilization"],
         label_excludes: &[],
-        unit_suffix: None,
+        unit_suffix: &[],
     },
     MatchRule {
         key: "gpu_fan_rpm",
         sensor_substrings: &["geforce", "rtx", "radeon", "gpu"],
         label_substrings: &["GPU Fan"],
         label_excludes: &[],
-        unit_suffix: None,
+        // HWiNFO emits both an RPM reading and a "%" duty-cycle sibling under
+        // "GPU Fan"; without this the % could land in an RPM entity.
+        unit_suffix: &["RPM"],
     },
     MatchRule {
         key: "gpu_vram_usage_pct",
         sensor_substrings: &["geforce", "rtx", "radeon", "gpu"],
         label_substrings: &["GPU Memory Usage"],
         label_excludes: &[],
-        unit_suffix: Some("%"),
+        unit_suffix: &["%"],
     },
     MatchRule {
         key: "framerate",
         sensor_substrings: &["rivatuner", "rtss", "framerate", "presentmon"],
         label_substrings: &["Framerate"],
         label_excludes: &[],
-        unit_suffix: None,
+        unit_suffix: &[],
     },
     // Motherboard SuperIO sensors. Sensor name varies wildly across boards
     // (ITE IT8689E, Nuvoton NCT6798D, etc.), so these rules use empty sensor
@@ -386,35 +232,35 @@ pub const MATCH_RULES: &[MatchRule] = &[
         sensor_substrings: &[],
         label_substrings: &["CPU"],
         label_excludes: &["CPU_OPT"],
-        unit_suffix: Some("RPM"),
+        unit_suffix: &["RPM"],
     },
     MatchRule {
         key: "case_fan_cpu_opt",
         sensor_substrings: &[],
         label_substrings: &["CPU_OPT"],
         label_excludes: &[],
-        unit_suffix: Some("RPM"),
+        unit_suffix: &["RPM"],
     },
     MatchRule {
         key: "case_fan_system_1",
         sensor_substrings: &[],
         label_substrings: &["System 1"],
         label_excludes: &[],
-        unit_suffix: Some("RPM"),
+        unit_suffix: &["RPM"],
     },
     MatchRule {
         key: "case_fan_system_2",
         sensor_substrings: &[],
         label_substrings: &["System 2"],
         label_excludes: &[],
-        unit_suffix: Some("RPM"),
+        unit_suffix: &["RPM"],
     },
     MatchRule {
         key: "vrm_temp",
         sensor_substrings: &[],
         label_substrings: &["VRM MOS", "VRM Temperature", "VRM Temp"],
         label_excludes: &[],
-        unit_suffix: Some("°C"),
+        unit_suffix: &["C", "F"],
     },
 ];
 
@@ -437,6 +283,104 @@ fn contains_icase(haystack: &str, needle: &str) -> bool {
     h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
 }
 
+/// The rule predicate, over plain string parts.
+///
+/// ONE implementation shared by the borrowing hot path
+/// ([`rule_label_index`]) and the owned-slice reference version
+/// ([`match_reading`], kept as the test oracle). Duplicating it is exactly the
+/// single-source-of-truth failure this codebase has been bitten by before.
+///
+/// Returns which `label_substrings` index matched, so callers can preserve the
+/// "lower index wins, then first reading wins" priority.
+fn rule_label_index_parts(
+    sensor_name: &str,
+    label: &str,
+    unit: &str,
+    sensor_substrings: &[&str],
+    label_substrings: &[&str],
+    label_excludes: &[&str],
+    unit_suffix: &[&str],
+) -> Option<usize> {
+    if label_excludes.iter().any(|e| contains_icase(label, e)) {
+        return None;
+    }
+    if !sensor_substrings.is_empty()
+        && !sensor_substrings
+            .iter()
+            .any(|sub| contains_icase(sensor_name, sub))
+    {
+        return None;
+    }
+    // Unit suffix compared on the ASCII tail only: HWiNFO's szUnit is ANSI
+    // (CP-1252), so a degree sign arrives as U+FFFD after from_utf8_lossy and a
+    // byte-exact ends_with("\u{00B0}C") could never match. That silently killed
+    // the vrm_temp rule on every machine.
+    if !unit_suffix.is_empty()
+        && !unit_suffix
+            .iter()
+            .any(|sfx| ascii_tail_ends_with(unit, sfx))
+    {
+        return None;
+    }
+    label_substrings
+        .iter()
+        .position(|sub| contains_icase(label, sub))
+}
+
+/// Which `label_substrings` index this borrowed reading matches for `rule`, if any.
+///
+/// Same predicate as [`match_reading`], expressed for a single borrowed reading so
+/// the whole rule set can be evaluated in ONE pass over the mapped view without
+/// materializing ~363 owned `Reading`s. The returned index preserves
+/// `match_reading`'s priority rule: a lower label-substring index always wins,
+/// and within one index the first reading encountered wins.
+fn rule_label_index(r: &crate::hwinfo::ReadingRef<'_>, rule: &MatchRule) -> Option<usize> {
+    rule_label_index_parts(
+        r.sensor_name,
+        &r.label,
+        &r.unit,
+        rule.sensor_substrings,
+        rule.label_substrings,
+        rule.label_excludes,
+        rule.unit_suffix,
+    )
+}
+
+/// Matched readings paired with their rule key, plus the keys that matched nothing.
+type MatchOutcome = (Vec<(&'static str, Reading)>, Vec<&'static str>);
+
+/// Evaluate every `MATCH_RULES` entry in a single borrowing pass.
+///
+/// Returns the matched readings (owned, ~20 of them) and the keys that missed.
+/// Equivalent to calling [`match_reading`] once per rule over an owned snapshot,
+/// but without allocating the ~343 readings nothing ever reads.
+fn match_all_borrowed(view: &[u8]) -> anyhow::Result<MatchOutcome> {
+    let mut best: Vec<Option<(usize, Reading)>> = (0..MATCH_RULES.len()).map(|_| None).collect();
+
+    crate::hwinfo::for_each_reading(view, |r| {
+        for (i, rule) in MATCH_RULES.iter().enumerate() {
+            let Some(li) = rule_label_index(r, rule) else {
+                continue;
+            };
+            // Keep only a STRICTLY better (lower) label index, so the first
+            // reading at the winning index wins, exactly as match_reading does.
+            if best[i].as_ref().is_none_or(|(prev, _)| li < *prev) {
+                best[i] = Some((li, r.to_owned_reading()));
+            }
+        }
+    })?;
+
+    let mut hits = Vec::with_capacity(MATCH_RULES.len());
+    let mut misses = Vec::new();
+    for (rule, slot) in MATCH_RULES.iter().zip(best) {
+        match slot {
+            Some((_, reading)) => hits.push((rule.key, reading)),
+            None => misses.push(rule.key),
+        }
+    }
+    Ok((hits, misses))
+}
+
 /// Find a `Reading` matching the given criteria. Substring matches are
 /// case-insensitive (ASCII-fold). The first label-substring match (in declared
 /// order) wins.
@@ -444,71 +388,39 @@ fn contains_icase(haystack: &str, needle: &str) -> bool {
 /// Zero-alloc on the hot path: needles and haystacks are compared via byte
 /// windows; no temporary `String`s are produced.
 ///
-/// * `sensor_substrings` empty → match any sensor name (used for `cpu_total_usage`)
+/// * `sensor_substrings` empty means match any sensor name (used for `cpu_total_usage`)
 /// * Substring priority is "first listed wins" for both sensor and label.
+///
+/// Kept as the TEST ORACLE for the borrowing hot path. Both it and
+/// `rule_label_index` delegate to `rule_label_index_parts`, so a regression test
+/// written against this also pins `match_all_borrowed`.
+#[cfg(test)]
 pub fn match_reading<'a>(
     readings: &'a [Reading],
     sensor_substrings: &[&str],
     label_substrings: &[&str],
     label_excludes: &[&str],
-    unit_suffix: Option<&str>,
+    unit_suffix: &[&str],
 ) -> Option<&'a Reading> {
-    for label_sub in label_substrings {
-        for reading in readings {
-            if !contains_icase(&reading.label, label_sub) {
-                continue;
-            }
-
-            // Exclude list
-            if label_excludes
-                .iter()
-                .any(|e| contains_icase(&reading.label, e))
-            {
-                continue;
-            }
-
-            // Sensor filter
-            if !sensor_substrings.is_empty()
-                && !sensor_substrings
-                    .iter()
-                    .any(|s| contains_icase(&reading.sensor_name, s))
-            {
-                continue;
-            }
-
-            // Unit suffix filter (exact, ASCII end-with - units include "°C"
-            // which is non-ASCII but `str::ends_with` is byte-correct on the
-            // exact `Some("%")` cases we use today).
-            if let Some(suffix) = unit_suffix
-                && !reading.unit.ends_with(suffix)
-            {
-                continue;
-            }
-
-            return Some(reading);
+    // Lowest matching label index wins; within one index, the first reading wins.
+    let mut best: Option<(usize, &Reading)> = None;
+    for reading in readings {
+        let Some(li) = rule_label_index_parts(
+            &reading.sensor_name,
+            &reading.label,
+            &reading.unit,
+            sensor_substrings,
+            label_substrings,
+            label_excludes,
+            unit_suffix,
+        ) else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(prev, _)| li < *prev) {
+            best = Some((li, reading));
         }
     }
-    None
-}
-
-/// Decide what to flush for the diagnostic sensor given the freshly-built payload
-/// vs. the last-published one: returns `(publish_state, publish_attrs)`.
-///
-/// The state topic republishes on change OR when the liveness heartbeat is due;
-/// the retained attributes topic republishes ONLY on change (no heartbeat) so it
-/// never churns multi-KB retained payloads at QoS 1 in steady state. Pure so it
-/// can be unit-tested off Windows.
-pub(super) fn diag_flush_plan(
-    new_state: &str,
-    new_attrs: &str,
-    last_state: &str,
-    last_attrs: &str,
-    secs_since_state_flush: u64,
-    heartbeat_secs: u64,
-) -> (bool, bool) {
-    let publish_state = new_state != last_state || secs_since_state_flush >= heartbeat_secs;
-    let publish_attrs = new_attrs != last_attrs;
-    (publish_state, publish_attrs)
+    best.map(|(_, r)| r)
 }
 
 // ---------------------------------------------------------------------------
@@ -520,12 +432,9 @@ pub use win::HwInfoSensor;
 
 #[cfg(windows)]
 mod win {
-    use super::{
-        DIAGNOSTIC_KEY, DiagnosticInput, DiagnosticPayload, MATCH_RULES, build_diagnostic_payload,
-        decimals_for, match_reading, threshold_for,
-    };
+    use super::{MATCH_RULES, decimals_for, match_all_borrowed, threshold_for};
     use crate::AppState;
-    use crate::hwinfo::{HwInfoClient, Reading, Snapshot};
+    use crate::hwinfo::{HwInfoClient, Reading};
     use log::{debug, info, warn};
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -533,14 +442,6 @@ mod win {
     use tokio::time::{Duration, MissedTickBehavior, interval};
 
     const HEARTBEAT_SECS: u64 = 30;
-    /// Diagnostic rebuild/compare interval. We rebuild the payload this often, but
-    /// only flush to MQTT when the serialized value actually changed (plus the
-    /// liveness heartbeat below), so a steady state or an endless "NotOpen" doesn't
-    /// churn multi-KB retained attributes at QoS 1 every 5s.
-    const DIAGNOSTIC_INTERVAL_SECS: u64 = 5;
-    /// Republish the diagnostic STATE (not the retained attributes) at least this
-    /// often even when unchanged, so HA can see the sensor is alive.
-    const DIAGNOSTIC_HEARTBEAT_SECS: u64 = 60;
     /// If HWiNFO's pollTime stops advancing for this long, treat it as gone (the
     /// mapped section can outlive the app). HWiNFO's own poll is usually ~2s.
     const HWINFO_STALE_SECS: u64 = 15;
@@ -555,36 +456,20 @@ mod win {
         state: Arc<AppState>,
     }
 
-    /// Change-gating state for the diagnostic publish. Kept in one struct so the
-    /// publish helper stays under a sane argument count.
-    struct DiagPublishState {
-        /// When the payload was last rebuilt/compared (gates the 5s cadence).
-        last_at: Option<Instant>,
-        /// Last state string actually published (empty = force first publish).
-        last_state: String,
-        /// Last serialized attributes actually published (empty = force first).
-        last_attrs: String,
-        /// When the state topic was last flushed (drives the liveness heartbeat).
-        last_state_flush: Instant,
-    }
-
-    impl DiagPublishState {
-        fn new() -> Self {
-            Self {
-                last_at: None,
-                last_state: String::new(),
-                last_attrs: String::new(),
-                last_state_flush: Instant::now(),
-            }
-        }
-    }
-
     impl HwInfoSensor {
         pub fn new(state: Arc<AppState>) -> Self {
             Self { state }
         }
 
-        pub async fn run(self) {
+        // Long dispatch/event-loop body: splitting it would scatter tightly-coupled
+        // state across helpers for no readability gain. Reviewed, allowed deliberately.
+        #[allow(clippy::cognitive_complexity)]
+        /// Takes the per-task shutdown SENDER (not the global one) so the
+        /// supervisor can stop this sensor when its flag is turned off at
+        /// runtime. Previously this read the flag once at entry and was absent
+        /// from TASKS entirely, so disabling hwinfo_sensor cleared the HA
+        /// entities while this loop kept polling and publishing to them.
+        pub async fn run(self, shutdown: tokio::sync::broadcast::Sender<()>) {
             let config = self.state.config.read().await;
             if !config.features.hwinfo_sensor {
                 return;
@@ -595,7 +480,7 @@ mod win {
             let mut tick = interval(Duration::from_millis(CLOSED_POLL_MS));
             tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
             let mut fast_poll = false;
-            let mut shutdown_rx = self.state.shutdown_tx.subscribe();
+            let mut shutdown_rx = shutdown.subscribe();
             let mut reconnect_rx = self.state.mqtt.subscribe_reconnect();
 
             let mut client: Option<HwInfoClient> = None;
@@ -617,19 +502,8 @@ mod win {
             let mut last_published_attrs: HashMap<&'static str, (f64, f64, f64, String)> =
                 HashMap::new();
 
-            // Diagnostic state. We capture the latest snapshot outcome on
-            // every tick that actually parsed something (or hit an error /
-            // saw the client closed), then flush it to MQTT at most every
-            // DIAGNOSTIC_INTERVAL_SECS to keep broker traffic boring.
-            let mut latest_snapshot: Option<Snapshot> = None;
-            let mut latest_view_size: usize = 0;
-            let mut latest_error: Option<String> = None;
-            let mut latest_matched: Vec<&'static str> = Vec::new();
-            let mut latest_unmatched: Vec<&'static str> = Vec::new();
-            let mut diag = DiagPublishState::new();
-
             info!(
-                "HWiNFO sensor started (lazy poll: 500ms open / 10s closed, {} mapped sensors)",
+                "HWiNFO sensor started (lazy poll: 10s closed / 500ms once open, {} mapped sensors)",
                 MATCH_RULES.len()
             );
 
@@ -650,18 +524,20 @@ mod win {
                         // Lagged receiver the same as a reconnect (a coincident
                         // lag must not silently drop the forced republish); only a
                         // Closed channel is ignored here.
-                        if matches!(r, Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) {
-                            last_published.clear();
-                            last_published_attrs.clear();
-                            last_poll_time = None;
-                            // Force a full diagnostic republish: the broker may have
-                            // dropped the retained state/attributes on reconnect.
-                            diag.last_at = None;
-                            diag.last_state.clear();
-                            diag.last_attrs.clear();
-                            let online = client.is_some();
-                            self.state.mqtt.publish_hwinfo_availability(online).await;
+                        if !matches!(r, Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) {
+                            // Closed: `biased` re-polls this arm first every
+                            // iteration and it is instantly Ready(Err(Closed)),
+                            // so falling through spins at 100% CPU and the tick
+                            // arm never runs again. Every other sensor exits
+                            // here; this was the one that did not.
+                            debug!("Reconnect channel closed; stopping hwinfo sensor");
+                            break;
                         }
+                        last_published.clear();
+                        last_published_attrs.clear();
+                        last_poll_time = None;
+                        let online = client.is_some();
+                        self.state.mqtt.publish_hwinfo_availability(online).await;
                     }
                     _ = tick.tick() => {
                         // Reconcile poll cadence to the client state: 500ms while
@@ -684,22 +560,8 @@ mod win {
                                 stale_offline = false;
                                 self.state.mqtt.publish_hwinfo_availability(true).await;
                             } else {
-                                // Still not open - publish a "not open" diagnostic
+                                // Still not open - skip this tick
                                 // so HA can show the reason.
-                                latest_snapshot = None;
-                                latest_view_size = 0;
-                                latest_error = None;
-                                latest_matched.clear();
-                                latest_unmatched = MATCH_RULES.iter().map(|r| r.key).collect();
-                                self
-                                    .maybe_publish_diagnostic(
-                                        DiagnosticInput::NotOpen,
-                                        latest_view_size,
-                                        &latest_matched,
-                                        &latest_unmatched,
-                                        &mut diag,
-                                    )
-                                    .await;
                                 continue;
                             }
                         }
@@ -711,20 +573,6 @@ mod win {
                             client = None;
                             last_poll_time = None;
                             self.state.mqtt.publish_hwinfo_availability(false).await;
-                            latest_snapshot = None;
-                            latest_view_size = 0;
-                            latest_error = Some("HWiNFO view became invalid".to_string());
-                            latest_matched.clear();
-                            latest_unmatched = MATCH_RULES.iter().map(|r| r.key).collect();
-                            self
-                                .maybe_publish_diagnostic(
-                                    DiagnosticInput::Err("HWiNFO view became invalid"),
-                                    0,
-                                    &latest_matched,
-                                    &latest_unmatched,
-                                    &mut diag,
-                                )
-                                .await;
                             continue;
                         };
 
@@ -758,31 +606,18 @@ mod win {
                             // the blocking task keeps the runtime thread free. The
                             // closure returns the ~20 matched readings alongside the
                             // snapshot so the async side only publishes (no re-scan);
-                            // the snapshot still comes back for the diagnostic below.
-                            let (taken, snap, matched) = match tokio::task::spawn_blocking(move || {
-                                let r = taken.snapshot();
-                                let matched = r.as_ref().ok().map(|s| {
-                                    let mut hits: Vec<(&'static str, Reading)> = Vec::new();
-                                    let mut misses: Vec<&'static str> = Vec::new();
-                                    for rule in MATCH_RULES {
-                                        match match_reading(
-                                            &s.readings,
-                                            rule.sensor_substrings,
-                                            rule.label_substrings,
-                                            rule.label_excludes,
-                                            rule.unit_suffix,
-                                        ) {
-                                            Some(reading) => hits.push((rule.key, reading.clone())),
-                                            None => misses.push(rule.key),
-                                        }
-                                    }
-                                    (hits, misses)
-                                });
-                                (taken, r, matched)
+                            // the snapshot is discarded; only the matched readings are used.
+                            let (taken, matched) = match tokio::task::spawn_blocking(move || {
+                                // Single borrowing pass: evaluates every rule while
+                                // walking the mapped view, materializing only the
+                                // ~20 matched readings instead of all ~363. See
+                                // hwinfo::ReadingRef.
+                                let r = taken.with_view(match_all_borrowed);
+                                (taken, r)
                             })
                             .await
                             {
-                                Ok(triple) => triple,
+                                Ok(pair) => pair,
                                 Err(_) => {
                                     // The parse task panicked (e.g. the mapping went
                                     // invalid) and the client was dropped in the
@@ -796,18 +631,13 @@ mod win {
                                 }
                             };
                             client = Some(taken);
-                            let c = client.as_ref().expect("client just restored");
-                            match snap {
-                                Ok(s) => {
+                            match matched {
+                                Ok((hits, misses)) => {
                                     last_poll_time = Some(pt);
-                                    latest_view_size = c.view_size_bytes();
-                                    latest_error = None;
 
                                     let now = Instant::now();
                                     // Matching already ran in the blocking task; here
                                     // we only publish the (few) matched readings.
-                                    let (hits, misses) =
-                                        matched.expect("matched is Some when snapshot is Ok");
                                     let mut matched: Vec<&'static str> =
                                         Vec::with_capacity(hits.len());
                                     for &(key, ref reading) in &hits {
@@ -828,89 +658,16 @@ mod win {
                                         debug!("HWiNFO: no match for sensor key '{}'", key);
                                     }
 
-                                    latest_matched = matched;
-                                    latest_unmatched = misses;
-                                    latest_snapshot = Some(s);
                                 }
                                 Err(e) => {
                                     let msg = format!("{:#}", e);
                                     warn!("HWiNFO snapshot parse failed: {}", msg);
-                                    latest_view_size = c.view_size_bytes();
-                                    latest_error = Some(msg);
-                                    latest_snapshot = None;
-                                    latest_matched.clear();
-                                    latest_unmatched =
-                                        MATCH_RULES.iter().map(|r| r.key).collect();
                                 }
                             }
                         }
 
-                        // Publish diagnostic at most every DIAGNOSTIC_INTERVAL_SECS.
-                        let input = match (latest_snapshot.as_ref(), latest_error.as_deref()) {
-                            (Some(s), _) => DiagnosticInput::Ok(s),
-                            (None, Some(msg)) => DiagnosticInput::Err(msg),
-                            (None, None) => DiagnosticInput::NotOpen,
-                        };
-                        self
-                            .maybe_publish_diagnostic(
-                                input,
-                                latest_view_size,
-                                &latest_matched,
-                                &latest_unmatched,
-                                &mut diag,
-                            )
-                            .await;
                     }
                 }
-            }
-        }
-
-        /// Rebuild the diagnostic payload at most every `DIAGNOSTIC_INTERVAL_SECS`
-        /// and flush to MQTT only when it changed: the state topic republishes on
-        /// change OR every `DIAGNOSTIC_HEARTBEAT_SECS` for liveness; the retained
-        /// attributes topic republishes only on change (no heartbeat), to avoid
-        /// multi-KB retained churn while gaming or an endless "NotOpen" republish.
-        async fn maybe_publish_diagnostic(
-            &self,
-            input: DiagnosticInput<'_>,
-            view_size_bytes: usize,
-            matched: &[&str],
-            unmatched: &[&str],
-            diag: &mut DiagPublishState,
-        ) {
-            let now = Instant::now();
-            let due = match diag.last_at {
-                None => true,
-                Some(when) => now.duration_since(when).as_secs() >= DIAGNOSTIC_INTERVAL_SECS,
-            };
-            if !due {
-                return;
-            }
-            diag.last_at = Some(now);
-
-            let DiagnosticPayload { state, attributes } =
-                build_diagnostic_payload(&input, view_size_bytes, matched, unmatched);
-            let attrs_str = attributes.to_string();
-
-            let (publish_state, publish_attrs) = super::diag_flush_plan(
-                &state,
-                &attrs_str,
-                &diag.last_state,
-                &diag.last_attrs,
-                now.duration_since(diag.last_state_flush).as_secs(),
-                DIAGNOSTIC_HEARTBEAT_SECS,
-            );
-            if publish_state {
-                self.state.mqtt.publish_sensor(DIAGNOSTIC_KEY, &state).await;
-                diag.last_state = state;
-                diag.last_state_flush = now;
-            }
-            if publish_attrs {
-                self.state
-                    .mqtt
-                    .publish_sensor_attributes(DIAGNOSTIC_KEY, &attributes)
-                    .await;
-                diag.last_attrs = attrs_str;
             }
         }
 
@@ -984,18 +741,6 @@ mod win {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_diag_flush_plan() {
-        // Identical payload, before the heartbeat: suppress both.
-        assert_eq!(diag_flush_plan("s", "a", "s", "a", 10, 60), (false, false));
-        // Changed state publishes state; unchanged attrs stay suppressed.
-        assert_eq!(diag_flush_plan("s2", "a", "s", "a", 10, 60), (true, false));
-        // Changed attrs publishes attrs; unchanged state stays suppressed.
-        assert_eq!(diag_flush_plan("s", "a2", "s", "a", 10, 60), (false, true));
-        // Heartbeat due republishes state even when unchanged; attrs unaffected.
-        assert_eq!(diag_flush_plan("s", "a", "s", "a", 60, 60), (true, false));
-    }
-
     fn mk_reading(sensor: &str, label: &str, unit: &str, value: f64) -> Reading {
         Reading {
             sensor_name: sensor.to_string(),
@@ -1017,7 +762,7 @@ mod tests {
             "°C",
             65.0,
         )];
-        let r = match_reading(&readings, &["9800x3d"], &["cpu (tctl/tdie)"], &[], None);
+        let r = match_reading(&readings, &["9800x3d"], &["cpu (tctl/tdie)"], &[], &[]);
         assert!(r.is_some());
         assert!((r.unwrap().value - 65.0).abs() < f64::EPSILON);
     }
@@ -1050,7 +795,7 @@ mod tests {
             &["geforce"],
             &["GPU Temperature"],
             &["Hot Spot", "Memory"],
-            None,
+            &[],
         );
         // Should match the plain "GPU Temperature" only
         assert!(r.is_some());
@@ -1070,7 +815,7 @@ mod tests {
             &["cpu"],
             &["CPU Package Power", "CPU PPT"],
             &[],
-            None,
+            &[],
         );
         assert!(r.is_some());
         assert_eq!(r.unwrap().label, "CPU Package Power");
@@ -1082,7 +827,7 @@ mod tests {
             mk_reading("GPU", "GPU Memory Usage", "MB", 12000.0),
             mk_reading("GPU", "GPU Memory Usage", "%", 50.0),
         ];
-        let r = match_reading(&readings, &["gpu"], &["GPU Memory Usage"], &[], Some("%"));
+        let r = match_reading(&readings, &["gpu"], &["GPU Memory Usage"], &[], &["%"]);
         assert!(r.is_some());
         assert!((r.unwrap().value - 50.0).abs() < f64::EPSILON);
     }
@@ -1092,7 +837,7 @@ mod tests {
         // cpu_total_usage rule uses empty sensor_substrings - should match
         // any reading whose label matches.
         let readings = vec![mk_reading("OS", "Total CPU Usage", "%", 42.0)];
-        let r = match_reading(&readings, &[], &["Total CPU Usage"], &[], None);
+        let r = match_reading(&readings, &[], &["Total CPU Usage"], &[], &[]);
         assert!(r.is_some());
         assert!((r.unwrap().value - 42.0).abs() < f64::EPSILON);
     }
@@ -1100,7 +845,7 @@ mod tests {
     #[test]
     fn test_match_reading_returns_none_when_no_match() {
         let readings = vec![mk_reading("CPU", "Whatever", "°C", 50.0)];
-        let r = match_reading(&readings, &["gpu"], &["GPU Temperature"], &[], None);
+        let r = match_reading(&readings, &["gpu"], &["GPU Temperature"], &[], &[]);
         assert!(r.is_none());
     }
 
@@ -1276,202 +1021,182 @@ mod tests {
 
     // ===== Diagnostic payload tests =====
 
-    fn mk_snapshot(readings: Vec<Reading>) -> Snapshot {
-        Snapshot {
-            poll_time: 0,
-            readings,
-        }
-    }
+    // ── Unit-suffix regression tests ───────────────────────────────────────
+    //
+    // These pin the three bugs that made rules silently dead or wrong. All were
+    // found by audit rather than by a failing test, which is why they exist now.
 
+    /// HWiNFO's szUnit is ANSI CP-1252, so the degree sign is the single byte
+    /// 0xB0. trim_cstr decodes with from_utf8_lossy, which turns that into
+    /// U+FFFD - so a byte-exact `ends_with("°C")` could NEVER match and
+    /// `vrm_temp` was dead on every machine. Comparing ASCII tails fixes it.
     #[test]
-    fn test_diagnostic_payload_ok_state_format() {
-        let snap = mk_snapshot(vec![mk_reading(
-            "CPU [#0]: AMD Ryzen 7 9800X3D",
-            "CPU (Tctl/Tdie)",
-            "°C",
-            65.0,
-        )]);
-        let matched: Vec<&str> = vec!["cpu_package_temp", "gpu_temp"];
-        let unmatched: Vec<&str> = vec!["framerate"];
-        let payload =
-            build_diagnostic_payload(&DiagnosticInput::Ok(&snap), 12345, &matched, &unmatched);
-        assert_eq!(
-            payload.state,
-            format!("ok: 2/{} matched", MATCH_RULES.len())
+    fn unit_match_survives_cp1252_degree_sign() {
+        let lossy = "\u{FFFD}C"; // what 0xB0 0x43 becomes via from_utf8_lossy
+        let readings = vec![mk_reading("Board", "VRM MOS", lossy, 47.0)];
+        let r = match_reading(&readings, &[], &["VRM MOS"], &[], &["C"]);
+        assert!(
+            r.is_some(),
+            "CP-1252 degree sign must still match a C suffix"
         );
-        assert_eq!(payload.attributes["snapshot_ok"], serde_json::json!(true));
-        assert_eq!(payload.attributes["error"], serde_json::Value::Null);
-        assert_eq!(
-            payload.attributes["view_size_bytes"],
-            serde_json::json!(12345)
-        );
-        assert_eq!(payload.attributes["matched_count"], serde_json::json!(2));
-        assert_eq!(
-            payload.attributes["unmatched_keys"],
-            serde_json::json!(["framerate"])
-        );
-        assert_eq!(payload.attributes["sensors_count"], serde_json::json!(1));
-        assert_eq!(payload.attributes["readings_count"], serde_json::json!(1));
-        let names = payload.attributes["first_sensor_names"].as_array().unwrap();
-        assert_eq!(names.len(), 1);
-        assert_eq!(names[0], "CPU [#0]: AMD Ryzen 7 9800X3D");
-        let labels = payload.attributes["sample_labels"].as_array().unwrap();
-        assert_eq!(labels[0], "CPU (Tctl/Tdie)");
+
+        // And the properly-encoded form must keep working.
+        let readings = vec![mk_reading("Board", "VRM MOS", "\u{00B0}C", 47.0)];
+        assert!(match_reading(&readings, &[], &["VRM MOS"], &[], &["C"]).is_some());
     }
 
+    /// "CPU Package" is a substring of "CPU Package Power" (watts), and the
+    /// entity is declared device_class temperature. Without a pinned unit the
+    /// wattage reading won.
     #[test]
-    fn test_diagnostic_unmatched_candidates_lists_sensor_filtered_readings() {
-        // Two PresentMon readings - one is the "framerate" candidate the rule
-        // is looking for, the other is a labelled-differently sibling. Both
-        // should appear under the unmatched_candidates["framerate"] key
-        // because both pass the sensor_substrings filter.
-        let snap = mk_snapshot(vec![
-            mk_reading("PresentMon [Discord.exe]", "Frame Time (ms)", "ms", 16.7),
-            mk_reading("PresentMon [Discord.exe]", "GPU Busy", "%", 12.0),
-            // Unrelated sensor that should NOT appear under framerate.
-            mk_reading("RTX 4090", "GPU Temperature", "°C", 60.0),
-        ]);
-        let unmatched: Vec<&str> = vec!["framerate"];
-        let payload = build_diagnostic_payload(&DiagnosticInput::Ok(&snap), 0, &[], &unmatched);
-        let cands = payload.attributes["unmatched_candidates"]["framerate"]
-            .as_array()
-            .expect("framerate candidates array");
-        assert_eq!(cands.len(), 2, "expected only PresentMon candidates");
-        assert_eq!(cands[0]["label"], "Frame Time (ms)");
-        assert_eq!(cands[1]["label"], "GPU Busy");
-    }
-
-    #[test]
-    fn test_diagnostic_unmatched_candidates_caps_per_key() {
-        // More than UNMATCHED_CANDIDATES_PER_KEY matching readings should
-        // truncate to the cap.
-        let mut readings = Vec::new();
-        for i in 0..(UNMATCHED_CANDIDATES_PER_KEY as u32 + 8) {
-            readings.push(mk_reading(
-                "PresentMon [Foo.exe]",
-                &format!("Some Label {i}"),
-                "fps",
-                f64::from(i),
-            ));
-        }
-        let snap = mk_snapshot(readings);
-        let payload = build_diagnostic_payload(&DiagnosticInput::Ok(&snap), 0, &[], &["framerate"]);
-        let cands = payload.attributes["unmatched_candidates"]["framerate"]
-            .as_array()
-            .unwrap();
-        assert_eq!(cands.len(), UNMATCHED_CANDIDATES_PER_KEY);
-    }
-
-    #[test]
-    fn test_diagnostic_unmatched_candidates_unit_gates_empty_sensor_rules() {
-        // vrm_temp has an empty sensor filter + unit_suffix "°C". Memory
-        // readings (MB) must be excluded; only the °C reading should surface,
-        // so the user can see the actual VRM temperature label.
-        let snap = mk_snapshot(vec![
-            mk_reading("System: Mobo", "Virtual Memory Committed", "MB", 11635.0),
-            mk_reading("System: Mobo", "Physical Memory Load", "%", 25.9),
-            mk_reading("Mobo (NCT6798D)", "VRM MOS", "°C", 48.0),
-        ]);
-        let payload = build_diagnostic_payload(&DiagnosticInput::Ok(&snap), 0, &[], &["vrm_temp"]);
-        let cands = payload.attributes["unmatched_candidates"]["vrm_temp"]
-            .as_array()
-            .expect("vrm_temp candidates array");
-        assert_eq!(
-            cands.len(),
-            1,
-            "only the °C reading should pass the unit gate"
-        );
-        assert_eq!(cands[0]["label"], "VRM MOS");
-        assert_eq!(cands[0]["unit"], "°C");
-    }
-
-    #[test]
-    fn test_diagnostic_payload_err_state_format() {
-        let payload = build_diagnostic_payload(
-            &DiagnosticInput::Err("parse failed: bad version"),
-            48,
-            &[],
-            &[],
-        );
-        assert!(payload.state.starts_with("err: "));
-        assert!(payload.state.contains("bad version"));
-        assert_eq!(payload.attributes["snapshot_ok"], serde_json::json!(false));
-        assert_eq!(
-            payload.attributes["error"],
-            serde_json::json!("parse failed: bad version")
-        );
-        assert_eq!(payload.attributes["sensors_count"], serde_json::json!(0));
-        assert_eq!(payload.attributes["readings_count"], serde_json::json!(0));
-        assert_eq!(payload.attributes["view_size_bytes"], serde_json::json!(48));
-        // Errors list every rule key as unmatched so HA shows the full set.
-        let unmatched = payload.attributes["unmatched_keys"].as_array().unwrap();
-        assert_eq!(unmatched.len(), MATCH_RULES.len());
-    }
-
-    #[test]
-    fn test_diagnostic_payload_not_open() {
-        let payload = build_diagnostic_payload(&DiagnosticInput::NotOpen, 0, &[], &[]);
-        assert_eq!(payload.state, "err: shared memory not open");
-        assert_eq!(payload.attributes["snapshot_ok"], serde_json::json!(false));
-        assert_eq!(
-            payload.attributes["error"],
-            serde_json::json!("hwinfo shared memory not open")
-        );
-        assert_eq!(payload.attributes["view_size_bytes"], serde_json::json!(0));
-    }
-
-    #[test]
-    fn test_diagnostic_samples_are_capped() {
-        // Build a snapshot with way more sensors than the cap; sample list
-        // must be bounded.
-        let mut readings = Vec::new();
-        for i in 0..50 {
-            readings.push(mk_reading(
-                &format!("Sensor #{i}"),
-                &format!("Label {i}"),
-                "",
-                0.0,
-            ));
-        }
-        let snap = mk_snapshot(readings);
-        let payload = build_diagnostic_payload(&DiagnosticInput::Ok(&snap), 0, &[], &[]);
-        let names = payload.attributes["first_sensor_names"].as_array().unwrap();
-        let labels = payload.attributes["sample_labels"].as_array().unwrap();
-        assert_eq!(names.len(), DIAGNOSTIC_SAMPLE_CAP);
-        assert_eq!(labels.len(), DIAGNOSTIC_SAMPLE_CAP);
-        // sensors_count must reflect the *full* distinct count, not the cap.
-        assert_eq!(payload.attributes["sensors_count"], serde_json::json!(50));
-        assert_eq!(payload.attributes["readings_count"], serde_json::json!(50));
-    }
-
-    #[test]
-    fn test_diagnostic_state_truncates_long_error() {
-        let huge = "x".repeat(500);
-        let payload = build_diagnostic_payload(&DiagnosticInput::Err(&huge), 0, &[], &[]);
-        // "err: " prefix (5) + at most 200 chars of message = 205.
-        assert!(payload.state.len() <= 205);
-        assert!(payload.state.starts_with("err: "));
-    }
-
-    #[test]
-    fn test_diagnostic_unique_sensor_count_dedups() {
-        // Two sensors, three readings each → 2 distinct sensor names.
+    fn cpu_package_temp_does_not_match_the_power_reading() {
         let readings = vec![
-            mk_reading("Sensor A", "L1", "", 0.0),
-            mk_reading("Sensor A", "L2", "", 0.0),
-            mk_reading("Sensor B", "L3", "", 0.0),
-            mk_reading("Sensor B", "L4", "", 0.0),
+            mk_reading("AMD Ryzen 7 9800X3D", "CPU Package Power", "W", 88.0),
+            mk_reading("AMD Ryzen 7 9800X3D", "CPU Package", "\u{00B0}C", 61.0),
         ];
-        let snap = mk_snapshot(readings);
-        let payload = build_diagnostic_payload(&DiagnosticInput::Ok(&snap), 0, &[], &[]);
-        assert_eq!(payload.attributes["sensors_count"], serde_json::json!(2));
-        assert_eq!(payload.attributes["readings_count"], serde_json::json!(4));
-        let names = payload.attributes["first_sensor_names"].as_array().unwrap();
-        assert_eq!(names.len(), 2);
+        let r = match_reading(&readings, &["ryzen"], &["CPU Package"], &[], &["C", "F"])
+            .expect("should match the temperature");
+        assert!(
+            (r.value - 61.0).abs() < f64::EPSILON,
+            "must pick the temperature reading, not the watts one (got {})",
+            r.value
+        );
     }
 
+    /// Temperature units follow HWiNFO's own configuration, so pinning only "C"
+    /// would make the rule vanish entirely for Fahrenheit users rather than
+    /// merely report an odd number.
     #[test]
-    fn test_diagnostic_key_constant() {
-        assert_eq!(DIAGNOSTIC_KEY, "hwinfo_diagnostic");
+    fn cpu_package_temp_still_matches_in_fahrenheit() {
+        let readings = vec![mk_reading(
+            "AMD Ryzen 7 9800X3D",
+            "CPU Package",
+            "\u{00B0}F",
+            142.0,
+        )];
+        assert!(match_reading(&readings, &["ryzen"], &["CPU Package"], &[], &["C", "F"]).is_some());
+    }
+
+    /// HWiNFO reports both an RPM reading and a percent duty-cycle sibling under
+    /// "GPU Fan"; first-in-order used to win.
+    #[test]
+    fn gpu_fan_rpm_does_not_match_the_percent_sibling() {
+        let readings = vec![
+            mk_reading("NVIDIA GeForce RTX 4090", "GPU Fan", "%", 38.0),
+            mk_reading("NVIDIA GeForce RTX 4090", "GPU Fan", "RPM", 1450.0),
+        ];
+        let r = match_reading(&readings, &["rtx"], &["GPU Fan"], &[], &["RPM"])
+            .expect("should match the RPM reading");
+        assert!(
+            (r.value - 1450.0).abs() < f64::EPSILON,
+            "must pick the RPM reading, not the percent sibling (got {})",
+            r.value
+        );
+    }
+
+    /// Every rule that pins a unit must actually be reachable: an empty suffix
+    /// list means "no constraint", which is different from a typo'd one.
+    #[test]
+    fn every_pinned_unit_suffix_is_ascii() {
+        for rule in MATCH_RULES {
+            for sfx in rule.unit_suffix {
+                assert!(
+                    sfx.is_ascii(),
+                    "rule {} pins a non-ASCII unit {sfx:?}; ascii_tail_ends_with would strip it \
+                     to nothing and match everything",
+                    rule.key
+                );
+                assert!(
+                    !sfx.is_empty(),
+                    "rule {} pins an empty unit suffix",
+                    rule.key
+                );
+            }
+        }
+    }
+
+    // ── match_all_borrowed: the aggregation, which had NO test at all ─────────
+    //
+    // It was previously unreachable from tests because it took a live
+    // `HwInfoClient`. Taking a `&[u8]` view makes the per-rule slot, the
+    // tie-break and the hits/misses partition drivable from a fixture.
+
+    /// Cross-check the single borrowing pass against the owned-slice oracle.
+    #[test]
+    fn match_all_borrowed_agrees_with_the_oracle() {
+        let buf = crate::hwinfo::test_support::buffer_with(
+            &["CPU [#0]: AMD Ryzen 7 9800X3D"],
+            &[
+                (0, "CPU Package Power", "W", 88.0),
+                (0, "CPU Package", "\u{00B0}C", 61.0),
+                (0, "Average Effective Clock", "MHz", 4200.0),
+            ],
+        );
+        let (hits, misses) = match_all_borrowed(&buf).expect("aggregate");
+
+        // Same inputs through the owned oracle, rule by rule.
+        let mut owned = Vec::new();
+        crate::hwinfo::for_each_reading(&buf, |r| owned.push(r.to_owned_reading()))
+            .expect("collect");
+        for rule in MATCH_RULES {
+            let oracle = match_reading(
+                &owned,
+                rule.sensor_substrings,
+                rule.label_substrings,
+                rule.label_excludes,
+                rule.unit_suffix,
+            );
+            let got = hits.iter().find(|(k, _)| *k == rule.key).map(|(_, r)| r);
+            match (oracle, got) {
+                (Some(a), Some(b)) => assert_eq!(a.label, b.label, "rule {}", rule.key),
+                (None, None) => assert!(misses.contains(&rule.key), "rule {} missing", rule.key),
+                (a, b) => panic!(
+                    "rule {} disagreed: oracle={:?} borrowed={:?}",
+                    rule.key, a, b
+                ),
+            }
+        }
+    }
+
+    /// The unit pin must make cpu_package_temp pick the temperature, not the
+    /// watts reading whose label it is a substring of.
+    #[test]
+    fn match_all_borrowed_honours_unit_pins() {
+        let buf = crate::hwinfo::test_support::buffer_with(
+            &["CPU [#0]: AMD Ryzen 7 9800X3D"],
+            &[
+                (0, "CPU Package Power", "W", 88.0),
+                (0, "CPU Package", "\u{00B0}C", 61.0),
+            ],
+        );
+        let (hits, _) = match_all_borrowed(&buf).expect("aggregate");
+        let temp = hits
+            .iter()
+            .find(|(k, _)| *k == "cpu_package_temp")
+            .map(|(_, r)| r)
+            .expect("cpu_package_temp should match");
+        assert!(
+            (temp.value - 61.0).abs() < f64::EPSILON,
+            "picked the watts reading: {}",
+            temp.value
+        );
+    }
+
+    /// Every rule that matches nothing must land in `misses`, exactly once, and
+    /// hits + misses must together account for every rule.
+    #[test]
+    fn match_all_borrowed_partitions_every_rule() {
+        let buf = crate::hwinfo::test_support::buffer_with(&["Nothing"], &[]);
+        let (hits, misses) = match_all_borrowed(&buf).expect("aggregate");
+        assert!(hits.is_empty(), "no reading should match anything");
+        assert_eq!(
+            misses.len(),
+            MATCH_RULES.len(),
+            "every rule must be reported as a miss"
+        );
+        let mut sorted = misses.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), misses.len(), "a rule was reported twice");
     }
 }

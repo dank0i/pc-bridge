@@ -89,7 +89,11 @@ icon's **Open Settings**, or run it with `--ui`.
 
 ## Configuration
 
-Edit `userConfig.json` next to the executable:
+Edit `userConfig.json`. It lives in the per-user config directory
+(`%APPDATA%\pc-bridge\` on Windows, `~/.config/pc-bridge/` on Linux and macOS);
+a copy next to the executable is the legacy location and is migrated on startup.
+Set `PC_BRIDGE_CONFIG_DIR` to override the directory entirely (used by the test
+kit, and handy for portable installs).
 
 ```json
 {
@@ -107,6 +111,7 @@ Edit `userConfig.json` next to the executable:
     "idle_tracking": true,
     "sleep_wake": true,
     "display_state": true,
+    "display_attached": false,
     "cmd_shutdown": true,
     "cmd_restart": true,
     "cmd_sleep": true,
@@ -190,7 +195,6 @@ When `hwinfo_sensor: true`, pc-bridge reads ~20 hardware sensors from HWiNFO64's
 | Mainboard | `vrm_temp`, `case_fan_cpu`, `case_fan_cpu_opt`, `case_fan_system_1`, `case_fan_system_2` |
 | Game | `framerate` |
 
-Plus `hwinfo_diagnostic` showing which sensor names matched and which didn't on your hardware.
 
 #### Setup
 
@@ -200,9 +204,9 @@ Plus `hwinfo_diagnostic` showing which sensor names matched and which didn't on 
 
 HWiNFO must be running for the sensors to publish. Entities become `unavailable` in HA when HWiNFO closes; they restore automatically when it reopens.
 
-Sensors are matched by name patterns and tolerate vendor differences (Intel/AMD CPUs, NVIDIA/AMD GPUs, various motherboard sensor naming). Anything that doesn't match on your specific hardware shows up in the `hwinfo_diagnostic` attributes so you can see what's missing.
+Sensors are matched by hardcoded name patterns. Coverage is best on the hardware the rules were written against: several CPU rules require an AMD Ryzen sensor name, and the case-fan rules follow Gigabyte/ITE label conventions, so on other boards some sensors will not match. Unmatched keys are logged at debug level.
 
-Publishes are throttled per-sensor: power changes by 5W, temperatures by 1°C, clocks by 50MHz, with a 30-second heartbeat so HA always has a recent value. The producer task only reads 8 bytes of shared memory between updates, so the CPU cost is negligible.
+Publishes are throttled per-sensor: power changes by 5W, temperatures by 0.5°C, clocks by 50MHz, with a 30-second heartbeat so HA always has a recent value. The producer task only reads 8 bytes of shared memory between updates, so the CPU cost is negligible.
 
 ### Steam Updates
 
@@ -227,7 +231,6 @@ The `games` object maps process names to game IDs:
       "game_id": "baldurs_gate_3",
       "app_id": 1086940,
       "name": "Baldur's Gate 3",
-      "entity_id": "baldur_s_gate_3",
       "exposed": true
     }
   }
@@ -239,7 +242,6 @@ The `games` object maps process names to game IDs:
 | `game_id` | Yes | Identifier reported to Home Assistant |
 | `app_id` | No | Steam App ID (set automatically by Steam discovery) |
 | `name` | No | Display name (defaults to title-cased `game_id`) |
-| `entity_id` | No | HA switch entity slug override - lowercase alphanumeric + underscores only, no `switch.` prefix (defaults to `game_id`) |
 | `exposed` | No | Whether to include in the game catalog sensor (default: `true`) |
 | `auto_discovered` | No | Set automatically by Steam discovery |
 
@@ -468,7 +470,7 @@ Send commands via MQTT button topics:
 | `Hibernate` | Hibernate the PC |
 | `Restart` | Restart the PC |
 
-### Audio Commands (requires `audio_control: true`)
+### Audio Commands (requires `volume: true` and/or `media_controls: true`)
 
 | Button | Description |
 |--------|-------------|
@@ -477,7 +479,7 @@ Send commands via MQTT button topics:
 | `MediaPrevious` | Previous track |
 | `MediaStop` | Stop media |
 | `VolumeMute` | Toggle mute |
-| `VolumeSet` | Set volume (payload: 0-100) |
+| `VolumeSet` | Set volume (payload: 0-100). Exposed as `number.<device>_volume`, not a button |
 
 ### Launch Payloads
 
@@ -586,7 +588,7 @@ PC Bridge auto-discovers via MQTT. After connecting, you'll get:
 - `button.<device>_mediaprevious`
 - `button.<device>_mediastop`
 - `button.<device>_volumemute`
-- `button.<device>_volumeset`
+- `number.<device>_volume` - Set volume 0-100 (requires `volume`)
 - `button.<device>_discordjoin` (requires `discord`)
 - `button.<device>_discordleavechannel` (requires `discord`)
 - `button.<device>_<custom>` - Any custom commands you define

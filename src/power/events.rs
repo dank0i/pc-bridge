@@ -59,6 +59,11 @@ pub enum PowerEvent {
     Wake,
     DisplayOff,
     DisplayOn,
+    /// Display power notifications could not be registered, so nothing will ever
+    /// report the real state. Mirrors the Linux path where `observed_display_state`
+    /// returns None: the sensor must say "unknown", never keep asserting the
+    /// startup seed of "on".
+    DisplayUnobservable,
 }
 
 /// Context stored in the power-monitor window's user data.
@@ -115,16 +120,12 @@ impl PowerEventListener {
                 pass: config.mqtt.pass.clone(),
                 // Use a distinct client_id so the broker doesn't kick our main connection
                 client_id: format!("{}-sleep", config.client_id()),
-                sleep_topic: format!(
-                    "homeassistant/sensor/{}/sleep_state/state",
-                    config.device_name
+                sleep_topic: crate::mqtt::sensor_state_topic_for(
+                    &config.device_name,
+                    "sleep_state",
                 ),
-                // Same topic as the async client's LWT (availability_topic_static);
-                // built inline here because that helper is private to the mqtt module.
-                availability_topic: format!(
-                    "homeassistant/sensor/{}/availability",
-                    config.device_name
-                ),
+                // Same topic as the async client's LWT.
+                availability_topic: crate::mqtt::availability_topic_for(&config.device_name),
             }
         };
 
@@ -184,7 +185,7 @@ impl PowerEventListener {
                             // Fallback publish via the async client. Harmless if the
                             // sync TCP publish already landed (retained = last-write-wins).
                             // Catches cases where sync fails (TLS broker, Modern Standby, etc.).
-                            self.state.mqtt.publish_sensor_retained("sleep_state", "sleeping").await;
+                            self.state.mqtt.publish_sensor("sleep_state", "sleeping").await;
                         }
                         PowerEvent::Wake => {
                             info!("Power event: WAKE");
@@ -193,26 +194,47 @@ impl PowerEventListener {
                                 wake_display_with_retry(3, std::time::Duration::from_millis(500));
                             });
 
+                            // The suspend published retained availability=offline
+                            // from the SEPARATE short-lived sync client. If the
+                            // async connection survived the suspend (short sleep,
+                            // Modern Standby, LAN broker still inside keepalive),
+                            // there is no ConnAck on resume, and ConnAck is the
+                            // only other writer of `online`. Without this the PC
+                            // is awake and publishing while every entity on the
+                            // device reads Unavailable in HA, indefinitely.
+                            // Same fix as the refused-suspend path in the executor.
+                            self.state.mqtt.publish_availability(true).await;
+
                             // Publish wake state with retries in background task
                             // so the event handler stays responsive to new events
                             let mqtt = &self.state.mqtt;
-                            mqtt.publish_sensor_retained("sleep_state", "awake").await;
+                            mqtt.publish_sensor("sleep_state", "awake").await;
                             info!("Published awake state");
                             let state = Arc::clone(&self.state);
                             tokio::spawn(async move {
                                 for delay_secs in [2, 5, 10] {
                                     tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
-                                    state.mqtt.publish_sensor_retained("sleep_state", "awake").await;
+                                    state.mqtt.publish_sensor("sleep_state", "awake").await;
                                 }
                             });
                         }
                         PowerEvent::DisplayOff => {
                             info!("Power event: DISPLAY OFF");
-                            self.state.mqtt.publish_sensor_retained("display", "off").await;
+                            self.state.mqtt.publish_sensor("display", "off").await;
                         }
                         PowerEvent::DisplayOn => {
                             info!("Power event: DISPLAY ON");
-                            self.state.mqtt.publish_sensor_retained("display", "on").await;
+                            self.state.mqtt.publish_sensor("display", "on").await;
+                        }
+                        PowerEvent::DisplayUnobservable => {
+                            warn!(
+                                "Display power state is unobservable on this system; \
+                                 reporting unknown instead of the startup seed"
+                            );
+                            self.state
+                                .mqtt
+                                .publish_sensor("display", crate::mqtt::SENTINEL_UNKNOWN)
+                                .await;
                         }
                     }
                 }
@@ -254,7 +276,14 @@ impl PowerEventListener {
             ) {
                 Ok(h) => h,
                 Err(e) => {
+                    // Same consequence as a failed notification registration,
+                    // one step earlier: with no window there is no
+                    // WM_POWERBROADCAST at all, so neither `display` nor
+                    // `sleep_state` will ever update and the optimistic startup
+                    // seed stands forever. Happens when the process has no
+                    // interactive window station (session 0).
                     error!("Failed to create power monitor window: {:?}", e);
+                    let _ = event_tx.blocking_send(PowerEvent::DisplayUnobservable);
                     return;
                 }
             };
@@ -271,7 +300,11 @@ impl PowerEventListener {
                     Some(h)
                 }
                 Err(e) => {
+                    // No notification means nothing will ever publish `display`
+                    // from here, so the optimistic startup seed would stick as a
+                    // permanent lie. Correct it to "unknown" instead.
                     error!("Failed to register display power notification: {:?}", e);
+                    let _ = event_tx.blocking_send(PowerEvent::DisplayUnobservable);
                     None
                 }
             };
@@ -305,13 +338,19 @@ impl PowerEventListener {
                 DispatchMessageW(&raw const msg);
             }
 
-            // Cleanup: unregister the power notification before destroying its
-            // window, then free the context.
+            // Cleanup ORDER IS LOAD-BEARING. DestroyWindow dispatches inbound
+            // SENT messages, and WM_POWERBROADCAST (PBT_APMSUSPEND/RESUME) is sent,
+            // not posted - unregistering only stops PBT_POWERSETTINGCHANGE. So
+            // wnd_proc can still run during DestroyWindow and dereferences
+            // GWLP_USERDATA on any WM_POWERBROADCAST. Freeing the context first
+            // is a use-after-free on a struct holding the MQTT credentials.
+            // Correct order: unregister, clear the pointer, destroy, then free.
             if let Some(h) = display_notify {
                 let _ = UnregisterPowerSettingNotification(h);
             }
-            let _ = Box::from_raw(ctx_ptr);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             let _ = DestroyWindow(hwnd);
+            let _ = Box::from_raw(ctx_ptr);
         }
     }
 
@@ -372,7 +411,7 @@ impl PowerEventListener {
                                             0 => "off",
                                             1 => "on",
                                             2 => "dimmed",
-                                            _ => "unknown",
+                                            _ => crate::mqtt::SENTINEL_UNKNOWN,
                                         }
                                     );
                                     match display_state {
@@ -385,8 +424,17 @@ impl PowerEventListener {
                                                 ctx.event_tx.blocking_send(PowerEvent::DisplayOn);
                                         }
                                         2 => {
-                                            // Dimmed - treat as still on (display is visible)
+                                            // Dimmed - the display IS visible, so
+                                            // report on. Must publish, not just
+                                            // log: this is the value delivered at
+                                            // registration when the display is
+                                            // already dimmed, and swallowing it
+                                            // leaves the sensor with no value at
+                                            // all now that the startup seed is
+                                            // gone.
                                             debug!("Display dimmed, treating as on");
+                                            let _ =
+                                                ctx.event_tx.blocking_send(PowerEvent::DisplayOn);
                                         }
                                         _ => {
                                             debug!("Unknown display state: {}", display_state);

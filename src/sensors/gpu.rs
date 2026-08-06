@@ -15,6 +15,22 @@ pub struct GpuSensor {
     state: Arc<AppState>,
 }
 
+/// Latch so a persistently failing PDH query warns once. All five failure paths
+/// below previously returned a cannot-determine sentinel with no log at ANY level, leaving a
+/// stuck sensor with zero diagnostic signal. PDH is Windows-only.
+#[cfg(windows)]
+static PDH_FAILURE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(windows)]
+fn warn_pdh_once(what: &str) {
+    if PDH_FAILURE_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        log::debug!("GPU PDH: {what}");
+    } else {
+        log::warn!("GPU PDH: {what} - gpu_usage will read unknown");
+    }
+}
+
 impl GpuSensor {
     pub fn new(state: Arc<AppState>) -> Self {
         Self { state }
@@ -44,7 +60,18 @@ impl GpuSensor {
                     debug!("GPU sensor shutting down");
                     break;
                 }
-                Ok(()) = reconnect_rx.recv() => {
+                r = reconnect_rx.recv() => {
+                    // Treat Lagged as a reconnect: the `Ok(())` pattern alone
+                    // silently skipped this arm when the 4-slot channel
+                    // overran, losing the republish on a flapping broker.
+                    // Closed means the sender is gone; `continue` would spin the
+                    // loop hot on an instantly-ready recv(). Exit instead.
+                    if !matches!(
+                        r,
+                        Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                    ) {
+                        break;
+                    }
                     // Force republish on reconnect
                     prev_gpu.clear();
                 }
@@ -161,19 +188,25 @@ fn get_gpu_usage() -> String {
     }
 
     let Some(pdh) = guard.as_mut() else {
-        return "unavailable".to_string();
+        warn_pdh_once("PDH query could not be opened");
+        return crate::mqtt::SENTINEL_UNKNOWN.to_string();
     };
 
     unsafe {
         if !pdh.has_first_sample {
+            // BENIGN warm-up: PDH rate counters need two collections before the
+            // first value exists. Deliberately NOT warned - doing so burned the
+            // once-latch on every process start and downgraded all the genuine
+            // failures below to debug!, which is the opposite of the intent.
             let _ = PdhCollectQueryData(pdh.query);
             pdh.has_first_sample = true;
-            return "unavailable".to_string();
+            return crate::mqtt::SENTINEL_UNKNOWN.to_string();
         }
 
         let status = PdhCollectQueryData(pdh.query);
         if status != 0 {
-            return "unavailable".to_string();
+            warn_pdh_once("PdhCollectQueryData failed");
+            return crate::mqtt::SENTINEL_UNKNOWN.to_string();
         }
 
         // The counter path is a WILDCARD (*engtype_3D), so it expands to one
@@ -194,7 +227,8 @@ fn get_gpu_usage() -> String {
             None,
         );
         if status != PDH_MORE_DATA || buf_size == 0 {
-            return "unavailable".to_string();
+            warn_pdh_once("sizing call did not return PDH_MORE_DATA, or size was zero");
+            return crate::mqtt::SENTINEL_UNKNOWN.to_string();
         }
 
         // Back the buffer with PDH_FMT_COUNTERVALUE_ITEM_W-aligned storage sized to
@@ -211,7 +245,8 @@ fn get_gpu_usage() -> String {
             Some(buffer.as_mut_ptr()),
         );
         if status != 0 || item_count == 0 {
-            return "unavailable".to_string();
+            warn_pdh_once("counter array fetch failed, or returned no items");
+            return crate::mqtt::SENTINEL_UNKNOWN.to_string();
         }
 
         let items = std::slice::from_raw_parts(buffer.as_ptr(), item_count as usize);
@@ -243,12 +278,14 @@ fn get_gpu_usage() -> String {
             *per_node.entry(key).or_insert(0.0) += v;
         }
 
-        // Empty (all invalid) -> NaN from the fold -> "unavailable".
+        // Empty (all invalid) -> NaN from the fold -> "unknown".
         let usage = per_node.values().copied().fold(f64::NAN, f64::max);
         if usage.is_finite() {
-            format!("{:.1}", usage.clamp(0.0, 100.0))
+            // Whole percent - see the note in sensors/system.rs: the change-guard
+            // dedups on this formatted string, so 0.1 resolution never dedups.
+            format!("{:.0}", usage.clamp(0.0, 100.0))
         } else {
-            "unavailable".to_string()
+            crate::mqtt::SENTINEL_UNKNOWN.to_string()
         }
     }
 }
@@ -300,7 +337,7 @@ fn get_gpu_usage() -> String {
             Ok(_) => {}
             // Not installed: don't fork it again. A transient spawn failure
             // (EAGAIN/ENOMEM under load) must NOT latch, or a working GPU would
-            // read "unavailable" forever - so only give up on NotFound.
+            // read "unknown" forever - so only give up on NotFound.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 NVIDIA_ABSENT.store(true, Ordering::Relaxed);
             }
@@ -308,21 +345,23 @@ fn get_gpu_usage() -> String {
         }
     }
 
-    "unavailable".to_string()
+    crate::mqtt::SENTINEL_UNKNOWN.to_string()
 }
 
 /// Parse the AMD sysfs `gpu_busy_percent` file content.
 #[cfg(unix)]
 fn parse_gpu_sysfs(content: &str) -> Option<String> {
     let pct = content.trim().parse::<f64>().ok()?;
-    Some(format!("{pct:.1}"))
+    // Whole percent - the dedup compares this formatted string.
+    Some(format!("{pct:.0}"))
 }
 
 /// Parse `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits` output.
 #[cfg(unix)]
 fn parse_nvidia_smi_output(output: &str) -> Option<String> {
     let pct = output.trim().parse::<f64>().ok()?;
-    Some(format!("{pct:.1}"))
+    // Whole percent - the dedup compares this formatted string.
+    Some(format!("{pct:.0}"))
 }
 
 #[cfg(test)]
@@ -333,19 +372,19 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_parse_gpu_sysfs_integer() {
-        assert_eq!(parse_gpu_sysfs("42\n"), Some("42.0".to_string()));
+        assert_eq!(parse_gpu_sysfs("42\n"), Some("42".to_string()));
     }
 
     #[cfg(unix)]
     #[test]
     fn test_parse_gpu_sysfs_zero() {
-        assert_eq!(parse_gpu_sysfs("0\n"), Some("0.0".to_string()));
+        assert_eq!(parse_gpu_sysfs("0\n"), Some("0".to_string()));
     }
 
     #[cfg(unix)]
     #[test]
     fn test_parse_gpu_sysfs_hundred() {
-        assert_eq!(parse_gpu_sysfs("100"), Some("100.0".to_string()));
+        assert_eq!(parse_gpu_sysfs("100"), Some("100".to_string()));
     }
 
     #[cfg(unix)]
@@ -358,16 +397,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_parse_nvidia_smi_typical() {
-        assert_eq!(parse_nvidia_smi_output("73\n"), Some("73.0".to_string()));
+        assert_eq!(parse_nvidia_smi_output("73\n"), Some("73".to_string()));
     }
 
     #[cfg(unix)]
     #[test]
     fn test_parse_nvidia_smi_with_spaces() {
-        assert_eq!(
-            parse_nvidia_smi_output("  55  \n"),
-            Some("55.0".to_string())
-        );
+        assert_eq!(parse_nvidia_smi_output("  55  \n"), Some("55".to_string()));
     }
 
     #[cfg(unix)]

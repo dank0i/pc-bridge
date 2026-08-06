@@ -33,6 +33,16 @@ pub fn encrypt(plaintext: &str) -> anyhow::Result<String> {
     }
     #[cfg(not(windows))]
     {
+        // No DPAPI equivalent, so this lands on disk in the clear (0600, set
+        // before any bytes are written). Say so once rather than leaving the
+        // user to discover it: silence here reads as "it was encrypted".
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::warn!(
+                "No OS credential store on this platform: the MQTT password is stored \
+                 in plaintext (file mode 0600)"
+            );
+        }
         Ok(plaintext.to_string())
     }
 }

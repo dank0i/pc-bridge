@@ -17,6 +17,17 @@ use super::payload::AvailabilityEntry;
 use super::{DISCOVERY_PREFIX, MqttClient};
 use crate::config::{Config, CustomCommand, CustomSensor};
 
+/// Range and unit for a `number` entity. Grouped so `register_number` keeps a
+/// readable signature instead of four positional numeric arguments.
+struct NumberSpec<'a> {
+    min: f32,
+    max: f32,
+    step: f32,
+    unit: Option<&'a str>,
+    /// Sensor whose state topic this number reads back from, if any.
+    state_from: Option<&'a str>,
+}
+
 impl MqttClient {
     /// Publish a retained discovery config, logging on failure. A broker
     /// rejection (16 KB packet cap, ACL) mid-registration would otherwise
@@ -109,6 +120,10 @@ impl MqttClient {
                 icon: Some("mdi:power-sleep".to_string()),
                 device_class: None,
                 unit_of_measurement: None,
+                min: None,
+                max: None,
+                step: None,
+                value_template: Some(crate::mqtt::unknown_to_none_template()),
                 state_class: None,
                 json_attributes_topic: None,
             };
@@ -124,6 +139,24 @@ impl MqttClient {
         if config.features.display_state {
             self.register_sensor(device, "display", "Display", "mdi:monitor", None, None)
                 .await;
+        }
+
+        // Physical monitor attach/detach. Separate entity from `display` above:
+        // that one is display POWER, this one is whether a monitor is connected.
+        // Windows uses CfgMgr32 interface notifications, Linux polls DRM
+        // connector status; macOS has neither, so the entity is not registered
+        // there (an entity nothing can publish would sit unknown forever).
+        #[cfg(any(windows, target_os = "linux"))]
+        if config.features.display_attached {
+            self.register_sensor(
+                device,
+                "display_attached",
+                "Display Attached",
+                "mdi:monitor-multiple",
+                None,
+                None,
+            )
+            .await;
         }
 
         // Session lock/unlock sensor (WTS on Windows, logind on Linux).
@@ -270,6 +303,10 @@ impl MqttClient {
                 icon: Some("mdi:steam".to_string()),
                 device_class: None,
                 unit_of_measurement: None,
+                min: None,
+                max: None,
+                step: None,
+                value_template: Some(crate::mqtt::unknown_to_none_template()),
                 state_class: None,
             };
             let topic = self.config_topic("sensor", "steam_updating");
@@ -530,21 +567,6 @@ impl MqttClient {
                 Some("°C"),
             )
             .await;
-
-            // Diagnostic sensor: short summary state ("ok: 13/15 matched") +
-            // rich JSON attributes (sensors_count, sample names, matched
-            // keys, view_size_bytes, etc.) for remote troubleshooting when
-            // HWiNFO is exposing the section but pc-bridge isn't matching
-            // anything useful.
-            self.register_hwinfo_sensor(
-                device,
-                "hwinfo_diagnostic",
-                "HWiNFO Diagnostic",
-                "mdi:bug-outline",
-                None,
-                None,
-            )
-            .await;
         }
 
         // Birth info sensor (always registered - used by Feature H birth message).
@@ -619,6 +641,25 @@ impl MqttClient {
                 .await;
             self.register_button(device, "DiscordLeaveChannel", "mdi:phone-hangup")
                 .await;
+        }
+
+        // Volume as a number entity (0-100). The command itself is gated on the
+        // same flag in command_feature_enabled.
+        if config.features.volume {
+            self.register_number(
+                device,
+                "VolumeSet",
+                "Volume",
+                "mdi:volume-high",
+                NumberSpec {
+                    min: 0.0,
+                    max: 100.0,
+                    step: 1.0,
+                    unit: Some("%"),
+                    state_from: Some("volume_level"),
+                },
+            )
+            .await;
         }
 
         // Audio control commands (media keys) if enabled
@@ -728,6 +769,59 @@ impl MqttClient {
             .await;
     }
 
+    /// Register a `number` entity: a command-only control with a numeric range.
+    ///
+    /// `VolumeSet` was fully implemented, tested and subscribed but had no HA
+    /// entity, so the only way to reach it was a hand-written `mqtt.publish`.
+    async fn register_number(
+        &self,
+        device: &Arc<HADevice>,
+        name: &str,
+        display_name: &str,
+        icon: &str,
+        spec: NumberSpec<'_>,
+    ) {
+        let payload = HADiscoveryPayload {
+            name: display_name.to_string(),
+            unique_id: format!("{}_{}", self.device_id, name),
+            // Read state from the sensor that already publishes this value.
+            // Without it HA runs the number optimistically: the slider reads
+            // Unknown after every HA restart and drifts out of sync the moment
+            // the user changes volume at the PC itself.
+            state_topic: spec.state_from.map(|s| self.sensor_topic(s)),
+            command_topic: Some(self.command_topic(name)),
+            availability_topic: Some(self.availability_topic()),
+            availability: None,
+            availability_mode: None,
+            device: Arc::clone(device),
+            icon: Some(icon.to_string()),
+            device_class: None,
+            unit_of_measurement: spec.unit.map(str::to_string),
+            // Required whenever state_from is set: the source sensor publishes
+            // SENTINEL_UNKNOWN on a probe failure, and HA's `number` parses its
+            // state as a float. Without this it logs "Payload 'unknown' is not a
+            // Number" and returns WITHOUT updating, so the slider silently
+            // freezes on its last value while the volume is unobservable.
+            // `number`'s payload_reset also defaults to the literal "None", so
+            // the same template resets it to unknown, which is what we want.
+            value_template: spec
+                .state_from
+                .map(|_| crate::mqtt::unknown_to_none_template()),
+            min: Some(spec.min),
+            max: Some(spec.max),
+            step: Some(spec.step),
+            state_class: None,
+            json_attributes_topic: None,
+        };
+
+        let topic = self.config_topic("number", name);
+        let Ok(json) = serde_json::to_string(&payload) else {
+            error!("Failed to serialize HA discovery payload");
+            return;
+        };
+        self.publish_discovery(&topic, json).await;
+    }
+
     /// Helper to register a button command
     async fn register_button(&self, device: &Arc<HADevice>, name: &str, icon: &str) {
         let payload = HADiscoveryPayload {
@@ -742,6 +836,10 @@ impl MqttClient {
             icon: Some(icon.to_string()),
             device_class: None,
             unit_of_measurement: None,
+            min: None,
+            max: None,
+            step: None,
+            value_template: None,
             state_class: None,
             json_attributes_topic: None,
         };
@@ -810,6 +908,10 @@ impl MqttClient {
             icon: Some(icon.to_string()),
             device_class: device_class.map(|s| s.to_string()),
             unit_of_measurement: unit.map(|s| s.to_string()),
+            min: None,
+            max: None,
+            step: None,
+            value_template: Some(crate::mqtt::unknown_to_none_template()),
             state_class: derive_state_class(device_class, unit),
         };
 
@@ -850,6 +952,10 @@ impl MqttClient {
             icon: Some(icon.to_string()),
             device_class: device_class.map(|s| s.to_string()),
             unit_of_measurement: unit.map(|s| s.to_string()),
+            min: None,
+            max: None,
+            step: None,
+            value_template: Some(crate::mqtt::unknown_to_none_template()),
             state_class: derive_state_class(device_class, unit),
         };
 
@@ -916,6 +1022,10 @@ impl MqttClient {
                 icon: Some(icon),
                 device_class: None,
                 unit_of_measurement: sensor.unit.clone(),
+                min: None,
+                max: None,
+                step: None,
+                value_template: Some(crate::mqtt::unknown_to_none_template()),
                 state_class: derive_state_class(None, sensor.unit.as_deref()),
                 json_attributes_topic: None,
             };
@@ -959,6 +1069,10 @@ impl MqttClient {
                 icon: Some(icon),
                 device_class: None,
                 unit_of_measurement: None,
+                min: None,
+                max: None,
+                step: None,
+                value_template: None,
                 state_class: None,
                 json_attributes_topic: None,
             };
@@ -1061,7 +1175,6 @@ const HWINFO_ENTITY_IDS: &[&str] = &[
     "case_fan_system_1",
     "case_fan_system_2",
     "vrm_temp",
-    "hwinfo_diagnostic",
 ];
 
 /// Every built-in HA entity the agent can register, paired with whether the
@@ -1085,6 +1198,7 @@ fn feature_entities(config: &Config) -> Vec<(&'static str, &'static str, bool)> 
         ("sensor", "idle_seconds", f.idle_tracking),
         ("sensor", "screensaver", f.idle_tracking),
         ("sensor", "sleep_state", f.sleep_wake),
+        ("number", "VolumeSet", f.volume),
         ("sensor", "display", f.display_state),
         ("sensor", "cpu_usage", f.cpu_sensor),
         ("sensor", "memory_usage", f.memory_sensor),
@@ -1133,6 +1247,20 @@ fn feature_entities(config: &Config) -> Vec<(&'static str, &'static str, bool)> 
     for oid in HWINFO_ENTITY_IDS {
         entities.push(("sensor", oid, f.hwinfo_sensor));
     }
+    // display_attached: the teardown cfg MUST equal the registration cfg above.
+    // It did not - registration became any(windows, linux) when the Linux DRM
+    // producer landed, and this stayed windows-only. On Linux, enabling then
+    // disabling the flag registered the entity and never cleared its retained
+    // discovery config, leaving a permanently-unknown ghost entity in HA
+    // forever. That is exactly the failure the teardown table exists to prevent.
+    #[cfg(any(windows, target_os = "linux"))]
+    entities.push(("sensor", "display_attached", f.display_attached));
+    // REMOVED ENTITIES. Always listed as disabled so the teardown pass clears
+    // their retained discovery config, state and attributes from the broker.
+    // Without this, every existing install keeps a ghost entity in HA forever
+    // - the retained config outlives the code that produced it. Safe to delete
+    // once no deployed agent could still have registered it.
+    entities.push(("sensor", "hwinfo_diagnostic", false));
     entities
 }
 

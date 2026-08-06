@@ -71,6 +71,8 @@ impl CustomSensorManager {
         let now = tokio::time::Instant::now();
         let mut next_due: HashMap<String, tokio::time::Instant> =
             sensors.iter().map(|s| (s.name.clone(), now)).collect();
+        // Last published value per sensor, for the dedup every other producer has.
+        let mut prev: HashMap<String, String> = HashMap::new();
 
         loop {
             // Find the earliest next-due sensor to calculate sleep time
@@ -119,21 +121,7 @@ impl CustomSensorManager {
                         let due = next_due.get(&sensor.name).copied().unwrap_or(poll_now);
                         if poll_now >= due {
                             let topic_name = format!("custom_{}", sensor.name);
-                            match self.poll_sensor(sensor).await {
-                                Ok(value) => {
-                                    self.state.mqtt.publish_sensor(&topic_name, &value).await;
-                                    debug!("Custom sensor '{}' = {}", sensor.name, value);
-                                }
-                                Err(reason) => {
-                                    // Mark the sensor unavailable in HA rather than
-                                    // publishing the error text as its value.
-                                    debug!("Custom sensor '{}' failed: {}", sensor.name, reason);
-                                    self.state
-                                        .mqtt
-                                        .publish_sensor(&topic_name, "unavailable")
-                                        .await;
-                                }
-                            }
+                            self.poll_and_publish(sensor, &topic_name, &mut prev).await;
 
                             // Schedule next poll one interval out, but never in the
                             // past: after a long suspend/resume, clamp forward to now
@@ -148,7 +136,41 @@ impl CustomSensorManager {
     }
 
     /// Poll a single custom sensor. `Ok` is the value; `Err` is a failure reason
-    /// (published as HA "unavailable", not as the sensor value).
+    /// (published as HA "unknown", not as the sensor value).
+    /// Poll one custom sensor and publish, deduping like every other producer.
+    ///
+    /// Split out of `run` so that loop stays under the cognitive-complexity
+    /// gate, and so the dedup lives next to the publish it guards.
+    async fn poll_and_publish(
+        &self,
+        sensor: &CustomSensor,
+        topic_name: &str,
+        prev: &mut HashMap<String, String>,
+    ) {
+        match self.poll_sensor(sensor).await {
+            Ok(value) => {
+                // Dedup like every other producer. These are RETAINED publishes,
+                // so without it a 5s custom sensor writes 17k unchanged rows a
+                // day into the HA recorder.
+                if prev.get(&sensor.name).is_some_and(|p| *p == value) {
+                    debug!("Custom sensor '{}' unchanged", sensor.name);
+                } else {
+                    self.state.mqtt.publish_sensor(topic_name, &value).await;
+                    debug!("Custom sensor '{}' = {}", sensor.name, value);
+                    prev.insert(sensor.name.clone(), value);
+                }
+            }
+            Err(reason) => {
+                // The sentinel, not the error text, as the sensor's value.
+                debug!("Custom sensor '{}' failed: {}", sensor.name, reason);
+                self.state
+                    .mqtt
+                    .publish_sensor(topic_name, crate::mqtt::SENTINEL_UNKNOWN)
+                    .await;
+            }
+        }
+    }
+
     async fn poll_sensor(&self, sensor: &CustomSensor) -> Result<String, String> {
         match sensor.sensor_type {
             CustomSensorType::Powershell => self.poll_powershell(sensor).await,
@@ -172,7 +194,9 @@ impl CustomSensorManager {
         // + a blocking-pool thread (stacking on every disable/enable of a hanging
         // script). The timeout bounds a hanging script too: on timeout the future is
         // dropped and kill_on_drop terminates the child.
-        let mut cmd = tokio::process::Command::new("powershell");
+        let mut cmd = tokio::process::Command::new(crate::commands::system32(
+            "WindowsPowerShell\\v1.0\\powershell.exe",
+        ));
         cmd.args(["-NoProfile", "-Command", &script])
             .creation_flags(CREATE_NO_WINDOW)
             .kill_on_drop(true);
@@ -203,6 +227,13 @@ impl CustomSensorManager {
 
         let state = self.state.process_watcher.state();
         let guard = state.read().await;
+        // Before the first successful snapshot (or after CreateToolhelp32Snapshot
+        // fails) the table is empty for want of information, not because nothing
+        // is running. games.rs reads this exact state and checks the same flag;
+        // without it a ProcessExists sensor answers a confident "off".
+        if !guard.has_enumerated() {
+            return Err("process table not enumerated yet".to_string());
+        }
         let exists = guard.names().iter().any(|name| {
             name.eq_ignore_ascii_case(&process) || contains_ignore_ascii_case(name, &process)
         });
@@ -221,10 +252,17 @@ impl CustomSensorManager {
             // Use the shared /proc resolver so this matches Proton games (comm
             // "GTA5.exe") and >15-char comms - which raw comm equality misses -
             // and matches Windows semantics (eq / eq-without-.exe / substring).
-            let exists =
-                crate::sensors::proc_linux::resolve_processes(std::path::Path::new("/proc"))
-                    .iter()
-                    .any(|p| crate::sensors::proc_linux::name_matches(&p.name, &process));
+            // try_resolve_processes, NOT the collapsing resolve_processes
+            // wrapper: its own doc comment says callers that PUBLISH A SENSOR
+            // must distinguish "could not read /proc" from "nothing matched".
+            // On macOS (this cfg(unix) branch runs there) /proc does not exist
+            // at all, so the wrapper answered a confident "off" forever.
+            let procs =
+                crate::sensors::proc_linux::try_resolve_processes(std::path::Path::new("/proc"))
+                    .ok_or_else(|| "cannot read /proc".to_string())?;
+            let exists = procs
+                .iter()
+                .any(|p| crate::sensors::proc_linux::name_matches(&p.name, &process));
             Ok(if exists { "on" } else { "off" }.to_string())
         })
         .await

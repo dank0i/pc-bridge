@@ -28,6 +28,28 @@ pub(super) struct HADiscoveryPayload {
     pub(super) availability_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) json_attributes_topic: Option<String>,
+    /// Maps our `unknown` sentinel onto HA's own "no value" payload. Set on
+    /// every sensor that has a state topic.
+    ///
+    /// Without this, a sensor carrying a unit gets `state_class: measurement`
+    /// from `derive_state_class`, and HA then requires its state to parse as a
+    /// number. The literal string `unknown` does not, so HA rejects the update
+    /// and the entity FREEZES on its last good reading while logging an error
+    /// on every publish - the opposite of what the sentinel is for. Since
+    /// `publish_sensor` became retained, that payload is also replayed on every
+    /// HA restart.
+    ///
+    /// It has to be done with a template. HA's MQTT sensor has no
+    /// `payload_none` option: it hard-codes a comparison against the literal
+    /// string `None` (`homeassistant.const.PAYLOAD_NONE`), and unknown
+    /// discovery keys are accepted and silently ignored, so setting one looks
+    /// like it works and does nothing. Rendering to that exact string is the
+    /// supported way to say "no value".
+    ///
+    /// Harmless on the unitless string sensors, where HA's `unknown` state is
+    /// the same literal string the sentinel already produced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) value_template: Option<String>,
     /// Shared device info - Arc avoids cloning per-entity.
     pub(super) device: Arc<HADevice>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -36,6 +58,14 @@ pub(super) struct HADiscoveryPayload {
     pub(super) device_class: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) unit_of_measurement: Option<String>,
+    /// `number` component only. HA defaults min to 1, which is wrong for a
+    /// volume control, so these are set explicitly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) min: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) max: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) step: Option<f32>,
     /// Tells HA's recorder to populate long-term Statistics tables
     /// (kept forever as 5min/hour/day mean/min/max). Auto-derived from
     /// device_class + unit_of_measurement at registration time - see
