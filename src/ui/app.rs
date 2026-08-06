@@ -1374,11 +1374,15 @@ fn feature_row(
                     CONTROLS_W
                 };
                 let text_w = (ui.available_width() - reserved).max(MIN_TEXT_W);
-                ui.allocate_ui_with_layout(
-                    egui::vec2(text_w, 0.0),
-                    egui::Layout::top_down(egui::Align::LEFT),
-                    |ui| {
-                        ui.set_max_width(text_w);
+                // set_max_width on a scope, NOT allocate_ui_with_layout with a
+                // fixed size: allocating a 0-height region made the surrounding
+                // horizontal layout mis-centre the row, which showed up as a gap
+                // above the title on any row whose description wrapped to two
+                // lines. A scope constrains the wrap width and still grows to
+                // its content height.
+                ui.scope(|ui| {
+                    ui.set_max_width(text_w);
+                    ui.vertical(|ui| {
                         ui.horizontal(|ui| {
                             let title_col = if effective { TEXT } else { GREY };
                             ui.label(RichText::new(f.name).strong().size(15.0).color(title_col));
@@ -1395,8 +1399,8 @@ fn feature_row(
                             }
                         });
                         ui.label(RichText::new(f.desc).size(12.0).color(TEXT_DIM));
-                    },
-                );
+                    });
+                });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if removable {
                         if ui
