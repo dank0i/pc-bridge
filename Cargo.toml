@@ -17,7 +17,16 @@ default = []
 
 [dependencies]
 # Async runtime
-tokio = { version = "1", features = ["rt", "macros", "sync", "time", "signal", "process"] }
+tokio = { version = "1", features = [
+    "rt",
+    "macros",
+    "sync",
+    "time",
+    "signal",
+    "process",
+    # Line-reading module stdout/stderr (src/modules).
+    "io-util",
+] }
 
 # MQTT (native TLS via OS certificate store - same backend as ureq, zero extra binary cost)
 rumqttc = { version = "0.25", default-features = false, features = ["use-native-tls"] }
@@ -120,6 +129,8 @@ windows = { version = "0.58", features = [
     "implement",
     "Win32_Foundation",
     "Win32_System_Threading",
+    # Job object teardown for module child processes (src/modules).
+    "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
     "Win32_System_ProcessStatus",
     "Win32_System_Diagnostics_ToolHelp",

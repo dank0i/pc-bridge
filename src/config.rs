@@ -33,6 +33,9 @@ pub struct Config {
     /// Allow custom commands to run with elevated privileges
     #[serde(default)]
     pub custom_command_privileges_allowed: bool,
+    /// Allow the module host to run external programs
+    #[serde(default)]
+    pub modules_enabled: bool,
     /// Allow raw MQTT payloads to be executed as shell commands
     /// When false (default), only predefined and custom commands are allowed
     #[serde(default)]
@@ -80,6 +83,10 @@ pub struct Config {
     pub custom_sensors: Vec<CustomSensor>,
     #[serde(default)]
     pub custom_commands: Vec<CustomCommand>,
+    /// External programs supervised by the module host. Enabled by
+    /// `modules_enabled`; see `ModuleDef` for the shape of an entry.
+    #[serde(default)]
+    pub modules: Vec<ModuleDef>,
 
     /// Steam-discovered games the user removed in the settings window. Kept so a
     /// still-installed title isn't re-added on the next library scan. The settings
@@ -136,6 +143,8 @@ impl Default for Config {
             disk_sensor_paths: Vec::new(),
             custom_sensors: Vec::new(),
             custom_commands: Vec::new(),
+            modules_enabled: false,
+            modules: Vec::new(),
             removed_games: Vec::new(),
         }
     }
@@ -565,6 +574,43 @@ pub enum CustomSensorType {
 
 fn default_sensor_interval() -> u64 {
     30
+}
+
+/// An external program supervised by the module host.
+///
+/// PartialEq is derived and load-bearing: hot-reload restarts a module only when
+/// its definition actually changed, so an unrelated settings write must not
+/// bounce every running module.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModuleDef {
+    /// Unique. Keys the MQTT status map and appears in log lines.
+    pub name: String,
+    /// Program to run. Not passed through a shell: no globbing, no operators,
+    /// no quoting rules, and nothing to escape.
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub working_dir: Option<String>,
+    #[serde(default)]
+    pub restart: RestartPolicy,
+    /// Declares that this module needs pc-bridge to be elevated. It is a GATE,
+    /// never an escalation: a module marked admin runs at the agent's existing
+    /// privilege level, or does not run at all.
+    #[serde(default)]
+    pub admin: bool,
+}
+
+/// When to restart a module that has exited.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RestartPolicy {
+    /// Restart only on a non-zero exit. The default: a module that exits 0 has
+    /// finished its job, and restarting it would be a spin loop.
+    #[default]
+    OnFailure,
+    Always,
+    Never,
 }
 
 /// Custom command definition
@@ -1393,6 +1439,19 @@ impl Config {
             Self::validate_custom_command(cmd, self.custom_command_privileges_allowed)?;
         }
 
+        // Validate modules
+        let mut seen = std::collections::HashSet::new();
+        for m in &self.modules {
+            Self::validate_module(m, self.custom_command_privileges_allowed)?;
+            if !seen.insert(m.name.as_str()) {
+                bail!(
+                    "Duplicate module name '{}'. Names key the MQTT status map, \
+                     so two modules sharing one would report a single merged state.",
+                    m.name
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -1485,6 +1544,37 @@ impl Config {
     }
 
     /// Validate a custom command definition
+    /// Validate a module definition.
+    ///
+    /// The `admin` check mirrors `validate_custom_command`: refuse at config
+    /// load rather than at spawn, so a privilege mismatch is a startup error the
+    /// user sees once, not a runtime surprise buried in a log.
+    fn validate_module(m: &ModuleDef, privileges_allowed: bool) -> Result<()> {
+        if m.name.is_empty() {
+            bail!("Module name cannot be empty");
+        }
+        if m.name.contains(char::is_whitespace) {
+            bail!("Module name '{}' cannot contain whitespace", m.name);
+        }
+        if m.name.contains(['/', '+', '#']) {
+            bail!(
+                "Module name '{}' cannot contain MQTT topic characters '/', '+', or '#'",
+                m.name
+            );
+        }
+        if m.command.trim().is_empty() {
+            bail!("Module '{}' has an empty command", m.name);
+        }
+        if m.admin && !privileges_allowed {
+            bail!(
+                "Module '{}' has admin=true but custom_command_privileges_allowed=false. \
+                 Set custom_command_privileges_allowed=true if you understand the security implications.",
+                m.name
+            );
+        }
+        Ok(())
+    }
+
     fn validate_custom_command(cmd: &CustomCommand, privileges_allowed: bool) -> Result<()> {
         if cmd.name.is_empty() {
             bail!("Custom command name cannot be empty");
@@ -1731,6 +1821,14 @@ async fn reload_hot_config(state: &AppState) {
         config.custom_sensors = new_config.custom_sensors;
         config.custom_commands = new_config.custom_commands;
 
+        // Module host. The ModuleManager reconciles itself off config_generation
+        // (sent below), so applying the values here is the whole hot-reload path:
+        // it diffs definitions and restarts only what actually changed.
+        let old_modules_enabled = config.modules_enabled;
+        config.modules_enabled = new_config.modules_enabled;
+        config.modules = new_config.modules;
+        let new_modules_enabled = config.modules_enabled;
+
         let new_game_count = config.games.len();
 
         // Capture values for logging before dropping lock
@@ -1804,22 +1902,24 @@ async fn reload_hot_config(state: &AppState) {
         }
 
         // Log security-relevant changes (using captured locals - no lock needed)
-        if new_sensors_enabled != old_sensors_enabled {
-            if new_sensors_enabled {
-                warn!("custom_sensors_enabled is now TRUE");
-            } else {
-                info!("custom_sensors_enabled is now false");
-            }
-        }
-        if new_commands_enabled != old_commands_enabled {
-            if new_commands_enabled {
-                warn!(
-                    "custom_commands_enabled is now TRUE - arbitrary code execution possible via MQTT"
-                );
-            } else {
-                info!("custom_commands_enabled is now false");
-            }
-        }
+        log_flag_change(
+            "modules_enabled",
+            old_modules_enabled,
+            new_modules_enabled,
+            " - external programs can be launched",
+        );
+        log_flag_change(
+            "custom_sensors_enabled",
+            old_sensors_enabled,
+            new_sensors_enabled,
+            "",
+        );
+        log_flag_change(
+            "custom_commands_enabled",
+            old_commands_enabled,
+            new_commands_enabled,
+            " - arbitrary code execution possible via MQTT",
+        );
         if new_privileges_allowed {
             warn!(
                 "custom_command_privileges_allowed is TRUE - commands can run with ADMIN privileges"
@@ -1828,9 +1928,169 @@ async fn reload_hot_config(state: &AppState) {
     }
 }
 
+/// Log a security-relevant flag flip, at warn on enable and info on disable.
+///
+/// Extracted from `reload_hot_config` so each new gated feature costs one call
+/// rather than four branches: inline, the fourth flag pushed that function past
+/// the cognitive-complexity budget.
+fn log_flag_change(name: &str, old: bool, new: bool, enabled_note: &str) {
+    if old == new {
+        return;
+    }
+    if new {
+        warn!("{name} is now TRUE{enabled_note}");
+    } else {
+        info!("{name} is now false");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Config::default()` has an empty broker, which `validate()` rejects
+    /// before it ever reaches the module checks.
+    fn validatable_config() -> Config {
+        let mut cfg = Config::default();
+        cfg.mqtt.broker = "tcp://127.0.0.1:1883".to_string();
+        cfg
+    }
+
+    fn module(name: &str) -> ModuleDef {
+        ModuleDef {
+            name: name.to_string(),
+            command: "prog".to_string(),
+            args: vec![],
+            working_dir: None,
+            restart: RestartPolicy::default(),
+            admin: false,
+        }
+    }
+
+    #[test]
+    fn module_restart_defaults_to_on_failure() {
+        // A module that exits 0 has finished; `always` would spin it.
+        assert_eq!(RestartPolicy::default(), RestartPolicy::OnFailure);
+    }
+
+    #[test]
+    fn module_deserializes_with_kebab_case_restart_and_minimal_fields() {
+        let m: ModuleDef = serde_json::from_str(
+            r#"{"name":"sc3","command":"C:\\x\\y.exe","restart":"on-failure"}"#,
+        )
+        .expect("minimal module must parse");
+        assert_eq!(m.restart, RestartPolicy::OnFailure);
+        assert!(m.args.is_empty());
+        assert!(!m.admin);
+        assert!(m.working_dir.is_none());
+    }
+
+    /// The shape a user writes by hand. Every optional field is omitted here
+    /// on purpose: if a minimal entry stops parsing, the feature is
+    /// unusable without reading the source.
+    #[test]
+    fn documented_module_config_example_parses() {
+        let json = r#"{
+            "device_name": "pc",
+            "mqtt": { "broker": "tcp://127.0.0.1:1883", "user": "u", "pass": "p" },
+            "modules_enabled": true,
+            "modules": [
+                {
+                    "name": "desk-mixer",
+                    "command": "C:\\tools\\mixer\\pythonw.exe",
+                    "args": ["C:\\tools\\mixer\\mixer.py"],
+                    "working_dir": "C:\\tools\\mixer",
+                    "restart": "on-failure"
+                }
+            ]
+        }"#;
+        let cfg: Config = serde_json::from_str(json).expect("documented example must parse");
+        assert!(cfg.modules_enabled);
+        assert_eq!(cfg.modules.len(), 1);
+        assert_eq!(cfg.modules[0].name, "desk-mixer");
+        assert_eq!(cfg.modules[0].restart, RestartPolicy::OnFailure);
+        assert_eq!(cfg.modules[0].args.len(), 1);
+        assert!(!cfg.modules[0].admin);
+        cfg.validate().expect("documented example must validate");
+    }
+
+    /// A config with no `modules` key at all must still load: the field is new
+    /// and every existing userConfig.json lacks it.
+    #[test]
+    fn config_without_modules_key_still_loads() {
+        let json = r#"{
+            "device_name": "pc",
+            "mqtt": { "broker": "tcp://127.0.0.1:1883", "user": "u", "pass": "p" }
+        }"#;
+        let cfg: Config = serde_json::from_str(json).expect("must parse");
+        assert!(!cfg.modules_enabled);
+        assert!(cfg.modules.is_empty());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn module_name_rules_match_custom_commands() {
+        // The name keys an MQTT attribute map, so the same characters are out.
+        assert!(Config::validate_module(&module(""), false).is_err());
+        assert!(Config::validate_module(&module("two words"), false).is_err());
+        for bad in ["a/b", "a+b", "a#b"] {
+            assert!(
+                Config::validate_module(&module(bad), false).is_err(),
+                "'{bad}' must be rejected"
+            );
+        }
+        assert!(Config::validate_module(&module("sc3_faders"), false).is_ok());
+    }
+
+    #[test]
+    fn module_with_empty_command_is_rejected() {
+        let mut m = module("m");
+        m.command = "   ".to_string();
+        assert!(Config::validate_module(&m, false).is_err());
+    }
+
+    #[test]
+    fn admin_module_needs_privileges_allowed_at_config_load() {
+        let mut m = module("m");
+        m.admin = true;
+        // Refused at load, so a privilege mismatch is a startup error the user
+        // sees once rather than a runtime surprise in a log.
+        assert!(Config::validate_module(&m, false).is_err());
+        assert!(Config::validate_module(&m, true).is_ok());
+    }
+
+    #[test]
+    fn duplicate_module_names_are_rejected() {
+        let mut cfg = validatable_config();
+        cfg.modules = vec![module("dup"), module("dup")];
+        let err = cfg.validate().expect_err("duplicates must be rejected");
+        assert!(err.to_string().contains("Duplicate module name"));
+
+        cfg.modules = vec![module("a"), module("b")];
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn admin_module_fails_whole_config_validation() {
+        let mut cfg = validatable_config();
+        let mut m = module("privileged");
+        m.admin = true;
+        cfg.modules = vec![m];
+        assert!(!cfg.custom_command_privileges_allowed);
+        assert!(cfg.validate().is_err());
+        cfg.custom_command_privileges_allowed = true;
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn module_definitions_compare_by_value_for_hot_reload() {
+        // Hot-reload restarts a module only when its definition changed; if this
+        // stopped comparing by value, every settings write would bounce them all.
+        assert_eq!(module("a"), module("a"));
+        let mut changed = module("a");
+        changed.args = vec!["--flag".to_string()];
+        assert_ne!(module("a"), changed);
+    }
 
     #[test]
     fn test_matching_game_processes() {
@@ -1935,6 +2195,8 @@ mod tests {
             custom_sensors_enabled: false,
             custom_commands_enabled: false,
             custom_command_privileges_allowed: false,
+            modules_enabled: false,
+            modules: vec![],
             allow_raw_commands: false,
             allow_global_launch: true,
             allow_global_close: false,

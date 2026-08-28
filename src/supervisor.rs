@@ -24,6 +24,7 @@ use tokio::task::JoinHandle;
 
 use crate::AppState;
 use crate::config::Config;
+use crate::modules::ModuleManager;
 #[cfg(any(windows, target_os = "linux"))]
 use crate::power::DisplayAttachedSensor;
 use crate::power::PowerEventListener;
@@ -93,6 +94,15 @@ const TASKS: &[TaskDef] = &[
         name: "custom_sensors",
         enabled: |c| c.custom_sensors_enabled && !c.custom_sensors.is_empty(),
         spawn: |s, c| tokio::spawn(cancelable(CustomSensorManager::new(s).run(), c.subscribe())),
+    },
+    // Thread-holding in effect: this task owns child PROCESSES, so it takes the
+    // sender rather than a receiver. Cancelling it must also stop what it
+    // spawned, or disabling the feature would leave orphans running.
+    // Same flag-AND-non-empty gate as `disk` above, for the same reason.
+    TaskDef {
+        name: "modules",
+        enabled: |c| c.modules_enabled && !c.modules.is_empty(),
+        spawn: |s, c| tokio::spawn(ModuleManager::new(s).run(c)),
     },
     // These hold no per-task OS thread either: steam's fs-watcher is dropped with
     // the future; volume/audio_device/idle poll via spawn_blocking. (Their

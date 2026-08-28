@@ -73,6 +73,21 @@ impl MqttClient {
             )
             .await;
         }
+        // One entity for every module rather than one each: modules come and go
+        // on hot-reload, and per-module entities would need dynamic discovery
+        // registration and teardown for something HA reads as a single map.
+        // State is the running count; attributes hold name -> state.
+        if config.modules_enabled && !config.modules.is_empty() {
+            self.register_sensor_with_attributes(
+                device,
+                "modules",
+                "Modules",
+                "mdi:puzzle",
+                None,
+                None,
+            )
+            .await;
+        }
 
         if config.features.idle_tracking {
             self.register_sensor(
@@ -1194,6 +1209,13 @@ fn feature_entities(config: &Config) -> Vec<(&'static str, &'static str, bool)> 
         // Sensors
         ("sensor", "runninggames", f.running_game),
         ("sensor", "game_catalog", f.game_catalog),
+        // Same gate the supervisor uses: an empty list means no host task runs,
+        // so the entity would sit at "unknown" forever if it were registered.
+        (
+            "sensor",
+            "modules",
+            config.modules_enabled && !config.modules.is_empty(),
+        ),
         ("sensor", "lastactive", f.idle_tracking),
         ("sensor", "idle_seconds", f.idle_tracking),
         ("sensor", "screensaver", f.idle_tracking),

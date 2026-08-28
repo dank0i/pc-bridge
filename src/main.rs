@@ -24,6 +24,7 @@ mod linux_wayland;
 #[cfg(unix)]
 mod linux_x11;
 mod logging;
+mod modules;
 mod mqtt;
 mod notification;
 mod power;
