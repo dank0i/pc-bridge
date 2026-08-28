@@ -95,9 +95,8 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for ToplevelState {
             }
             zwlr_foreign_toplevel_handle_v1::Event::State { state: s } => {
                 // `s` is a byte buffer of u32 state values; Activated == 2.
-                let activated = s
-                    .chunks_exact(4)
-                    .any(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]]) == 2);
+                let (states, _trailing) = s.as_chunks::<4>();
+                let activated = states.iter().any(|c| u32::from_ne_bytes(*c) == 2);
                 state.windows.entry(id).or_default().1 = activated;
             }
             zwlr_foreign_toplevel_handle_v1::Event::Closed => {

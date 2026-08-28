@@ -211,7 +211,10 @@ impl CustomSensorManager {
         }
     }
 
+    // Stays `async` despite awaiting nothing: the signature has to match the
+    // Windows implementation this stands in for, and every call site awaits it.
     #[cfg(unix)]
+    #[allow(clippy::unused_async_trait_impl)]
     async fn poll_powershell(&self, _sensor: &CustomSensor) -> Result<String, String> {
         Err("powershell not available on this platform".to_string())
     }
@@ -330,7 +333,10 @@ impl CustomSensorManager {
         result.unwrap_or_else(|e| Err(e.to_string()))
     }
 
+    // Same as `poll_powershell` above: an awaitless platform stub whose shape is
+    // dictated by its Windows counterpart.
     #[cfg(unix)]
+    #[allow(clippy::unused_async_trait_impl)]
     async fn poll_registry(&self, _sensor: &CustomSensor) -> Result<String, String> {
         Err("registry not available on this platform".to_string())
     }
