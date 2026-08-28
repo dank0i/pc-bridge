@@ -201,6 +201,17 @@ impl Drop for JobHandle {
     }
 }
 
+/// True when a running module must be stopped: it is gone from config, or its
+/// definition changed. `previous` is the definition set this manager last acted
+/// on, so an unchanged module keeps running and an unrelated settings write does
+/// not bounce it.
+fn should_stop(name: &str, wanted: &[ModuleDef], previous: &[ModuleDef]) -> bool {
+    let Some(new) = wanted.iter().find(|d| d.name == name) else {
+        return true; // removed from config
+    };
+    previous.iter().find(|d| d.name == name) != Some(new)
+}
+
 pub struct ModuleManager {
     state: Arc<AppState>,
 }
@@ -282,19 +293,20 @@ impl ModuleManager {
         // Stop modules that are gone or whose definition changed.
         let stale: Vec<String> = running
             .keys()
-            .filter(|name| {
-                !wanted.iter().any(|d| {
-                    &&d.name == name && defs.iter().any(|old| old.name == d.name && old == d)
-                })
-            })
+            .filter(|name| should_stop(name, &wanted, defs))
             .cloned()
             .collect();
         for name in stale {
             if let Some(cancel) = running.remove(&name) {
                 let _ = cancel.send(());
             }
-            status.remove(&name);
         }
+
+        // Drop status for anything no longer in config. This has to key off
+        // `wanted` rather than off the stopped set: a BLOCKED module never
+        // entered `running`, so pruning only that map would leave a module the
+        // user deleted reporting `blocked` to HA forever.
+        status.retain(|name, _| wanted.iter().any(|d| &d.name == name));
 
         // Start anything wanted that is not already running.
         for def in &wanted {
@@ -302,10 +314,15 @@ impl ModuleManager {
                 continue;
             }
             if let Some(reason) = blocked_reason(def, privileges_allowed) {
-                warn!(
-                    "Module '{}' NOT STARTED - {reason}. Fix the config, or remove admin=true.",
-                    def.name
-                );
+                // Only on transition. `reload` runs on every config generation,
+                // so warning unconditionally would re-log for every blocked
+                // module every time an unrelated setting is saved.
+                if status.get(&def.name) != Some(&ModuleState::Blocked) {
+                    warn!(
+                        "Module '{}' NOT STARTED - {reason}. Fix the config, or remove admin=true.",
+                        def.name
+                    );
+                }
                 status.insert(def.name.clone(), ModuleState::Blocked);
                 continue;
             }
@@ -598,6 +615,50 @@ mod tests {
             let reason = blocked_reason(&m, true).expect("must be blocked");
             assert!(reason.contains("not running elevated"));
         }
+    }
+
+    #[test]
+    fn unchanged_module_keeps_running_across_a_reload() {
+        // An unrelated settings write must not bounce every running module.
+        let a = def("a", "true", &[], RestartPolicy::Never);
+        let b = def("b", "true", &[], RestartPolicy::Never);
+        let wanted = vec![a.clone(), b.clone()];
+        let previous = vec![a, b];
+        assert!(!should_stop("a", &wanted, &previous));
+        assert!(!should_stop("b", &wanted, &previous));
+    }
+
+    #[test]
+    fn changed_or_removed_modules_stop() {
+        let a = def("a", "true", &[], RestartPolicy::Never);
+        let mut a2 = a.clone();
+        a2.args = vec!["--now".to_string()];
+
+        // Redefined: must stop, so the start loop respawns it with the new def.
+        assert!(should_stop("a", &[a2], &[a.clone()]));
+        // Gone from config entirely.
+        assert!(should_stop("a", &[], &[a.clone()]));
+        // Never seen before: nothing to stop, but nothing running either.
+        assert!(should_stop("ghost", &[a], &[]));
+    }
+
+    /// Regression: a BLOCKED module never enters the running map, so pruning
+    /// only that map left a deleted module reporting `blocked` to HA forever.
+    #[test]
+    fn status_prunes_modules_that_left_the_config() {
+        let a = def("a", "true", &[], RestartPolicy::Never);
+        let mut status: HashMap<String, ModuleState> = HashMap::new();
+        status.insert("a".to_string(), ModuleState::Running);
+        status.insert("blocked-and-deleted".to_string(), ModuleState::Blocked);
+
+        let wanted = vec![a];
+        status.retain(|name, _| wanted.iter().any(|d| &d.name == name));
+
+        assert_eq!(status.get("a"), Some(&ModuleState::Running));
+        assert!(
+            !status.contains_key("blocked-and-deleted"),
+            "a module removed from config must not keep reporting a state"
+        );
     }
 
     #[test]
