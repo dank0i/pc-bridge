@@ -635,9 +635,9 @@ mod tests {
         a2.args = vec!["--now".to_string()];
 
         // Redefined: must stop, so the start loop respawns it with the new def.
-        assert!(should_stop("a", &[a2], &[a.clone()]));
+        assert!(should_stop("a", &[a2], std::slice::from_ref(&a)));
         // Gone from config entirely.
-        assert!(should_stop("a", &[], &[a.clone()]));
+        assert!(should_stop("a", &[], std::slice::from_ref(&a)));
         // Never seen before: nothing to stop, but nothing running either.
         assert!(should_stop("ghost", &[a], &[]));
     }
@@ -651,7 +651,7 @@ mod tests {
         status.insert("a".to_string(), ModuleState::Running);
         status.insert("blocked-and-deleted".to_string(), ModuleState::Blocked);
 
-        let wanted = vec![a];
+        let wanted = [a];
         status.retain(|name, _| wanted.iter().any(|d| &d.name == name));
 
         assert_eq!(status.get("a"), Some(&ModuleState::Running));
