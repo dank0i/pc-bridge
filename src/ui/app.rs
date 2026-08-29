@@ -405,6 +405,7 @@ impl App {
             match f.kind {
                 Kind::Action => self.custom_actions_on,
                 Kind::Sensor => self.custom_sensors_on,
+                Kind::Module => self.cfg.modules_enabled,
             }
         } else {
             self.group_on[f.group.index()]
@@ -869,6 +870,11 @@ fn feature_panel(app: &mut App, ui: &mut egui::Ui) {
                 "Arbitrary commands and shortcuts HA can trigger.",
             ),
             Kind::Sensor => ("Custom Sensors", "Your own sensors, built from any value."),
+            Kind::Module => (
+                "Modules",
+                "External programs the agent runs and supervises. Status only; \
+                 edit them in userConfig.json.",
+            ),
         }
     } else {
         (g.name(), g.blurb())
@@ -887,6 +893,10 @@ fn feature_panel(app: &mut App, ui: &mut egui::Ui) {
                 Kind::Sensor => {
                     toggle(ui, &mut app.custom_sensors_on);
                 }
+                // No toggle: enabling modules means adding one to the config,
+                // and a switch that could disable but never enable would be a
+                // trap. The count and per-module status carry the information.
+                Kind::Module => {}
             },
             _ => {
                 let i = g.index();
@@ -916,6 +926,7 @@ fn feature_panel(app: &mut App, ui: &mut egui::Ui) {
                 let n = match ct {
                     Kind::Action => app.custom_commands.len(),
                     Kind::Sensor => app.custom_sensors.len(),
+                    Kind::Module => app.cfg.modules.len(),
                 };
                 ui.label(RichText::new(format!("{n} defined")).size(12.0).color(GREY));
             } else {
@@ -997,6 +1008,12 @@ fn feature_panel(app: &mut App, ui: &mut egui::Ui) {
             {
                 app.custom_tab = Kind::Sensor;
             }
+            if ui
+                .selectable_label(app.custom_tab == Kind::Module, "Modules")
+                .clicked()
+            {
+                app.custom_tab = Kind::Module;
+            }
         });
         ui.add_space(GAP);
     }
@@ -1009,6 +1026,7 @@ fn feature_panel(app: &mut App, ui: &mut egui::Ui) {
         Group::Custom => match ct {
             Kind::Action => app.custom_actions_on,
             Kind::Sensor => app.custom_sensors_on,
+            Kind::Module => app.cfg.modules_enabled,
         },
         _ => app.group_on[g.index()],
     };
@@ -1060,6 +1078,7 @@ fn custom_view(app: &mut App, ui: &mut egui::Ui, master_on: bool, ct: Kind) {
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| match ct {
+            Kind::Module => module_view(app, ui, &needle),
             Kind::Sensor => {
                 for (i, s) in app.custom_sensors.iter_mut().enumerate() {
                     if !needle.is_empty() && !s.name.to_lowercase().contains(&needle) {
@@ -1135,6 +1154,105 @@ fn opt_field(ui: &mut egui::Ui, label: &str, value: &mut Option<String>, width: 
 }
 
 /// Editable form for one custom sensor. Returns true if removed.
+/// Read-only list of modules: what is configured, and what each one is doing.
+///
+/// Status comes from the agent's `modules` sensor over MQTT, the same value Home
+/// Assistant sees, because this window is a separate process from the agent and
+/// has no other view of runtime state. If the agent is not running, or has not
+/// published yet, the status column says so rather than inventing a value.
+fn module_view(app: &mut App, ui: &mut egui::Ui, needle: &str) {
+    let live = app.live.snapshot();
+    let status_of = |name: &str| -> Option<&'static str> {
+        live.modules
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, s)| match s.as_str() {
+                "running" => "running",
+                "stopped" => "stopped",
+                "blocked" => "blocked",
+                "failed" => "failed",
+                _ => "unknown",
+            })
+    };
+
+    if app.cfg.modules.is_empty() {
+        ui.add_space(GAP);
+        ui.label(
+            RichText::new("No modules configured.")
+                .size(14.0)
+                .color(TEXT_DIM),
+        );
+        ui.add_space(TIGHT);
+        ui.label(
+            RichText::new(
+                "A module is an external program the agent starts, supervises and \
+                 stops. Add one under \"modules\" in userConfig.json.",
+            )
+            .size(12.0)
+            .color(GREY),
+        );
+        return;
+    }
+
+    for m in &app.cfg.modules {
+        if !needle.is_empty() && !m.name.to_lowercase().contains(needle) {
+            continue;
+        }
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [180.0, 18.0],
+                egui::Label::new(RichText::new(&m.name).size(14.0).color(TEXT)),
+            );
+            match status_of(&m.name) {
+                Some("running") => badge(ui, "RUNNING", GREEN),
+                Some("blocked") => badge(ui, "BLOCKED", RED),
+                Some("failed") => badge(ui, "FAILED", RED),
+                Some("stopped") => badge(ui, "STOPPED", GREY),
+                Some(other) => badge(ui, other, GREY),
+                None if !live.modules_seen => badge(ui, "NO AGENT", GREY),
+                None => badge(ui, "NOT REPORTED", GREY),
+            }
+            if m.admin {
+                ui.add_space(TIGHT);
+                badge(ui, "ADMIN", ORANGE);
+            }
+        });
+        ui.add_space(TIGHT);
+        ui.label(
+            RichText::new(format!("{} {}", m.command, m.args.join(" ")))
+                .size(11.0)
+                .color(GREY),
+        );
+        ui.add_space(TIGHT);
+        ui.label(
+            RichText::new(format!("restart: {}", restart_label(m.restart)))
+                .size(11.0)
+                .color(TEXT_DIM),
+        );
+        ui.add_space(GAP);
+    }
+
+    if !live.modules_seen {
+        ui.add_space(GAP);
+        ui.label(
+            RichText::new(
+                "Status is unavailable: the agent has not published it. It is \
+                 running that reports this, not this window.",
+            )
+            .size(11.0)
+            .color(GREY),
+        );
+    }
+}
+
+fn restart_label(r: crate::config::RestartPolicy) -> &'static str {
+    match r {
+        crate::config::RestartPolicy::OnFailure => "on failure",
+        crate::config::RestartPolicy::Always => "always",
+        crate::config::RestartPolicy::Never => "never",
+    }
+}
+
 fn custom_sensor_row(ui: &mut egui::Ui, s: &mut CustomSensor, master_on: bool, idx: usize) -> bool {
     let fill = if master_on { ROW } else { ROW_OFF };
     let mut remove = false;
@@ -1390,6 +1508,7 @@ fn feature_row(
                             match f.kind {
                                 Kind::Sensor => badge(ui, "SENSOR", ACCENT),
                                 Kind::Action => badge(ui, "ACTION", ORANGE),
+                                Kind::Module => badge(ui, "MODULE", ACCENT),
                             }
                             if f.privileged {
                                 badge(ui, "ADMIN", RED);
@@ -1480,6 +1599,9 @@ fn feature_row(
                 }
                 ui.add_space(TIGHT);
                 match f.kind {
+                    // Modules are not feature flags, so they never reach this
+                    // row; the arm exists to keep the match total.
+                    Kind::Module => {}
                     Kind::Sensor => {
                         ui.horizontal(|ui| {
                             if f.interval == 0 {

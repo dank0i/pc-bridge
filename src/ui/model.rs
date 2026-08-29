@@ -23,6 +23,10 @@ pub enum Transport {
 pub enum Kind {
     Sensor,
     Action,
+    /// External programs the agent supervises. Read-only here: the settings
+    /// window is a separate process and only learns runtime state over MQTT,
+    /// so it can report what a module is doing but not start or stop it.
+    Module,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

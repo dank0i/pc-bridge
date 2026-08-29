@@ -27,6 +27,14 @@ pub struct LiveState {
     pub running_game_id: Option<String>,
     /// Display names of games Steam is updating (from `steam_updating` attributes).
     pub updating_games: Vec<String>,
+    /// Module host state, as `(name, status)` sorted by name, straight from the
+    /// agent's `modules` sensor. The settings window has no other way to see
+    /// this: modules are supervised inside the agent, and this window is a
+    /// separate process that only ever learns runtime state over the broker.
+    pub modules: Vec<(String, String)>,
+    /// True once a `modules` attributes payload has been seen, so the UI can
+    /// tell "no modules configured" apart from "not heard from the agent yet".
+    pub modules_seen: bool,
 }
 
 pub struct LiveView {
@@ -52,11 +60,32 @@ pub fn start(cfg: &Config) -> LiveView {
     LiveView { state }
 }
 
-fn sub_topics(dev: &str) -> [String; 3] {
+/// Parse the `modules` sensor's attribute payload into a sorted `(name, status)`
+/// list.
+///
+/// Sorted because an unordered JSON object would reshuffle the list between
+/// frames. Malformed or non-object payloads yield an empty list rather than an
+/// error: this is a status display, and a broker hiccup should not blank the
+/// window or panic the UI thread.
+fn parse_modules(payload: &str) -> Vec<(String, String)> {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(payload)
+    else {
+        return Vec::new();
+    };
+    let mut v: Vec<(String, String)> = map
+        .iter()
+        .map(|(k, val)| (k.clone(), val.as_str().unwrap_or("?").to_string()))
+        .collect();
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    v
+}
+
+fn sub_topics(dev: &str) -> [String; 4] {
     [
         crate::mqtt::availability_topic_for(dev),
         crate::mqtt::sensor_state_topic_for(dev, "runninggames"),
         crate::mqtt::sensor_attributes_topic_for(dev, "steam_updating"),
+        crate::mqtt::sensor_attributes_topic_for(dev, "modules"),
     ]
 }
 
@@ -107,6 +136,11 @@ fn run(broker: String, user: String, pass: String, dev: String, state: Arc<Mutex
                         "" | "none" | "None" | "unavailable" | "unknown" => None,
                         v => Some(v.to_string()),
                     };
+                } else if p.topic.ends_with("/modules/attributes") {
+                    // Attributes are a flat {name: status} map. Sorted so the
+                    // list does not reshuffle between frames.
+                    s.modules_seen = true;
+                    s.modules = parse_modules(&payload);
                 } else if p.topic.ends_with("/steam_updating/attributes") {
                     s.updating_games = serde_json::from_str::<serde_json::Value>(&payload)
                         .ok()
@@ -132,5 +166,50 @@ fn run(broker: String, user: String, pass: String, dev: String, state: Arc<Mutex
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_modules;
+
+    #[test]
+    fn parses_the_agents_attribute_shape() {
+        let got = parse_modules(r#"{"sc3-mixer":"running","other":"blocked"}"#);
+        assert_eq!(
+            got,
+            vec![
+                ("other".to_string(), "blocked".to_string()),
+                ("sc3-mixer".to_string(), "running".to_string()),
+            ],
+            "must be sorted by name so the list does not reshuffle between frames"
+        );
+    }
+
+    #[test]
+    fn malformed_payloads_do_not_panic_or_error() {
+        // A broker hiccup or a half-written retained message must not blank the
+        // window in a way that looks like a crash.
+        for bad in ["", "not json", "[1,2,3]", "null", "\"a string\"", "{"] {
+            assert!(
+                parse_modules(bad).is_empty(),
+                "{bad:?} should yield nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn non_string_status_values_are_marked_rather_than_dropped() {
+        // Losing the row entirely would hide a module; showing "?" does not.
+        let got = parse_modules(r#"{"a":123,"b":"running"}"#);
+        assert_eq!(got[0], ("a".to_string(), "?".to_string()));
+        assert_eq!(got[1], ("b".to_string(), "running".to_string()));
+    }
+
+    #[test]
+    fn an_empty_object_is_distinct_from_a_malformed_one() {
+        // Both give an empty list, but the caller sets modules_seen only on a
+        // real payload, which is what tells "no modules" from "no agent".
+        assert!(parse_modules("{}").is_empty());
     }
 }
