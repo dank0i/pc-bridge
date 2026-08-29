@@ -589,14 +589,14 @@ mod tests {
     }
 
     #[test]
-    fn non_admin_module_is_never_blocked() {
+    fn test_non_admin_module_is_never_blocked() {
         let m = def("m", "true", &[], RestartPolicy::Never);
         assert!(blocked_reason(&m, false).is_none());
         assert!(blocked_reason(&m, true).is_none());
     }
 
     #[test]
-    fn admin_module_blocked_without_privileges_allowed() {
+    fn test_admin_module_blocked_without_privileges_allowed() {
         let mut m = def("m", "true", &[], RestartPolicy::Never);
         m.admin = true;
         let reason = blocked_reason(&m, false).expect("must be blocked");
@@ -606,7 +606,7 @@ mod tests {
     /// The whole point of the gate: `admin: true` never escalates. With
     /// privileges allowed but the agent unelevated, the module must not run.
     #[test]
-    fn admin_module_blocked_when_agent_is_not_elevated() {
+    fn test_admin_module_blocked_when_agent_is_not_elevated() {
         let mut m = def("m", "true", &[], RestartPolicy::Never);
         m.admin = true;
         if is_elevated() {
@@ -618,7 +618,7 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_module_keeps_running_across_a_reload() {
+    fn test_unchanged_module_keeps_running_across_a_reload() {
         // An unrelated settings write must not bounce every running module.
         let a = def("a", "true", &[], RestartPolicy::Never);
         let b = def("b", "true", &[], RestartPolicy::Never);
@@ -629,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_or_removed_modules_stop() {
+    fn test_changed_or_removed_modules_stop() {
         let a = def("a", "true", &[], RestartPolicy::Never);
         let mut a2 = a.clone();
         a2.args = vec!["--now".to_string()];
@@ -645,7 +645,7 @@ mod tests {
     /// Regression: a BLOCKED module never enters the running map, so pruning
     /// only that map left a deleted module reporting `blocked` to HA forever.
     #[test]
-    fn status_prunes_modules_that_left_the_config() {
+    fn test_status_prunes_modules_that_left_the_config() {
         let a = def("a", "true", &[], RestartPolicy::Never);
         let mut status: HashMap<String, ModuleState> = HashMap::new();
         status.insert("a".to_string(), ModuleState::Running);
@@ -662,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn state_strings_are_stable() {
+    fn test_state_strings_are_stable() {
         // These land in MQTT attributes that HA templates match on.
         assert_eq!(ModuleState::Running.as_str(), "running");
         assert_eq!(ModuleState::Stopped.as_str(), "stopped");
@@ -671,7 +671,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pump_drops_overlong_lines_but_keeps_short_ones() {
+    async fn test_pump_drops_overlong_lines_but_keeps_short_ones() {
         let long = "x".repeat(MAX_LINE + 1);
         let input = format!("ok one\n{long}\nok two\n");
         let (tx, mut rx) = mpsc::channel(8);
@@ -690,7 +690,7 @@ mod tests {
     /// The regression this reader exists for: `BufReader::lines()` would buffer
     /// all 4 MB before any cap could reject it. Nothing here may be retained.
     #[tokio::test]
-    async fn a_huge_line_with_no_newline_is_bounded() {
+    async fn test_a_huge_line_with_no_newline_is_bounded() {
         let mut input = vec![b'x'; 4 * 1024 * 1024];
         input.extend_from_slice(b"\nsurvivor\n");
         let (tx, mut rx) = mpsc::channel(8);
@@ -701,7 +701,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_line_of_exactly_max_len_survives() {
+    async fn test_a_line_of_exactly_max_len_survives() {
         let line = "y".repeat(MAX_LINE);
         let (tx, mut rx) = mpsc::channel(8);
         pump(
@@ -715,7 +715,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn crlf_output_does_not_log_a_stray_carriage_return() {
+    async fn test_crlf_output_does_not_log_a_stray_carriage_return() {
         // Windows modules are the common case, so this is the common case.
         let (tx, mut rx) = mpsc::channel(8);
         pump(
@@ -730,7 +730,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_final_line_without_a_newline_is_not_lost() {
+    async fn test_a_final_line_without_a_newline_is_not_lost() {
         let (tx, mut rx) = mpsc::channel(8);
         pump(
             std::io::Cursor::new(b"no trailing newline".to_vec()),
@@ -743,7 +743,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_utf8_does_not_kill_the_pump() {
+    async fn test_invalid_utf8_does_not_kill_the_pump() {
         let (tx, mut rx) = mpsc::channel(8);
         pump(
             std::io::Cursor::new(b"bad \xff\xfe byte\ngood\n".to_vec()),
@@ -770,7 +770,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     #[ignore = "measurement, not a pass/fail test"]
-    async fn module_host_cpu_cost() {
+    async fn test_module_host_cpu_cost() {
         const LINES: usize = 200_000;
 
         fn cpu_micros() -> u64 {
@@ -875,7 +875,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stderr_lines_are_tagged() {
+    async fn test_stderr_lines_are_tagged() {
         let (tx, mut rx) = mpsc::channel(8);
         pump(
             std::io::Cursor::new(b"boom\n".to_vec()),
@@ -888,7 +888,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_failure_with_restart_never_gives_up() {
+    async fn test_spawn_failure_with_restart_never_gives_up() {
         let (tx, mut rx) = mpsc::channel(8);
         let (_cancel_tx, cancel_rx) = broadcast::channel(1);
         let m = def(
@@ -908,7 +908,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn clean_exit_with_on_failure_does_not_restart() {
+    async fn test_clean_exit_with_on_failure_does_not_restart() {
         let (tx, mut rx) = mpsc::channel(8);
         let (_cancel_tx, cancel_rx) = broadcast::channel(1);
         let m = def(
@@ -927,7 +927,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn failure_with_on_failure_restarts_and_cancel_wins_during_backoff() {
+    async fn test_failure_with_on_failure_restarts_and_cancel_wins_during_backoff() {
         let (tx, mut rx) = mpsc::channel(8);
         let (cancel_tx, cancel_rx) = broadcast::channel(1);
         let m = def(
@@ -953,7 +953,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn cancel_stops_a_running_module() {
+    async fn test_cancel_stops_a_running_module() {
         let (tx, mut rx) = mpsc::channel(8);
         let (cancel_tx, cancel_rx) = broadcast::channel(1);
         let m = def(

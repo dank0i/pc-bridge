@@ -74,10 +74,33 @@ fn parse_modules(payload: &str) -> Vec<(String, String)> {
     };
     let mut v: Vec<(String, String)> = map
         .iter()
-        .map(|(k, val)| (k.clone(), val.as_str().unwrap_or("?").to_string()))
+        .take(MAX_MODULES_SHOWN)
+        .map(|(k, val)| {
+            (
+                truncate(k, MAX_FIELD),
+                truncate(val.as_str().unwrap_or("?"), MAX_FIELD),
+            )
+        })
         .collect();
     v.sort_by(|a, b| a.0.cmp(&b.0));
     v
+}
+
+/// These arrive over MQTT, so they are not necessarily this agent's own output:
+/// anything able to publish to the topic can put arbitrary text here. Config
+/// validation caps module names on the way in, but nothing validates what comes
+/// back off the broker. Bound both the row count and the field width so a bad or
+/// hostile payload cannot wedge the layout or balloon the UI's memory.
+const MAX_MODULES_SHOWN: usize = 64;
+const MAX_FIELD: usize = 64;
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    // char_indices, not byte slicing: a cut mid-codepoint would panic.
+    let cut: String = s.chars().take(max).collect();
+    format!("{cut}...")
 }
 
 fn sub_topics(dev: &str) -> [String; 4] {
@@ -174,7 +197,7 @@ mod tests {
     use super::parse_modules;
 
     #[test]
-    fn parses_the_agents_attribute_shape() {
+    fn test_parses_the_agents_attribute_shape() {
         let got = parse_modules(r#"{"sc3-mixer":"running","other":"blocked"}"#);
         assert_eq!(
             got,
@@ -187,7 +210,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_payloads_do_not_panic_or_error() {
+    fn test_malformed_payloads_do_not_panic_or_error() {
         // A broker hiccup or a half-written retained message must not blank the
         // window in a way that looks like a crash.
         for bad in ["", "not json", "[1,2,3]", "null", "\"a string\"", "{"] {
@@ -199,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn non_string_status_values_are_marked_rather_than_dropped() {
+    fn test_non_string_status_values_are_marked_rather_than_dropped() {
         // Losing the row entirely would hide a module; showing "?" does not.
         let got = parse_modules(r#"{"a":123,"b":"running"}"#);
         assert_eq!(got[0], ("a".to_string(), "?".to_string()));
@@ -207,7 +230,41 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_object_is_distinct_from_a_malformed_one() {
+    fn test_oversized_payloads_are_bounded() {
+        // The agent caps module names at config load, but this text arrives off
+        // the broker and nothing revalidates it. A hostile or buggy publisher
+        // must not be able to wedge the layout.
+        let name = "x".repeat(5000);
+        let got = super::parse_modules(&format!("{{\"{name}\":\"running\"}}"));
+        assert_eq!(got.len(), 1);
+        assert!(
+            got[0].0.chars().count() <= super::MAX_FIELD + 3,
+            "name was {} chars, not truncated",
+            got[0].0.chars().count()
+        );
+
+        let many: String = (0..500)
+            .map(|i| format!("\"m{i}\":\"running\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let got = super::parse_modules(&format!("{{{many}}}"));
+        assert!(
+            got.len() <= super::MAX_MODULES_SHOWN,
+            "got {} rows",
+            got.len()
+        );
+    }
+
+    #[test]
+    fn test_truncation_does_not_split_a_codepoint() {
+        // Byte slicing here would panic on multi-byte characters.
+        let got = super::parse_modules(&format!("{{\"{}\":\"running\"}}", "\u{00e9}".repeat(200)));
+        assert_eq!(got.len(), 1);
+        assert!(got[0].0.ends_with("..."));
+    }
+
+    #[test]
+    fn test_an_empty_object_is_distinct_from_a_malformed_one() {
         // Both give an empty list, but the caller sets modules_seen only on a
         // real payload, which is what tells "no modules" from "no agent".
         assert!(parse_modules("{}").is_empty());
