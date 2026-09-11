@@ -217,7 +217,10 @@ game with its `appid`, `state_flags` and `scheduled_auto_update` (Unix seconds o
 auto-update window Steam has booked, `0` when it is queued to run right away). That last
 field is what separates "Up Next" from "Scheduled" on Steam's own Downloads page, and it
 is omitted entirely when the manifest does not say, so "run now" stays distinguishable
-from "not known".
+from "not known". A `recently_updated` attribute lists the settled manifests touched in
+the last 7 days (up to 10, newest first) with their `last_updated` timestamp; that is the
+only durable record of a finished download, because an app that has finished updating is
+by definition no longer in the updating set.
 A live download *percentage* is not exposed:
 Steam only makes that available in-process (via its CEF debug port or DLL injection),
 both of which are security/stability tradeoffs pc-bridge deliberately avoids.
@@ -569,7 +572,7 @@ PC Bridge auto-discovers via MQTT. After connecting, you'll get:
 - `sensor.<device>_battery_charging` - "true" or "false" - instant via OS power events
 - `sensor.<device>_active_window` - Current foreground window title - instant via SetWinEventHook
 - `sensor.<device>_game_catalog` - Number of exposed games, with full game list as attributes (retained)
-- `sensor.<device>_steam_updating` - "on"/"off" with game list and per-game scheduled auto-update time - instant via filesystem watcher
+- `sensor.<device>_steam_updating` - "on"/"off" with game list, per-game scheduled auto-update time, and recently finished updates - instant via filesystem watcher
 - `sensor.<device>_volume_level` - System volume percentage
 - `sensor.<device>_gpu_usage` - GPU utilization percentage (polled)
 - `sensor.<device>_network_throughput` - Network throughput with rx/tx attributes (polled)

@@ -11,8 +11,9 @@ use tokio::sync::mpsc;
 
 /// Pre-built JSON attributes for the idle (no updates) state.
 /// Avoids re-creating the same `serde_json::Value` every publish cycle.
-static IDLE_STEAM_ATTRS: LazyLock<serde_json::Value> =
-    LazyLock::new(|| serde_json::json!({"updating_games": [], "count": 0, "games": []}));
+static IDLE_STEAM_ATTRS: LazyLock<serde_json::Value> = LazyLock::new(
+    || serde_json::json!({"updating_games": [], "count": 0, "games": [], "recently_updated": []}),
+);
 use tokio::time::Duration;
 
 use crate::AppState;
@@ -40,6 +41,13 @@ const STATE_UPDATE_STARTED: u32 = 0x400;
 const STATE_DOWNLOADING: u32 = 0x10_0000;
 #[allow(dead_code)] // documents the uninstall bit, deliberately EXCLUDED from the mask
 const STATE_UNINSTALLING: u32 = 0x800;
+
+/// How far back a settled manifest still counts as "recently finished", and how
+/// many to report. Steam's own Completed list persists until the user clears it;
+/// this is a bounded stand-in, because the client's list is not readable from
+/// disk. The cap keeps the attribute payload small on a large library.
+const RECENTLY_UPDATED_WINDOW_SECS: u64 = 7 * 24 * 60 * 60;
+const RECENTLY_UPDATED_MAX: usize = 10;
 
 // Uninstalling (0x800), BackupRunning (0x1000), AppRunning (0x2000), and
 // FullyInstalled (0x4) are intentionally excluded so a game that is merely
@@ -75,6 +83,11 @@ struct GameUpdateState {
     /// "never". The byte counts beside it are deliberately NOT read: Steam
     /// rewrites them on resume, which is what got v3.1.x withdrawn.
     scheduled_auto_update: Option<u64>,
+    /// `LastUpdated` from the manifest: Unix seconds of when this app last
+    /// finished installing or updating. `None` when the key is absent or
+    /// unreadable. This is the only durable record of a finished download:
+    /// the Remote Client channel forgets one the moment it stops reporting it.
+    last_updated: Option<u64>,
     #[allow(dead_code)] // source manifest path; kept for diagnostics/future rescans
     manifest_path: PathBuf,
 }
@@ -83,6 +96,10 @@ pub struct SteamSensor {
     state: Arc<AppState>,
     library_folders: Vec<PathBuf>,
     updating_games: HashMap<String, GameUpdateState>,
+    /// Settled manifests touched inside the window, newest first. Feeds the
+    /// "Completed" list, which the update scan alone can never populate: a
+    /// finished download is by definition no longer updating.
+    recently_updated: Vec<GameUpdateState>,
     /// Cache of ACF file paths → (mtime, parsed state) to skip unchanged files
     acf_cache: HashMap<PathBuf, (std::time::SystemTime, Option<GameUpdateState>)>,
 }
@@ -93,6 +110,7 @@ impl SteamSensor {
             state,
             library_folders: Vec::new(),
             updating_games: HashMap::new(),
+            recently_updated: Vec::new(),
             acf_cache: HashMap::new(),
         }
     }
@@ -107,6 +125,13 @@ impl SteamSensor {
             .values()
             .map(|g| (g.app_id.clone(), g.name.clone(), g.scheduled_auto_update))
             .collect();
+        // A download finishing removes it from `updating_games` and adds it
+        // here, so without this the completion never triggers a republish.
+        sig.extend(
+            self.recently_updated
+                .iter()
+                .map(|g| (g.app_id.clone(), g.name.clone(), g.last_updated)),
+        );
         sig.sort();
         sig
     }
@@ -335,8 +360,13 @@ impl SteamSensor {
         let library_folders = self.library_folders.clone();
         let mut acf_cache = std::mem::take(&mut self.acf_cache);
 
-        let (new_updating, returned_cache) = tokio::task::spawn_blocking(move || {
+        let (new_updating, new_recent, returned_cache) = tokio::task::spawn_blocking(move || {
             let mut updating: HashMap<String, GameUpdateState> = HashMap::new();
+            let mut recent: Vec<GameUpdateState> = Vec::new();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             let mut seen_paths: HashSet<PathBuf> = HashSet::new();
 
             for lib_folder in &library_folders {
@@ -382,16 +412,23 @@ impl SteamSensor {
                         parse_acf_file(&path)
                     };
 
-                    if let Some(gs) = game_state
-                        && is_updating(&gs)
-                    {
-                        updating.insert(gs.app_id.clone(), gs);
+                    if let Some(gs) = game_state {
+                        if is_updating(&gs) {
+                            updating.insert(gs.app_id.clone(), gs);
+                        } else if let Some(ts) = gs.last_updated
+                            && now > 0
+                            && now.saturating_sub(ts) <= RECENTLY_UPDATED_WINDOW_SECS
+                        {
+                            recent.push(gs);
+                        }
                     }
                 }
             }
 
             acf_cache.retain(|path, _| seen_paths.contains(path));
-            (updating, acf_cache)
+            recent.sort_by_key(|g| std::cmp::Reverse(g.last_updated));
+            recent.truncate(RECENTLY_UPDATED_MAX);
+            (updating, recent, acf_cache)
         })
         .await
         .unwrap_or_else(|e| {
@@ -400,6 +437,7 @@ impl SteamSensor {
         });
 
         self.acf_cache = returned_cache;
+        self.recently_updated = new_recent;
 
         // Check for changes
         let was_updating = !self.updating_games.is_empty();
@@ -434,6 +472,7 @@ fn parse_acf_content(content: &str, manifest_path: &Path) -> Option<GameUpdateSt
     let mut name = String::new();
     let mut state_flags: u32 = 0;
     let mut scheduled_auto_update: Option<u64> = None;
+    let mut last_updated: Option<u64> = None;
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -455,6 +494,10 @@ fn parse_acf_content(content: &str, manifest_path: &Path) -> Option<GameUpdateSt
         {
             // A value we cannot read is "cannot determine", not "unscheduled".
             scheduled_auto_update = val.parse().ok();
+        } else if trimmed.starts_with("\"LastUpdated\"")
+            && let Some(val) = extract_vdf_value(trimmed)
+        {
+            last_updated = val.parse().ok();
         }
     }
 
@@ -467,6 +510,7 @@ fn parse_acf_content(content: &str, manifest_path: &Path) -> Option<GameUpdateSt
         name,
         state_flags,
         scheduled_auto_update,
+        last_updated,
         manifest_path: manifest_path.to_path_buf(),
     })
 }
@@ -488,6 +532,21 @@ fn is_updating(game: &GameUpdateState) -> bool {
 }
 
 impl SteamSensor {
+    /// Settled manifests touched recently, newest first. Rendered as Steam's
+    /// "Completed" list.
+    fn recent_json(&self) -> Vec<serde_json::Value> {
+        self.recently_updated
+            .iter()
+            .map(|g| {
+                serde_json::json!({
+                    "appid": g.app_id,
+                    "name": g.name,
+                    "last_updated": g.last_updated,
+                })
+            })
+            .collect()
+    }
+
     async fn publish_state(&self) {
         let is_updating = !self.updating_games.is_empty();
         let state_str = if is_updating { "on" } else { "off" };
@@ -528,16 +587,33 @@ impl SteamSensor {
                 "updating_games": names,
                 "count": self.updating_games.len(),
                 "games": games,
+                "recently_updated": self.recent_json(),
             });
             self.state
                 .mqtt
                 .publish_sensor_attributes("steam_updating", &attrs)
                 .await;
         } else {
-            self.state
-                .mqtt
-                .publish_sensor_attributes("steam_updating", &IDLE_STEAM_ATTRS)
-                .await;
+            // Nothing is updating, but a finished download must still be
+            // listed, so the idle payload is built rather than reused.
+            let recent = self.recent_json();
+            if recent.is_empty() {
+                self.state
+                    .mqtt
+                    .publish_sensor_attributes("steam_updating", &IDLE_STEAM_ATTRS)
+                    .await;
+            } else {
+                let attrs = serde_json::json!({
+                    "updating_games": [],
+                    "count": 0,
+                    "games": [],
+                    "recently_updated": recent,
+                });
+                self.state
+                    .mqtt
+                    .publish_sensor_attributes("steam_updating", &attrs)
+                    .await;
+            }
         }
     }
 }
@@ -632,6 +708,7 @@ mod tests {
             name: "Test Game".to_string(),
             state_flags: flags,
             scheduled_auto_update: None,
+            last_updated: None,
             manifest_path: PathBuf::from("/tmp/test.acf"),
         }
     }
@@ -741,6 +818,45 @@ mod tests {
         assert_eq!(
             result.scheduled_auto_update, None,
             "an absent key is unknown, not a schedule of zero"
+        );
+    }
+
+    #[test]
+    fn test_parse_acf_content_last_updated() {
+        // A settled manifest: fully installed, with the timestamp of the
+        // update that finished. This is what feeds the Completed list.
+        let content = r#"
+"AppState"
+{
+	"appid"		"730"
+	"name"		"Counter-Strike 2"
+	"StateFlags"		"4"
+	"LastUpdated"		"1757590080"
+}
+"#;
+        let path = PathBuf::from("/tmp/appmanifest_730.acf");
+        let result = parse_acf_content(content, &path).unwrap();
+        assert_eq!(result.last_updated, Some(1_757_590_080));
+        assert!(
+            !is_updating(&result),
+            "a settled manifest must not count as updating"
+        );
+    }
+
+    #[test]
+    fn test_parse_acf_content_last_updated_absent_is_unknown() {
+        let content = r#"
+"AppState"
+{
+	"appid"		"1"
+	"StateFlags"		"4"
+}
+"#;
+        let path = PathBuf::from("/tmp/appmanifest_1.acf");
+        let result = parse_acf_content(content, &path).unwrap();
+        assert_eq!(
+            result.last_updated, None,
+            "an undated manifest cannot be placed in the Completed list"
         );
     }
 
@@ -860,6 +976,7 @@ mod tests {
                 name: "Counter-Strike 2".to_string(),
                 state_flags: STATE_UPDATE_RUNNING,
                 scheduled_auto_update: None,
+                last_updated: None,
                 manifest_path: PathBuf::from("/tmp/appmanifest_730.acf"),
             },
             GameUpdateState {
@@ -867,6 +984,7 @@ mod tests {
                 name: "Team Fortress 2".to_string(),
                 state_flags: STATE_DOWNLOADING,
                 scheduled_auto_update: None,
+                last_updated: None,
                 manifest_path: PathBuf::from("/tmp/appmanifest_440.acf"),
             },
         ];
@@ -919,6 +1037,7 @@ mod tests {
                     name: "HELLDIVERS 2".to_string(),
                     state_flags: STATE_DOWNLOADING,
                     scheduled_auto_update: None,
+                    last_updated: None,
                     manifest_path: PathBuf::from("/tmp/appmanifest_553850.acf"),
                 },
             );
