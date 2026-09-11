@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 /// Pre-built JSON attributes for the idle (no updates) state.
 /// Avoids re-creating the same `serde_json::Value` every publish cycle.
 static IDLE_STEAM_ATTRS: LazyLock<serde_json::Value> =
-    LazyLock::new(|| serde_json::json!({"updating_games": [], "count": 0}));
+    LazyLock::new(|| serde_json::json!({"updating_games": [], "count": 0, "games": []}));
 use tokio::time::Duration;
 
 use crate::AppState;
@@ -64,6 +64,17 @@ struct GameUpdateState {
     app_id: String,
     name: String,
     state_flags: u32,
+    /// `ScheduledAutoUpdate` from the manifest: Unix seconds of the auto-update
+    /// window Steam has booked for this game, 0 when it is not scheduled. This
+    /// is the one queue fact the Remote Client channel never carries, and it is
+    /// what the Steam client itself shows as "Wednesday 4:09 AM" on Downloads.
+    ///
+    /// `Some(0)` is Steam saying "queued to run now", `None` is the key being
+    /// absent or unreadable. Those are different answers and must not collapse
+    /// into a bare 0, which would be indistinguishable from a real schedule of
+    /// "never". The byte counts beside it are deliberately NOT read: Steam
+    /// rewrites them on resume, which is what got v3.1.x withdrawn.
+    scheduled_auto_update: Option<u64>,
     #[allow(dead_code)] // source manifest path; kept for diagnostics/future rescans
     manifest_path: PathBuf,
 }
@@ -86,14 +97,15 @@ impl SteamSensor {
         }
     }
 
-    /// Stable signature of the current updating set (sorted (app_id, name)
-    /// pairs), used to publish only when the observable state changes. Includes
-    /// the name so a manifest that gains its real name mid-update republishes.
-    fn updating_signature(&self) -> Vec<(String, String)> {
-        let mut sig: Vec<(String, String)> = self
+    /// Stable signature of the current updating set, used to publish only when
+    /// the observable state changes. Includes the name so a manifest that gains
+    /// its real name mid-update republishes, and the scheduled time so moving a
+    /// game between Up Next and Scheduled in the client republishes too.
+    fn updating_signature(&self) -> Vec<(String, String, Option<u64>)> {
+        let mut sig: Vec<(String, String, Option<u64>)> = self
             .updating_games
             .values()
-            .map(|g| (g.app_id.clone(), g.name.clone()))
+            .map(|g| (g.app_id.clone(), g.name.clone(), g.scheduled_auto_update))
             .collect();
         sig.sort();
         sig
@@ -421,6 +433,7 @@ fn parse_acf_content(content: &str, manifest_path: &Path) -> Option<GameUpdateSt
     let mut app_id = String::new();
     let mut name = String::new();
     let mut state_flags: u32 = 0;
+    let mut scheduled_auto_update: Option<u64> = None;
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -437,6 +450,11 @@ fn parse_acf_content(content: &str, manifest_path: &Path) -> Option<GameUpdateSt
             && let Some(val) = extract_vdf_value(trimmed)
         {
             state_flags = val.parse().unwrap_or(0);
+        } else if trimmed.starts_with("\"ScheduledAutoUpdate\"")
+            && let Some(val) = extract_vdf_value(trimmed)
+        {
+            // A value we cannot read is "cannot determine", not "unscheduled".
+            scheduled_auto_update = val.parse().ok();
         }
     }
 
@@ -448,6 +466,7 @@ fn parse_acf_content(content: &str, manifest_path: &Path) -> Option<GameUpdateSt
         app_id,
         name,
         state_flags,
+        scheduled_auto_update,
         manifest_path: manifest_path.to_path_buf(),
     })
 }
@@ -478,16 +497,37 @@ impl SteamSensor {
             .publish_sensor("steam_updating", state_str)
             .await;
 
-        // Publish attributes with game names
+        // Publish attributes with game names. `updating_games` and `count` keep
+        // the shape existing templates read; `games` adds per-app detail without
+        // touching them. Sorted by appid so the payload is stable across scans.
         if is_updating {
             let names: Vec<&str> = self
                 .updating_games
                 .values()
                 .map(|g| g.name.as_str())
                 .collect();
+            let mut sorted: Vec<&GameUpdateState> = self.updating_games.values().collect();
+            sorted.sort_by(|a, b| a.app_id.cmp(&b.app_id));
+            let games: Vec<serde_json::Value> = sorted
+                .iter()
+                .map(|g| {
+                    let mut v = serde_json::json!({
+                        "appid": g.app_id,
+                        "name": g.name,
+                        "state_flags": g.state_flags,
+                    });
+                    // Present only when the manifest actually said so, so a
+                    // consumer can tell "run now" from "we do not know".
+                    if let Some(at) = g.scheduled_auto_update {
+                        v["scheduled_auto_update"] = serde_json::json!(at);
+                    }
+                    v
+                })
+                .collect();
             let attrs = serde_json::json!({
                 "updating_games": names,
-                "count": self.updating_games.len()
+                "count": self.updating_games.len(),
+                "games": games,
             });
             self.state
                 .mqtt
@@ -591,6 +631,7 @@ mod tests {
             app_id: "730".to_string(),
             name: "Test Game".to_string(),
             state_flags: flags,
+            scheduled_auto_update: None,
             manifest_path: PathBuf::from("/tmp/test.acf"),
         }
     }
@@ -697,6 +738,61 @@ mod tests {
         assert_eq!(result.app_id, "440");
         assert_eq!(result.state_flags, 1028);
         assert!(is_updating(&result));
+        assert_eq!(
+            result.scheduled_auto_update, None,
+            "an absent key is unknown, not a schedule of zero"
+        );
+    }
+
+    #[test]
+    fn test_parse_acf_content_scheduled_auto_update() {
+        // Shape as Steam writes it: a Unix timestamp for the booked window.
+        let content = r#"
+"AppState"
+{
+	"appid"		"2807960"
+	"name"		"Battlefield 6"
+	"StateFlags"		"6"
+	"ScheduledAutoUpdate"		"1757563740"
+}
+"#;
+        let path = PathBuf::from("/tmp/appmanifest_2807960.acf");
+        let result = parse_acf_content(content, &path).unwrap();
+        assert_eq!(result.scheduled_auto_update, Some(1_757_563_740));
+    }
+
+    #[test]
+    fn test_parse_acf_content_scheduled_zero_means_run_now() {
+        let content = r#"
+"AppState"
+{
+	"appid"		"2767030"
+	"name"		"Marvel Rivals"
+	"StateFlags"		"6"
+	"ScheduledAutoUpdate"		"0"
+}
+"#;
+        let path = PathBuf::from("/tmp/appmanifest_2767030.acf");
+        let result = parse_acf_content(content, &path).unwrap();
+        assert_eq!(
+            result.scheduled_auto_update,
+            Some(0),
+            "an explicit 0 is Steam saying run now, which is not the same as absent"
+        );
+    }
+
+    #[test]
+    fn test_parse_acf_content_scheduled_garbage_is_unknown() {
+        let content = r#"
+"AppState"
+{
+	"appid"		"1"
+	"ScheduledAutoUpdate"		"tomorrow"
+}
+"#;
+        let path = PathBuf::from("/tmp/appmanifest_1.acf");
+        let result = parse_acf_content(content, &path).unwrap();
+        assert_eq!(result.scheduled_auto_update, None);
     }
 
     #[test]
@@ -763,12 +859,14 @@ mod tests {
                 app_id: "730".to_string(),
                 name: "Counter-Strike 2".to_string(),
                 state_flags: STATE_UPDATE_RUNNING,
+                scheduled_auto_update: None,
                 manifest_path: PathBuf::from("/tmp/appmanifest_730.acf"),
             },
             GameUpdateState {
                 app_id: "440".to_string(),
                 name: "Team Fortress 2".to_string(),
                 state_flags: STATE_DOWNLOADING,
+                scheduled_auto_update: None,
                 manifest_path: PathBuf::from("/tmp/appmanifest_440.acf"),
             },
         ];
@@ -820,6 +918,7 @@ mod tests {
                     app_id: "553850".to_string(),
                     name: "HELLDIVERS 2".to_string(),
                     state_flags: STATE_DOWNLOADING,
+                    scheduled_auto_update: None,
                     manifest_path: PathBuf::from("/tmp/appmanifest_553850.acf"),
                 },
             );

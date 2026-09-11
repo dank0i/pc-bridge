@@ -248,7 +248,7 @@ pub fn registry(device_id: &str) -> Vec<Feature> {
             0,
             "sensor.dank0i_pc_steam_updating",
             "",
-            "Reads Steam's .acf manifests",
+            "Reads Steam's .acf manifests, including each game's scheduled auto-update time",
         ),
         a(
             "launch_game",
