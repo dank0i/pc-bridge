@@ -43,9 +43,10 @@ const STATE_DOWNLOADING: u32 = 0x10_0000;
 const STATE_UNINSTALLING: u32 = 0x800;
 
 /// How far back a settled manifest still counts as "recently finished", and how
-/// many to report. Steam's own Completed list persists until the user clears it;
-/// this is a bounded stand-in, because the client's list is not readable from
-/// disk. The cap keeps the attribute payload small on a large library.
+/// many to report. Steam's own Completed list is bounded by the client session,
+/// not by a window, which is why `steam_started_at` is published beside this:
+/// the consumer picks the boundary. The window and cap exist only to keep the
+/// attribute payload small on a large library.
 const RECENTLY_UPDATED_WINDOW_SECS: u64 = 7 * 24 * 60 * 60;
 const RECENTLY_UPDATED_MAX: usize = 10;
 
@@ -588,6 +589,7 @@ impl SteamSensor {
                 "count": self.updating_games.len(),
                 "games": games,
                 "recently_updated": self.recent_json(),
+                "steam_started_at": crate::steam::steam_started_at(),
             });
             self.state
                 .mqtt
@@ -608,6 +610,7 @@ impl SteamSensor {
                     "count": 0,
                     "games": [],
                     "recently_updated": recent,
+                    "steam_started_at": crate::steam::steam_started_at(),
                 });
                 self.state
                     .mqtt

@@ -121,6 +121,146 @@ pub(crate) fn has_marker_token(name: &str, markers: &[&str]) -> bool {
     markers.iter().any(|m| tokens.iter().any(|t| t == m))
 }
 
+/// Unix seconds at which the running Steam client started, or None when Steam
+/// is not running or the answer cannot be determined.
+///
+/// This is the boundary of Steam's own "Completed" list: the client forgets
+/// every finished download when it restarts, so a completion timestamp older
+/// than this belongs to a previous session and is not shown. Measured against
+/// the live client: completions at 22:35 survived until Steam was restarted at
+/// 23:11, after which only later ones were listed.
+///
+/// Returning None is "cannot determine", never "Steam just started"; a caller
+/// must not substitute now().
+#[cfg(windows)]
+pub fn steam_started_at() -> Option<u64> {
+    use windows::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // FILETIME counts 100ns intervals from 1601-01-01; Unix counts seconds from
+    // 1970-01-01. This is the gap, in seconds.
+    const FILETIME_TO_UNIX_SECS: u64 = 11_644_473_600;
+    const HUNDRED_NS_PER_SEC: u64 = 10_000_000;
+
+    let mut pid = None;
+    // SAFETY: standard Win32 process enumeration, mirroring
+    // process_watcher::snapshot_all_processes. Every handle is closed.
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return None;
+        };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        if Process32FirstW(snapshot, &raw mut entry).is_ok() {
+            loop {
+                let nul = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                if String::from_utf16_lossy(&entry.szExeFile[..nul])
+                    .eq_ignore_ascii_case("steam.exe")
+                {
+                    pid = Some(entry.th32ProcessID);
+                    break;
+                }
+                if Process32NextW(snapshot, &raw mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snapshot);
+    }
+    let pid = pid?;
+
+    // SAFETY: the handle from OpenProcess is closed on every path below.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut created = FILETIME::default();
+        let (mut exit, mut kernel, mut user) = Default::default();
+        let ok = GetProcessTimes(
+            handle,
+            &raw mut created,
+            &raw mut exit,
+            &raw mut kernel,
+            &raw mut user,
+        )
+        .is_ok();
+        let _ = CloseHandle(handle);
+        if !ok {
+            return None;
+        }
+        let ticks = ((created.dwHighDateTime as u64) << 32) | u64::from(created.dwLowDateTime);
+        (ticks / HUNDRED_NS_PER_SEC).checked_sub(FILETIME_TO_UNIX_SECS)
+    }
+}
+
+/// Unix seconds at which the running Steam client started. See the Windows twin
+/// for what this is for.
+///
+/// Reads `/proc`, so it answers on Linux and returns None on macOS, which has
+/// no `/proc`. That is the honest answer there rather than a fabricated one.
+#[cfg(unix)]
+pub fn steam_started_at() -> Option<u64> {
+    // Field 22 of /proc/<pid>/stat is the process start time in clock ticks
+    // since boot. USER_HZ is 100 on every Linux ABI in practice and is fixed
+    // for the kernel ABI regardless of the configured tick rate.
+    const USER_HZ: u64 = 100;
+
+    let boot = std::fs::read_to_string("/proc/stat").ok()?;
+    let btime: u64 = boot
+        .lines()
+        .find_map(|l| l.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()?;
+
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let path = entry.path();
+        let Some(pid) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !pid.bytes().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(comm) = std::fs::read_to_string(path.join("comm")) else {
+            continue;
+        };
+        if comm.trim() != "steam" {
+            continue;
+        }
+        let Ok(stat) = std::fs::read_to_string(path.join("stat")) else {
+            continue;
+        };
+        if let Some(start) = parse_proc_stat_starttime(&stat) {
+            return Some(btime + start / USER_HZ);
+        }
+    }
+    None
+}
+
+/// Field 22 (1-indexed) of /proc/<pid>/stat, the start time in clock ticks.
+///
+/// Split out so it is unit-testable off Linux. The executable name in field 2
+/// is wrapped in parentheses and may itself contain spaces or parentheses, so
+/// fields are counted from after the LAST `)`, never by splitting the whole
+/// line on whitespace.
+#[cfg(unix)]
+fn parse_proc_stat_starttime(stat: &str) -> Option<u64> {
+    let after = &stat[stat.rfind(')')? + 1..];
+    // After the closing paren, field 3 (state) is first, so start time is the
+    // 20th field from here.
+    after.split_whitespace().nth(19)?.parse().ok()
+}
+
 /// Find Steam installation path (shared across modules).
 ///
 /// Checks (in order): HKCU registry, HKLM registry, common paths (Windows)
@@ -197,6 +337,35 @@ pub fn find_steam_path() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    // -- parse_proc_stat_starttime --
+    // The executable name is parenthesised and may contain spaces and
+    // parentheses, which is why fields are counted from the LAST ')'.
+
+    #[test]
+    #[cfg(unix)]
+    fn test_proc_stat_starttime_plain_name() {
+        let stat = "1234 (steam) S 1 1234 1234 0 -1 4194560 100 0 0 0 5 2 0 0 20 0 30 0 987654                     123456 789 18446744073709551615";
+        assert_eq!(super::parse_proc_stat_starttime(stat), Some(987_654));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_proc_stat_starttime_name_with_spaces_and_parens() {
+        // A name like "steam (beta) x" would break a naive whitespace split.
+        let stat = "1234 (steam (beta) x) S 1 1234 1234 0 -1 4194560 100 0 0 0 5 2 0 0 20 0 30 0                     555 123456 789";
+        assert_eq!(super::parse_proc_stat_starttime(stat), Some(555));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_proc_stat_starttime_truncated_is_none() {
+        assert_eq!(
+            super::parse_proc_stat_starttime("1234 (steam) S 1 2 3"),
+            None
+        );
+        assert_eq!(super::parse_proc_stat_starttime("no parens here"), None);
+    }
+
     use super::{is_non_game_exe, tokenize};
 
     #[test]

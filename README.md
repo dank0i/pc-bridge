@@ -220,7 +220,10 @@ is omitted entirely when the manifest does not say, so "run now" stays distingui
 from "not known". A `recently_updated` attribute lists the settled manifests touched in
 the last 7 days (up to 10, newest first) with their `last_updated` timestamp; that is the
 only durable record of a finished download, because an app that has finished updating is
-by definition no longer in the updating set.
+by definition no longer in the updating set. Alongside it, `steam_started_at` is the Unix
+time the running Steam client started (`null` when Steam is not running or it cannot be
+determined). Steam's own Completed list is bounded by the client session rather than by a
+time window, so a consumer wanting to match it filters on that timestamp.
 A live download *percentage* is not exposed:
 Steam only makes that available in-process (via its CEF debug port or DLL injection),
 both of which are security/stability tradeoffs pc-bridge deliberately avoids.
