@@ -886,12 +886,8 @@ impl MqttClient {
     /// HWiNFO sensors use the multi-source `availability` list so HA marks
     /// them unavailable when EITHER pc-bridge OR HWiNFO is down. The single
     /// `availability_topic` field is left empty (HA picks one or the other).
-    /// No `json_attributes_topic`. HWiNFO sensors used to publish
-    /// min/max/avg/unit attributes, but `avg` moved on nearly every sample, so
-    /// HA's recorder stored every reading twice (a value row plus an
-    /// attribute-only row with a fresh attribute set). Nothing read them, and
-    /// they were most of the HA database. The retained attributes topic is
-    /// cleared here so installs that still hold the old dict drop it.
+    /// `json_attributes_topic` is always set - every HWiNFO sensor publishes
+    /// min/max/avg/unit attributes alongside its state.
     ///
     /// Gated to `#[cfg(windows)]` because the HWiNFO producer task is
     /// Windows-only, and the sole caller is the Windows-gated discovery block.
@@ -922,7 +918,7 @@ impl MqttClient {
             availability_topic: None,
             availability: Some(availability_entries),
             availability_mode: Some("all".to_string()),
-            json_attributes_topic: None,
+            json_attributes_topic: Some(self.sensor_attributes_topic(name)),
             device: Arc::clone(device),
             icon: Some(icon.to_string()),
             device_class: device_class.map(|s| s.to_string()),
@@ -940,19 +936,6 @@ impl MqttClient {
             return;
         };
         self.publish_discovery(&topic, json).await;
-
-        // REMOVED ATTRIBUTES (v3.7.3). Clear the retained min/max/avg dict that
-        // older versions left on the broker. Safe to delete once no deployed
-        // agent could still have published it.
-        let _ = self
-            .client
-            .publish(
-                self.sensor_attributes_topic(name),
-                QoS::AtLeastOnce,
-                true,
-                Vec::<u8>::new(),
-            )
-            .await;
     }
 
     /// Internal helper to register a sensor
