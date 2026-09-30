@@ -495,13 +495,6 @@ mod win {
             let mut stale_offline = false;
             let mut last_published: HashMap<&'static str, (f64, Instant)> = HashMap::new();
             // Last (min, max, avg, unit) actually published for each sensor.
-            // The state value changes every threshold-crossing, but attributes
-            // (especially min/max/avg) are slow-moving - skip the attribute
-            // publish when they're unchanged.  String unit comparison is cheap;
-            // unit changes are essentially never in steady-state.
-            let mut last_published_attrs: HashMap<&'static str, (f64, f64, f64, String)> =
-                HashMap::new();
-
             info!(
                 "HWiNFO sensor started (lazy poll: 10s closed / 500ms once open, {} mapped sensors)",
                 MATCH_RULES.len()
@@ -534,7 +527,6 @@ mod win {
                             break;
                         }
                         last_published.clear();
-                        last_published_attrs.clear();
                         last_poll_time = None;
                         let online = client.is_some();
                         self.state.mqtt.publish_hwinfo_availability(online).await;
@@ -650,8 +642,7 @@ mod win {
                                         ) {
                                             continue;
                                         }
-                                        self.publish_one(key, reading, &mut last_published_attrs)
-                                            .await;
+                                        self.publish_one(key, reading).await;
                                         last_published.insert(key, (reading.value, now));
                                     }
                                     for &key in &misses {
@@ -692,43 +683,14 @@ mod win {
             }
         }
 
-        async fn publish_one(
-            &self,
-            key: &'static str,
-            reading: &Reading,
-            last_attrs: &mut HashMap<&'static str, (f64, f64, f64, String)>,
-        ) {
+        /// Publishes the value only. min/max/avg/unit attributes were dropped
+        /// in v3.7.3: `avg` changed on nearly every sample, so HA recorded each
+        /// reading twice, and nothing consumed them (see
+        /// `register_hwinfo_sensor`).
+        async fn publish_one(&self, key: &'static str, reading: &Reading) {
             let decimals = decimals_for(key);
             let value_str = format!("{:.*}", decimals, reading.value);
             self.state.mqtt.publish_sensor(key, &value_str).await;
-
-            // Skip the attribute publish when min/max/avg/unit haven't moved.
-            // f64 exact comparison is fine here: HWiNFO returns the same
-            // bit-pattern when the underlying value didn't change.
-            #[allow(clippy::float_cmp)]
-            if let Some((min, max, avg, unit)) = last_attrs.get(key)
-                && *min == reading.min
-                && *max == reading.max
-                && *avg == reading.avg
-                && unit == &reading.unit
-            {
-                return;
-            }
-
-            let attributes = serde_json::json!({
-                "min": reading.min,
-                "max": reading.max,
-                "avg": reading.avg,
-                "unit": reading.unit,
-            });
-            self.state
-                .mqtt
-                .publish_sensor_attributes(key, &attributes)
-                .await;
-            last_attrs.insert(
-                key,
-                (reading.min, reading.max, reading.avg, reading.unit.clone()),
-            );
         }
     }
 }
