@@ -1724,7 +1724,7 @@ mod tests {
         let idle_attrs = serde_json::json!({"updating_games": Vec::<String>::new(), "count": 0});
         assert_eq!(idle_payload, "off");
         assert_eq!(idle_attrs["count"], 0);
-        assert!(idle_attrs["updating_games"].as_array().unwrap().is_empty());
+        assert_eq!(idle_attrs["updating_games"], serde_json::json!([]));
 
         // When updating: "on" + {"updating_games":["Counter-Strike 2"],"count":1}
         let updating_payload = "on";
@@ -1902,7 +1902,7 @@ mod tests {
             payload: "".to_string(),
         };
         assert_eq!(cmd.name, "Sleep");
-        assert!(cmd.payload.is_empty());
+        assert_eq!(cmd.payload, "");
     }
 
     #[test]
@@ -2558,7 +2558,7 @@ mod tests {
                 .expect("Command channel closed");
 
             assert_eq!(cmd.name, "Sleep");
-            assert!(cmd.payload.is_empty());
+            assert_eq!(cmd.payload, "");
         }
 
         // H1: a retained command delivery (broker replaying a stored message to a

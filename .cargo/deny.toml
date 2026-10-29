@@ -20,6 +20,14 @@ ignore = [
     # input - so neither DoS is reachable.
     "RUSTSEC-2026-0194", # quick-xml quadratic runtime on duplicate attributes
     "RUSTSEC-2026-0195", # quick-xml unbounded namespace-declaration allocation
+    # zbus 4/5 support crates. Our own zbus 5 (Wayland idle) is a cfg(unix) dep,
+    # so macOS compiles it too; rfd (via ashpd) and eframe (via accesskit/atspi)
+    # pull them in on Linux. Maintenance notices, not vulnerabilities: zbus 6
+    # absorbed these crates and none of our upstreams have moved to it yet.
+    # Revisit when rfd and eframe ship on zbus 6.
+    "RUSTSEC-2026-0370", # zvariant unmaintained
+    "RUSTSEC-2026-0371", # zbus_names unmaintained
+    "RUSTSEC-2026-0372", # zvariant_derive unmaintained
 ]
 
 [licenses]

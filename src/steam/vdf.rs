@@ -323,7 +323,7 @@ mod tests {
     #[test]
     fn test_empty_content() {
         assert!(extract_appmanifest_fields("").is_none());
-        assert!(extract_library_paths("").is_empty());
-        assert!(extract_library_info("").is_empty());
+        assert_eq!(extract_library_paths(""), [] as [String; 0]);
+        assert_eq!(extract_library_info(""), [] as [(String, Vec<u32>); 0]);
     }
 }

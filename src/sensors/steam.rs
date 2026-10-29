@@ -1021,7 +1021,7 @@ mod tests {
         });
         let obj = attrs.as_object().unwrap();
         assert_eq!(attrs["count"], 0);
-        assert!(attrs["updating_games"].as_array().unwrap().is_empty());
+        assert_eq!(attrs["updating_games"], serde_json::json!([]));
         assert_eq!(obj.len(), 2); // always has both fields even when idle
     }
 

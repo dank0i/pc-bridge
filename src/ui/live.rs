@@ -267,6 +267,6 @@ mod tests {
     fn test_an_empty_object_is_distinct_from_a_malformed_one() {
         // Both give an empty list, but the caller sets modules_seen only on a
         // real payload, which is what tells "no modules" from "no agent".
-        assert!(parse_modules("{}").is_empty());
+        assert_eq!(parse_modules("{}"), [] as [(String, String); 0]);
     }
 }

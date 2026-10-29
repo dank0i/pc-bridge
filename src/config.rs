@@ -1980,7 +1980,7 @@ mod tests {
         )
         .expect("minimal module must parse");
         assert_eq!(m.restart, RestartPolicy::OnFailure);
-        assert!(m.args.is_empty());
+        assert_eq!(m.args, [] as [String; 0]);
         assert!(!m.admin);
         assert!(m.working_dir.is_none());
     }
@@ -2024,7 +2024,7 @@ mod tests {
         }"#;
         let cfg: Config = serde_json::from_str(json).expect("must parse");
         assert!(!cfg.modules_enabled);
-        assert!(cfg.modules.is_empty());
+        assert_eq!(cfg.modules, [] as [ModuleDef; 0]);
         assert!(cfg.validate().is_ok());
     }
 
@@ -2113,10 +2113,9 @@ mod tests {
         );
 
         // No configured games means nothing to close.
-        assert!(
-            Config::default()
-                .matching_game_processes(["bf2042.exe"].iter().copied())
-                .is_empty()
+        assert_eq!(
+            Config::default().matching_game_processes(["bf2042.exe"].iter().copied()),
+            [] as [String; 0]
         );
 
         // A short pattern must NOT prefix-match an unrelated system process.
@@ -2222,7 +2221,7 @@ mod tests {
     fn test_minimal_config_new_fields() {
         let config = minimal_config();
         assert_eq!(config.update_channel, "stable");
-        assert!(config.disk_sensor_paths.is_empty());
+        assert_eq!(config.disk_sensor_paths, [] as [String; 0]);
         assert!(!config.features.gpu_sensor);
         assert!(!config.features.network_sensor);
         assert!(!config.features.disk_sensor);
@@ -2271,7 +2270,7 @@ mod tests {
         }"#;
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.update_channel, "stable");
-        assert!(config.disk_sensor_paths.is_empty());
+        assert_eq!(config.disk_sensor_paths, [] as [String; 0]);
         assert!(!config.features.gpu_sensor);
     }
 
@@ -3022,7 +3021,7 @@ mod tests {
         let config = Config::default();
         let json = r#"{"features": {"steam_libary": true, "running_game": true}}"#;
         let (top, features) = Config::unknown_keys(json, &config);
-        assert!(top.is_empty());
+        assert_eq!(top, [] as [String; 0]);
         assert_eq!(features, vec!["steam_libary".to_string()]);
     }
 
@@ -3032,7 +3031,7 @@ mod tests {
         let json = r#"{"device_nmae": "pc", "mqtt": {}}"#;
         let (top, features) = Config::unknown_keys(json, &config);
         assert_eq!(top, vec!["device_nmae".to_string()]);
-        assert!(features.is_empty());
+        assert_eq!(features, [] as [String; 0]);
     }
 
     /// `discord_keybind` and `removed_games` are skipped when empty, so a
@@ -3061,8 +3060,8 @@ mod tests {
     fn test_unknown_keys_ignores_unparseable_input() {
         let config = Config::default();
         let (top, features) = Config::unknown_keys("not json", &config);
-        assert!(top.is_empty());
-        assert!(features.is_empty());
+        assert_eq!(top, [] as [String; 0]);
+        assert_eq!(features, [] as [String; 0]);
     }
     // ===== feature flag registry =====
 
@@ -3160,7 +3159,7 @@ mod tests {
         assert_eq!(config.matching_game_processes(["foo.exe"]), vec!["foo.exe"]);
         assert_eq!(config.matching_game_processes(["FOO.EXE"]), vec!["FOO.EXE"]);
         // Not a substring match: `fo` must not select `foo`.
-        assert!(config.matching_game_processes(["fo"]).is_empty());
+        assert_eq!(config.matching_game_processes(["fo"]), [] as [String; 0]);
     }
 
     #[test]

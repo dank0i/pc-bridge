@@ -551,7 +551,7 @@ mod tests {
     #[test]
     fn test_cached_patterns_empty_map() {
         let cached = CachedGamePatterns::build(&HashMap::new());
-        assert!(cached.patterns.is_empty());
+        assert_eq!(cached.patterns, [] as [(String, String, String); 0]);
     }
 
     // ===== End-to-end: exact MQTT content verification =====
